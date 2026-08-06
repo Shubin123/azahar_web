@@ -6,11 +6,11 @@
  * (SharedArrayBuffer, Web Workers) that raw Node.js cannot provide.
  *
  * Usage:
- *   node tests/benchmark_browser.cjs [--frames N] [--warmup N] [--rom PATH] [--output PATH]
+ *   node tests/benchmark_browser.cjs [--duration-seconds N] [--warmup-seconds N] [--rom PATH] [--output PATH]
  *
  * Options:
- *   --frames N    Frames to benchmark (default: 300)
- *   --warmup N    Warmup frames before measuring (default: 10)
+ *   --duration-seconds N Benchmark duration after the title-screen warmup (default: 15)
+ *   --warmup-seconds N   Warmup duration before measuring (default: 30)
  *   --rom PATH    ROM file path (default: first .3ds/.3dsx/.cia in test_games/)
  *   --output PATH JSON output path (default: tests/benchmark_results.json)
  *   --repeat N    Repeat the benchmark N times (default: 3)
@@ -35,8 +35,11 @@ function argVal(flag, fallback) {
 }
 function argFlag(flag) { return argv.includes(flag); }
 
-const BENCH_FRAMES = Number(argVal('--frames', '300'));
-const WARMUP_FRAMES = Number(argVal('--warmup', '10'));
+// rAF is intentionally used for both phases. Durations, rather than frame
+// counts, are essential here: at 3 FPS a 1,800-frame warmup would take ten
+// minutes and measure a different workload from a 30-second title-screen run.
+const BENCH_SECONDS = Number(argVal('--duration-seconds', '15'));
+const WARMUP_SECONDS = Number(argVal('--warmup-seconds', '30'));
 const ROM_ARG = argVal('--rom', null);
 const OUTPUT_PATH = argVal('--output', path.join(__dirname, 'benchmark_results.json'));
 const REPEAT = Number(argVal('--repeat', '3'));
@@ -88,9 +91,9 @@ function createBenchServer(romPath) {
 }
 
 // ── Benchmark script (runs inside page.evaluate) ──────────────────
-async function runBenchInPage(page, romExt, benchFrames, warmupFrames, enableProfile) {
+async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableProfile) {
     return await page.evaluate(async ({
-        romExt_, benchFrames_, warmupFrames_, enableProfile_
+        romExt_, benchSeconds_, warmupSeconds_, enableProfile_
     }) => {
         const perf = performance;
         const Module = window.Module;
@@ -117,31 +120,65 @@ async function runBenchInPage(page, romExt, benchFrames, warmupFrames, enablePro
             return stats;
         }
 
-        function runFrames(count) {
-            const perFrame = [];
-            for (let i = 0; i < count; i++) {
-                const t0 = perf.now();
-                const r = Module._azahar_step_frame();
-                perFrame.push(perf.now() - t0);
-                if (r !== 0 && r !== 1) throw new Error(`step_frame returned ${r} at ${i}`);
-                if (r === 1) break;
-            }
-            const sorted = perFrame.slice().sort((a, b) => a - b);
-            const sum = perFrame.reduce((a, b) => a + b, 0);
-            const avg = sum / perFrame.length;
-            const len = perFrame.length;
-            const variance = perFrame.reduce((s, v) => s + (v - avg) ** 2, 0) / len;
-            return {
-                count: len, sum, avg,
-                fps: 1000 / avg,
-                stddev: Math.sqrt(variance),
-                min: sorted[0], max: sorted[len - 1],
-                p50: sorted[Math.floor(len * 0.50)],
-                p95: sorted[Math.floor(len * 0.95)],
-                p99: sorted[Math.floor(len * 0.99)],
-                p999: sorted[Math.floor(len * 0.999)],
-                perFrame,
-            };
+        function presentToUiCanvas() {
+            const target = document.querySelector('#canvas');
+            if (!target || !Module.canvas || Module.canvas === target) return;
+            target.getContext('2d').drawImage(Module.canvas, 0, 0, target.width, target.height);
+        }
+
+        // Execute through the same browser refresh loop and canvas-copy path
+        // as the UI. A synchronous WASM loop measures neither real browser
+        // pacing nor the presentation work users experience.
+        function runForDuration(seconds, samplePerf) {
+            return new Promise((resolve, reject) => {
+                const perFrame = [];
+                const samples = [];
+                let previousTick = null;
+                let nextSampleAt = 0;
+                const startedAt = perf.now();
+
+                function finish() {
+                    const sorted = perFrame.slice().sort((a, b) => a - b);
+                    const sum = perFrame.reduce((a, b) => a + b, 0);
+                    const len = perFrame.length;
+                    const avg = len ? sum / len : 0;
+                    const variance = len ? perFrame.reduce((s, v) => s + (v - avg) ** 2, 0) / len : 0;
+                    const elapsedMs = perf.now() - startedAt;
+                    resolve({
+                        count: len, sum, elapsedMs,
+                        // callback FPS is the browser-visible delivery rate;
+                        // callback work is reported separately from it.
+                        fps: len ? len * 1000 / elapsedMs : 0,
+                        avg, stddev: Math.sqrt(variance),
+                        min: sorted[0] || 0, max: sorted[len - 1] || 0,
+                        p50: sorted[Math.floor(len * 0.50)] || 0,
+                        p95: sorted[Math.floor(len * 0.95)] || 0,
+                        p99: sorted[Math.floor(len * 0.99)] || 0,
+                        p999: sorted[Math.floor(len * 0.999)] || 0,
+                        perFrame, samples,
+                    });
+                }
+
+                function tick(timestamp) {
+                    const t0 = perf.now();
+                    const result = Module._azahar_step_frame();
+                    presentToUiCanvas();
+                    perFrame.push(perf.now() - t0);
+                    if (samplePerf && timestamp >= nextSampleAt) {
+                        samples.push({frame: perFrame.length, elapsedMs: timestamp - startedAt, perf: readPerfStats()});
+                        nextSampleAt = timestamp + 1000;
+                    }
+                    previousTick = timestamp;
+                    if (result !== 0 && result !== 1) {
+                        reject(new Error(`step_frame returned ${result} at ${perFrame.length}`));
+                    } else if (result === 1 || timestamp - startedAt >= seconds * 1000) {
+                        finish();
+                    } else {
+                        requestAnimationFrame(tick);
+                    }
+                }
+                requestAnimationFrame(tick);
+            });
         }
 
         const runs = [];
@@ -163,26 +200,12 @@ async function runBenchInPage(page, romExt, benchFrames, warmupFrames, enablePro
 
             // Warmup
             let warmupStats = null;
-            if (warmupFrames_ > 0) warmupStats = runFrames(warmupFrames_);
+            if (warmupSeconds_ > 0) warmupStats = await runForDuration(warmupSeconds_, false);
 
-            // Benchmark
-            const bench = runFrames(benchFrames_);
+            // Benchmark the sustained post-warmup browser path.
+            const bench = await runForDuration(benchSeconds_, enableProfile_);
             const perfStats = readPerfStats();
             const heapAfter = Module.HEAPU8 ? Module.HEAPU8.length : 0;
-
-            // Optional profile
-            let samples = null;
-            if (enableProfile_) {
-                samples = [];
-                const iv = Math.max(1, Math.floor(benchFrames_ / 60));
-                for (let i = 0; i < benchFrames_; i++) {
-                    const ts = perf.now();
-                    const r = Module._azahar_step_frame();
-                    if (r !== 0 && r !== 1) throw new Error(`step ${i} returned ${r}`);
-                    if (r === 1) break;
-                    if (i % iv === 0) samples.push({ frame: i, elapsedMs: perf.now() - ts, perf: readPerfStats() });
-                }
-            }
 
             Module._azahar_shutdown();
 
@@ -199,14 +222,14 @@ async function runBenchInPage(page, romExt, benchFrames, warmupFrames, enablePro
                     perFrame: bench.perFrame,
                 },
                 perfStats,
-                profileSamples: samples,
+                profileSamples: bench.samples,
             });
         }
         return runs;
     }, {
         romExt_: path.extname(findRom()).toLowerCase() || '.bin',
-        benchFrames_: benchFrames,
-        warmupFrames_: warmupFrames,
+        benchSeconds_: benchSeconds,
+        warmupSeconds_: warmupSeconds,
         enableProfile_: enableProfile,
     });
 }
@@ -218,7 +241,7 @@ async function main() {
 
     console.log(`# Azahar Web Benchmark (browser)`);
     console.log(`# ROM: ${path.basename(romPath)} (${romSizeMB} MB)`);
-    console.log(`# Frames: ${BENCH_FRAMES}  Warmup: ${WARMUP_FRAMES}  Repeats: ${REPEAT}`);
+    console.log(`# Duration: ${BENCH_SECONDS}s  Warmup: ${WARMUP_SECONDS}s  Repeats: ${REPEAT}`);
     console.log(`# Profile: ${PROFILE ? 'on' : 'off'}`);
     console.log(`# Started: ${new Date().toISOString()}`);
     console.log('');
@@ -294,7 +317,7 @@ async function main() {
                 await page.evaluate(() => { if (Module._azahar_shutdown) Module._azahar_shutdown(); });
             }
 
-            const runs = await runBenchInPage(page, romExt, BENCH_FRAMES, WARMUP_FRAMES, PROFILE);
+            const runs = await runBenchInPage(page, romExt, BENCH_SECONDS, WARMUP_SECONDS, PROFILE);
 
             for (const run of runs) {
                 const b = run.bench;
@@ -342,8 +365,8 @@ async function main() {
             runner: 'browser',
             timestamp: new Date().toISOString(),
             config: {
-                benchFrames: BENCH_FRAMES,
-                warmupFrames: WARMUP_FRAMES,
+                benchSeconds: BENCH_SECONDS,
+                warmupSeconds: WARMUP_SECONDS,
                 repeats: REPEAT,
                 profileEnabled: PROFILE,
             },
