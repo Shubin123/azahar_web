@@ -46,7 +46,7 @@ The web build is verified through configuration, compilation, artifact generatio
 | 9 | WASM Memory Safety Setup | 5 | 5 | ✓ | ✓ | PASSED |
 | 10 | Memory Access Bounds Guard | 5 | 5 | ✓ | ✓ | PASSED |
 | 11 | WebGPU Overlay Alignment | 5 | 5 | ✓ | ✓ | PASSED |
-| 12 | E2E Test Suite & First-Frame Pass | 5 | 5 | ✓ | ✓ | PENDING |
+| 12 | E2E Test Suite & First-Frame Pass | 5 | 5 | ✓ | ✓ | VERIFIED |
 
 ## Real-World Game ROM Verification
 Available local test game resources located at `C:\Users\shubadub\Documents\azahar\test_games`:

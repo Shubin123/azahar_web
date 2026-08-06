@@ -32,7 +32,7 @@ Azahar WebAssembly port targeting modern web browsers via Emscripten.
 | M2 | Canvas Frontend & Loop Unrolling | `EmuWindow_SDL2_SW` adaptation, main loop unrolling, HTML5 canvas output | M1 | COMPLETE |
 | M3 | Web UI & ROM Loading Pipeline | Minimal HTML/JS frontend, MEMFS file mounting, C++ file loading API | M2 | COMPLETE |
 | M4 | WASM Memory Safety & WebGPU Overlay | Linker memory flags (512MB init, 2MB stack), out-of-bounds guards, WebGPU overlay link | M1, M2 | COMPLETE |
-| M5 | E2E Verification & First-Frame Rendering | 100% E2E test suite execution, ROM execution & first-frame rendering verification | M1, M2, M3, M4 | PENDING |
+| M5 | E2E Verification & First-Frame Rendering | 100% E2E test suite execution, ROM execution & first-frame rendering verification | M1, M2, M3, M4 | COMPLETE |
 
 ## Interface Contracts
 ### Web UI ↔ WebAssembly Module (`web/azahar.js` / `web/azahar.wasm`)
