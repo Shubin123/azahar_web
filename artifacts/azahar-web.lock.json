@@ -4,12 +4,12 @@
                    "repository":  "azahar/",
                    "remote":  "https://github.com/azahar-emu/azahar.git",
                    "upstream":  "origin/master",
-                   "commit":  "3f68c48b491b9b80c28971b1d88ddd758d3f7a12",
+                   "commit":  "26b30cc3df848d3e48fbb0847b294bb3dd1154d7",
                    "publishedToUpstream":  false,
                    "recoveryPatch":  {
-                                         "path":  "artifacts/source-patches/azahar-3f68c48b491b.patch",
+                                         "path":  "artifacts/source-patches/azahar-26b30cc3df84.patch",
                                          "baseCommit":  "dd65ef47491ff659b02ed1257411317ab4975f29",
-                                         "sha256":  "765364ed7438def0dcaa483fe003cc45c86f9fa666b2c668cc33f7846d91fd61"
+                                         "sha256":  "17d876cbfea883a807b0a6f6ae16ac4bff028763e242abb1687fe0f8debd2348"
                                      },
                    "submodules":  [
                                       {
