@@ -16,6 +16,7 @@
  *   --repeat N    Repeat the benchmark N times (default: 3)
  *   --profile     Sample perf counters every ~1s during benchmark
  *   --interactive Run in a visible Chrome window for real-display validation
+ *   --manual-start (interactive only) run until F8/click after reaching gameplay, then sample
  *
  * Environment:
  *   CHROME_PATH   Path to Chrome/Chromium executable
@@ -46,6 +47,7 @@ const OUTPUT_PATH = argVal('--output', path.join(__dirname, 'benchmark_results.j
 const REPEAT = Number(argVal('--repeat', '3'));
 const PROFILE = argFlag('--profile');
 const INTERACTIVE = argFlag('--interactive');
+const MANUAL_START = argFlag('--manual-start');
 
 const root = path.resolve(__dirname, '..');
 const testGamesDir = path.join(root, 'test_games');
@@ -93,9 +95,9 @@ function createBenchServer(romPath) {
 }
 
 // ── Benchmark script (runs inside page.evaluate) ──────────────────
-async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableProfile) {
+async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableProfile, manualStart) {
     return await page.evaluate(async ({
-        romExt_, benchSeconds_, warmupSeconds_, enableProfile_
+        romExt_, benchSeconds_, warmupSeconds_, enableProfile_, manualStart_
     }) => {
         const perf = performance;
         const Module = window.Module;
@@ -183,6 +185,47 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
             });
         }
 
+        // A game-specific scene cannot be inferred reliably from a generic
+        // splash/title framebuffer. In manual mode keep emulation running
+        // until the tester reaches real gameplay and explicitly starts the
+        // sample. F8 is deliberately not a default 3DS control binding.
+        function runUntilManualStart() {
+            return new Promise((resolve, reject) => {
+                const control = document.createElement('button');
+                control.id = 'azahar-benchmark-start';
+                control.textContent = 'Gameplay ready — start measured sample';
+                Object.assign(control.style, {
+                    position: 'fixed', right: '16px', bottom: '16px', zIndex: 10000,
+                    padding: '10px', background: '#e94560', color: 'white', border: '0',
+                    borderRadius: '4px', fontWeight: 'bold', cursor: 'pointer',
+                });
+                document.body.append(control);
+                let started = false;
+                const start = () => { started = true; };
+                control.addEventListener('click', start, {once: true});
+                window.addEventListener('keydown', event => {
+                    if (event.code === 'F8') start();
+                });
+                const tick = () => {
+                    const result = Module._azahar_step_frame();
+                    presentToUiCanvas();
+                    if (result !== 0 && result !== 1) {
+                        control.remove();
+                        reject(new Error(`step_frame returned ${result} before manual start`));
+                    } else if (result === 1) {
+                        control.remove();
+                        reject(new Error('emulation ended before manual start'));
+                    } else if (started) {
+                        control.remove();
+                        resolve();
+                    } else {
+                        requestAnimationFrame(tick);
+                    }
+                };
+                requestAnimationFrame(tick);
+            });
+        }
+
         const runs = [];
         for (let rep = 0; rep < 1; rep++) {
             // Init
@@ -202,7 +245,11 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
 
             // Warmup
             let warmupStats = null;
-            if (warmupSeconds_ > 0) warmupStats = await runForDuration(warmupSeconds_, false);
+            if (manualStart_) {
+                await runUntilManualStart();
+            } else if (warmupSeconds_ > 0) {
+                warmupStats = await runForDuration(warmupSeconds_, false);
+            }
 
             // Benchmark the sustained post-warmup browser path.
             const bench = await runForDuration(benchSeconds_, enableProfile_);
@@ -233,6 +280,7 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
         benchSeconds_: benchSeconds,
         warmupSeconds_: warmupSeconds,
         enableProfile_: enableProfile,
+        manualStart_: manualStart,
     });
 }
 
@@ -245,6 +293,7 @@ async function main() {
     console.log(`# ROM: ${path.basename(romPath)} (${romSizeMB} MB)`);
     console.log(`# Duration: ${BENCH_SECONDS}s  Warmup: ${WARMUP_SECONDS}s  Repeats: ${REPEAT}`);
     console.log(`# Mode: ${INTERACTIVE ? 'interactive browser' : 'headless diagnostic'}`);
+    console.log(`# Start: ${MANUAL_START ? 'manual gameplay marker (F8/click)' : 'timed warmup'}`);
     console.log(`# Profile: ${PROFILE ? 'on' : 'off'}`);
     console.log(`# Started: ${new Date().toISOString()}`);
     console.log('');
@@ -283,6 +332,9 @@ async function main() {
     const allRuns = [];
 
     try {
+        if (MANUAL_START && !INTERACTIVE) {
+            throw new Error('--manual-start requires --interactive');
+        }
         // Navigate and wait for WASM + emulator to be ready
         console.log('Loading page and initializing WASM...');
         await page.goto(webUrl, { waitUntil: 'networkidle0', timeout: 120000 });
@@ -333,7 +385,8 @@ async function main() {
                 await page.evaluate(() => { if (Module._azahar_shutdown) Module._azahar_shutdown(); });
             }
 
-            const runs = await runBenchInPage(page, romExt, BENCH_SECONDS, WARMUP_SECONDS, PROFILE);
+            const runs = await runBenchInPage(page, romExt, BENCH_SECONDS, WARMUP_SECONDS, PROFILE,
+                MANUAL_START);
 
             for (const run of runs) {
                 const b = run.bench;
@@ -387,6 +440,7 @@ async function main() {
                 repeats: REPEAT,
                 profileEnabled: PROFILE,
                 interactive: INTERACTIVE,
+                manualStart: MANUAL_START,
             },
             environment,
             aggregate,
