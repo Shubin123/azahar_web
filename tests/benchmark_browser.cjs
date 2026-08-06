@@ -1,7 +1,7 @@
 /**
  * Azahar WebAssembly Browser Benchmark (tests/benchmark_browser.cjs)
  *
- * Runs the WASM emulator benchmark in a headless Chrome instance via Puppeteer.
+ * Runs the WASM emulator benchmark in Chrome via Puppeteer.
  * Required because the Emscripten pthreads build needs a browser environment
  * (SharedArrayBuffer, Web Workers) that raw Node.js cannot provide.
  *
@@ -15,6 +15,7 @@
  *   --output PATH JSON output path (default: tests/benchmark_results.json)
  *   --repeat N    Repeat the benchmark N times (default: 3)
  *   --profile     Sample perf counters every ~1s during benchmark
+ *   --interactive Run in a visible Chrome window for real-display validation
  *
  * Environment:
  *   CHROME_PATH   Path to Chrome/Chromium executable
@@ -44,6 +45,7 @@ const ROM_ARG = argVal('--rom', null);
 const OUTPUT_PATH = argVal('--output', path.join(__dirname, 'benchmark_results.json'));
 const REPEAT = Number(argVal('--repeat', '3'));
 const PROFILE = argFlag('--profile');
+const INTERACTIVE = argFlag('--interactive');
 
 const root = path.resolve(__dirname, '..');
 const testGamesDir = path.join(root, 'test_games');
@@ -242,6 +244,7 @@ async function main() {
     console.log(`# Azahar Web Benchmark (browser)`);
     console.log(`# ROM: ${path.basename(romPath)} (${romSizeMB} MB)`);
     console.log(`# Duration: ${BENCH_SECONDS}s  Warmup: ${WARMUP_SECONDS}s  Repeats: ${REPEAT}`);
+    console.log(`# Mode: ${INTERACTIVE ? 'interactive browser' : 'headless diagnostic'}`);
     console.log(`# Profile: ${PROFILE ? 'on' : 'off'}`);
     console.log(`# Started: ${new Date().toISOString()}`);
     console.log('');
@@ -262,7 +265,10 @@ async function main() {
 
     // Launch browser
     const browser = await puppeteer.launch({
-        headless: 'new',
+        // Headless measurements are useful for repeatability but are not a
+        // substitute for the actual visible browser. Use --interactive when
+        // comparing against user-observed frame rates.
+        headless: INTERACTIVE ? false : 'new',
         executablePath: process.env.CHROME_PATH,
         args: ['--no-sandbox', '--disable-dev-shm-usage'],
         defaultViewport: { width: 1280, height: 900 },
@@ -289,6 +295,16 @@ async function main() {
             );
         }, { timeout: 120000 });
         console.log('   WASM and emulator ready.');
+
+        const environment = await page.evaluate(() => ({
+            userAgent: navigator.userAgent,
+            hardwareConcurrency: navigator.hardwareConcurrency,
+            devicePixelRatio: window.devicePixelRatio,
+            viewport: {width: innerWidth, height: innerHeight},
+            crossOriginIsolated,
+        }));
+        console.log(`   Browser: ${environment.hardwareConcurrency || 'unknown'} logical CPUs, `
+            + `${environment.viewport.width}x${environment.viewport.height}, DPR ${environment.devicePixelRatio}`);
 
         // Verify Module access
         const hasModule = await page.evaluate(() => {
@@ -325,7 +341,8 @@ async function main() {
                 if (run.warmup) {
                     console.log(`   Warmup: avg ${run.warmup.avg.toFixed(2)}ms/frame`);
                 }
-                console.log(`   Bench: avg ${b.avg.toFixed(2)}ms/frame, ${b.fps.toFixed(1)} FPS`);
+                console.log(`   Browser rAF: avg ${b.avg.toFixed(2)}ms/callback, `
+                    + `${b.fps.toFixed(1)} callbacks/s`);
                 console.log(`   Stats: p50=${b.p50.toFixed(2)}ms p95=${b.p95.toFixed(2)}ms `
                     + `p99=${b.p99.toFixed(2)}ms σ=${b.stddev.toFixed(2)}ms `
                     + `min=${b.min.toFixed(2)}ms max=${b.max.toFixed(2)}ms`);
@@ -369,7 +386,9 @@ async function main() {
                 warmupSeconds: WARMUP_SECONDS,
                 repeats: REPEAT,
                 profileEnabled: PROFILE,
+                interactive: INTERACTIVE,
             },
+            environment,
             aggregate,
             runs: allRuns,
         };
@@ -380,7 +399,8 @@ async function main() {
 
         console.log('');
         console.log(`## Aggregate (${allRuns.length} runs):`);
-        console.log(`   FPS: ${aggregate.avgFps.toFixed(1)} (best ${aggregate.bestFps.toFixed(1)}, worst ${aggregate.worstFps.toFixed(1)})`);
+        console.log(`   Browser callbacks/s: ${aggregate.avgFps.toFixed(1)} `
+            + `(best ${aggregate.bestFps.toFixed(1)}, worst ${aggregate.worstFps.toFixed(1)})`);
         console.log(`   Frame: ${aggregate.avgFrameMs.toFixed(2)}ms avg`);
         console.log(`   Written to: ${OUTPUT_PATH}`);
 
