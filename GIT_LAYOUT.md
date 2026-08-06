@@ -17,7 +17,7 @@ The upstream checkout owns its own `.gitmodules`, including Boost, Dynarmic, SDL
 
 ## Generated files
 
-`build-web/`, `build-integration/`, `_test_cmake/`, `tmp_test/`, and the generated `web/azahar.{js,wasm,html}` files are disposable. Recreate the WebAssembly build with:
+`build-web/`, `build-integration/`, `_test_cmake/`, `tmp_test/`, and the generated `web/azahar.{js,wasm,html}` files are disposable build outputs. Recreate the WebAssembly build with:
 
 ```powershell
 cmake -B build-web -S azahar -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DENABLE_QT=OFF -DENABLE_SDL2=ON -DENABLE_SDL2_FRONTEND=ON -DENABLE_SOFTWARE_RENDERER=ON -DENABLE_OPENGL=OFF -DENABLE_VULKAN=OFF -DENABLE_SCRIPTING=OFF -DENABLE_TESTS=OFF
@@ -25,6 +25,8 @@ build_web.bat
 ```
 
 `azahar_web_assets` automatically copies the current `azahar.js` and `azahar.wasm` to `web/` on every build, and `build_web.bat` verifies their hashes. Run `serve_web.bat` to serve that directory with the required isolation headers on port 9000; both `/` and `/web/index.html` are accepted. The generated artifacts remain ignored by the outer repository.
+
+`artifacts/azahar-web.lock.json` is the tracked provenance record for the last browser-verified build, and `artifacts/releases/` holds tracked, immutable checkpoint ZIPs. Follow [ARTIFACTS.md](ARTIFACTS.md) after every successful real-ROM checkpoint. This is intentionally separate from day-to-day generated files: the lock binds a known-good JS/WASM pair to the precise inner commit and recursive submodule revisions, while the ZIP allows the exact served pair to be restored without rebuilding.
 
 ## Two-repository rule
 

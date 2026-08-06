@@ -34,6 +34,7 @@
     let frameCount = 0;
     let runStartedAt = 0;
     let nextBootStatusAt = 0;
+    let rendererGraphicsDetected = false;
     let gameGraphicsDetected = false;
     let lastFpsAt = 0;
     let lastFrameCount = 0;
@@ -356,12 +357,33 @@
     function updateBootStatus(now) {
         if (now < nextBootStatusAt) return;
         nextBootStatusAt = now + 500;
-        if (!gameGraphicsDetected && wasmModule._azahar_framebuffer_nonblack_pixels) {
-            gameGraphicsDetected = wasmModule._azahar_framebuffer_nonblack_pixels() > 0;
+        if (!rendererGraphicsDetected && wasmModule._azahar_framebuffer_nonblack_pixels) {
+            rendererGraphicsDetected = wasmModule._azahar_framebuffer_nonblack_pixels() > 0;
+        }
+        if (rendererGraphicsDetected && !gameGraphicsDetected) {
+            // A non-black software framebuffer proves only that emulation and
+            // rasterization work. Confirm that those pixels arrived at the
+            // visible UI canvas before reporting graphics as detected.
+            const data = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+            const colors = new Set();
+            let nonBlackSamples = 0;
+            for (let index = 0; index < data.length; index += 64) {
+                const red = data[index];
+                const green = data[index + 1];
+                const blue = data[index + 2];
+                if (red || green || blue) {
+                    nonBlackSamples++;
+                    colors.add(`${red},${green},${blue}`);
+                }
+            }
+            gameGraphicsDetected = nonBlackSamples >= 16 && colors.size >= 2;
         }
         if (gameGraphicsDetected) {
             hideProgress();
-            setStatus(`Running. Game graphics detected after ${((now - runStartedAt) / 1000).toFixed(1)}s`, 'ok');
+            setStatus(`Running. Visible game graphics detected after ${((now - runStartedAt) / 1000).toFixed(1)}s`, 'ok');
+        } else if (rendererGraphicsDetected) {
+            showProgress(null);
+            setStatus(`Renderer graphics ready; waiting for canvas presentation... ${((now - runStartedAt) / 1000).toFixed(1)}s`, 'ok');
         } else {
             showProgress(null);
             setStatus(`Booting game... ${((now - runStartedAt) / 1000).toFixed(1)}s (step ${frameCount})`, 'ok');
@@ -374,6 +396,7 @@
         running = true;
         runStartedAt = performance.now();
         nextBootStatusAt = runStartedAt;
+        rendererGraphicsDetected = false;
         gameGraphicsDetected = false;
         lastFpsAt = 0;
         lastFrameCount = 0;

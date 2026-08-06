@@ -4,12 +4,75 @@ const {listen: listenWeb} = require('../web/server.cjs');
 
 const root = path.resolve(__dirname, '..');
 const romPath = process.env.AZAHAR_ROM_PATH ||
-    path.join(root, 'test_games', 'Super Mario 3D Land (Europe) (EnFrDeEsIt) (Demo) (Kiosk).cia');
-const realRomBootMs = Number.parseInt(process.env.AZAHAR_REAL_ROM_BOOT_MS || '0', 10) || 0;
+    path.join(root, 'test_games', 'Super Mario 3D Land (Europe) (En,Fr,De,Es,It) (Demo) (Kiosk).3ds');
+// The visible-frame gate is deliberately enabled by default. Set this to 0
+// only when running a fast, loader-only diagnostic with another fixture.
+const realRomBootMs = process.env.AZAHAR_REAL_ROM_BOOT_MS === undefined ? 35000 :
+    Number.parseInt(process.env.AZAHAR_REAL_ROM_BOOT_MS, 10);
 const capturePath = process.env.AZAHAR_CAPTURE_PATH;
 
 async function waitForStatus(page, predicate, timeout = 120000) {
     await page.waitForFunction(predicate, {timeout});
+}
+
+// Canvas readback observes the backing store, not the browser compositor. It
+// can therefore succeed even while the SDL/Emscripten presentation path leaves
+// the user-visible canvas black (and it is unavailable when WebGL owns the
+// canvas). Decode a clipped browser screenshot instead: these are the pixels
+// a user sees. Quantising colours avoids counting anti-aliased variants alone.
+async function readVisibleCanvasStats(page) {
+    const clip = await page.$eval('#canvas', canvas => {
+        const rect = canvas.getBoundingClientRect();
+        return {x: rect.x, y: rect.y, width: rect.width, height: rect.height};
+    });
+    const screenshot = await page.screenshot({encoding: 'base64', clip});
+    return page.evaluate(async encoded => {
+        const image = new Image();
+        image.src = `data:image/png;base64,${encoded}`;
+        await image.decode();
+
+        const sample = document.createElement('canvas');
+        sample.width = image.naturalWidth;
+        sample.height = image.naturalHeight;
+        const context = sample.getContext('2d', {willReadFrequently: true});
+        context.drawImage(image, 0, 0);
+        const data = context.getImageData(0, 0, sample.width, sample.height).data;
+        const colorCounts = new Map();
+        let nonBlackSamples = 0;
+        let colorfulSamples = 0;
+        let samples = 0;
+
+        // Cover the full visible canvas while keeping analysis inexpensive.
+        for (let index = 0; index < data.length; index += 16) {
+            const red = data[index];
+            const green = data[index + 1];
+            const blue = data[index + 2];
+            const maximum = Math.max(red, green, blue);
+            const minimum = Math.min(red, green, blue);
+            if (maximum > 8) nonBlackSamples++;
+            if (maximum - minimum > 24) colorfulSamples++;
+            const color = (red >> 4) << 8 | (green >> 4) << 4 | (blue >> 4);
+            colorCounts.set(color, (colorCounts.get(color) || 0) + 1);
+            samples++;
+        }
+        let entropy = 0;
+        for (const count of colorCounts.values()) {
+            const probability = count / samples;
+            entropy -= probability * Math.log2(probability);
+        }
+        return {width: sample.width, height: sample.height, samples, nonBlackSamples,
+            nonBlackCoverage: nonBlackSamples / samples, colorfulSamples,
+            colorfulCoverage: colorfulSamples / samples, paletteSize: colorCounts.size, entropy};
+    }, screenshot);
+}
+
+function hasVisibleGameFrame(stats) {
+    // A CSS-black canvas still contributes a thin grey border. These coverage
+    // and entropy thresholds deliberately reject that low-information image,
+    // while accepting the Mario title/splash frames captured by the working
+    // build. Renderer state remains an independent diagnostic below.
+    return stats.nonBlackCoverage >= 0.03 && stats.colorfulCoverage >= 0.005 &&
+        stats.paletteSize >= 8 && stats.entropy >= 0.75;
 }
 
 async function main() {
@@ -77,36 +140,27 @@ async function main() {
         }
 
         // A real title takes appreciably longer than a synthetic fixture to
-        // initialize. This opt-in path verifies a visible, non-black game
-        // framebuffer without making the normal smoke test slow.
+        // initialize. This gate verifies both the renderer's framebuffer and
+        // the composited canvas pixels; canvas backing-store readback alone
+        // misses a broken SDL-to-browser presentation path.
         let visibleFrame = null;
         if (realRomBootMs > 0) {
-            await page.waitForFunction(() => {
-                if (typeof Module === 'undefined' || !Module._azahar_framebuffer_nonblack_pixels ||
-                    Module._azahar_framebuffer_nonblack_pixels() === 0) return false;
-                const canvas = document.querySelector('#canvas');
-                const data = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
-                const colors = new Set();
-                for (let index = 0; index < data.length; index += 32) {
-                    colors.add(`${data[index]},${data[index + 1]},${data[index + 2]}`);
-                }
-                return colors.size >= 16;
-            }, {timeout: realRomBootMs, polling: 250});
-            visibleFrame = await page.evaluate(startMs => {
-                const canvas = document.querySelector('#canvas');
-                const data = canvas.getContext('2d')
-                    .getImageData(0, 0, canvas.width, canvas.height).data;
-                const colors = new Set();
-                for (let index = 0; index < data.length; index += 32) {
-                    colors.add(`${data[index]},${data[index + 1]},${data[index + 2]}`);
-                }
-                return {
-                    elapsedMs: performance.now() - startMs,
-                    colors: colors.size,
-                    nonblackPixels: Module._azahar_framebuffer_nonblack_pixels(),
+            const visualDeadline = Date.now() + realRomBootMs;
+            do {
+                const rendererNonblackPixels = await page.evaluate(() =>
+                    typeof Module !== 'undefined' && Module._azahar_framebuffer_nonblack_pixels ?
+                        Module._azahar_framebuffer_nonblack_pixels() : -1);
+                visibleFrame = {
+                    elapsedMs: await page.evaluate(startMs => performance.now() - startMs,
+                        emulationStartMs),
+                    rendererNonblackPixels,
+                    ...(await readVisibleCanvasStats(page)),
                 };
-            }, emulationStartMs);
-            if (visibleFrame.nonblackPixels === 0 || visibleFrame.colors < 2) {
+                if (rendererNonblackPixels > 0 && hasVisibleGameFrame(visibleFrame)) break;
+                await new Promise(resolve => setTimeout(resolve, 500));
+            } while (Date.now() < visualDeadline);
+
+            if (visibleFrame.rendererNonblackPixels <= 0 || !hasVisibleGameFrame(visibleFrame)) {
                 throw new Error(`No visible game framebuffer after ${realRomBootMs} ms: ` +
                     JSON.stringify(visibleFrame));
             }
@@ -121,20 +175,7 @@ async function main() {
             throw new Error(`Continuous emulation did not advance: ${finalStatus}`);
         }
 
-        const canvasStats = await page.$eval('#canvas', canvas => {
-            const data = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
-            let nonZero = 0;
-            let alpha = 0;
-            for (let index = 0; index < data.length; index += 4) {
-                if (data[index] || data[index + 1] || data[index + 2] || data[index + 3]) nonZero++;
-                if (data[index + 3]) alpha++;
-            }
-            return {width: canvas.width, height: canvas.height, nonZero, alpha};
-        });
-
-        if (canvasStats.nonZero === 0 || canvasStats.alpha === 0) {
-            throw new Error(`Canvas remained blank: ${JSON.stringify(canvasStats)}`);
-        }
+        const canvasStats = await readVisibleCanvasStats(page);
         if (consoleErrors.length || pageErrors.length) {
             throw new Error(`Browser errors: ${JSON.stringify({consoleErrors, pageErrors})}`);
         }

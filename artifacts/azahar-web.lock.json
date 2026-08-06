@@ -1,0 +1,335 @@
+﻿{
+    "schemaVersion":  1,
+    "source":  {
+                   "repository":  "azahar/",
+                   "remote":  "https://github.com/azahar-emu/azahar.git",
+                   "upstream":  "origin/master",
+                   "commit":  "88bd9706fa10914a4868714e89d25c5e7e770495",
+                   "publishedToUpstream":  false,
+                   "recoveryPatch":  {
+                                         "path":  "artifacts/source-patches/azahar-88bd9706fa10.patch",
+                                         "baseCommit":  "dd65ef47491ff659b02ed1257411317ab4975f29",
+                                         "sha256":  "f7be85a137d9d5721037ff5ea81b946f96516916cb1deabf8373e4821161d2a8"
+                                     },
+                   "submodules":  [
+                                      {
+                                          "state":  " ",
+                                          "commit":  "eadcdfb84b6f3b95734e867d99fe16a9e8db717f",
+                                          "path":  "dist/compatibility_list",
+                                          "description":  "heads/master"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "2c82bd787302398bcae990e3c9ab2b451284f4ca",
+                                          "path":  "externals/boost",
+                                          "description":  "heads/master"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "914aeecfe23b1e16af6ea675a4fb5dbd5a5b8d0a",
+                                          "path":  "externals/catch2",
+                                          "description":  "v3.8.0"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "4a970bc302d671476122cbc6b43cc89fbf4a96ec",
+                                          "path":  "externals/cpp-jwt",
+                                          "description":  "v1.4-20-g4a970bc"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "60f81a77e0c9a0e7ffc1ca1bc438ddfa2e43b78e",
+                                          "path":  "externals/cryptopp",
+                                          "description":  "CRYPTOPP_8_9_0-19-g60f81a77"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "00a151f8489daaa32434ab1f340e6750793ddf0c",
+                                          "path":  "externals/cryptopp-cmake",
+                                          "description":  "CRYPTOPP_8_9_0-20-g00a151f"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "832fcf38e600bf80b4b728a3e0227403088d992c",
+                                          "path":  "externals/cubeb",
+                                          "description":  "cubeb-0.2-1555-g832fcf3"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "aab6948fa863bc1cbe5d0850bc46b9ef02ed4c1a",
+                                          "path":  "externals/cubeb/cmake/sanitizers-cmake",
+                                          "description":  "aab6948"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "40412d85124f7c6f3d88454583c4633e5e10fc8c",
+                                          "path":  "externals/cubeb/googletest",
+                                          "description":  "release-1.8.0-3327-g40412d85"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "8f39e9fc3ad4868e6ff7188c52575087a1a02777",
+                                          "path":  "externals/cubeb/src/cubeb-coreaudio-rs",
+                                          "description":  "remotes/origin/firefox-100-169-g8f39e9f"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "6bac666467e4a37cf057f0e17e8c9e8a024b060b",
+                                          "path":  "externals/cubeb/src/cubeb-pulse-rs",
+                                          "description":  "remotes/origin/refactor-to-cubeb-rs-0.4-97-g6bac666"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "c3ca8febc2457ab5c581604f3236a8a511fc2e45",
+                                          "path":  "externals/dds-ktx",
+                                          "description":  "v1.1-13-gc3ca8fe"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "cb50201fc09290cd078c7ab27917504491f7f96a",
+                                          "path":  "externals/discord-rpc",
+                                          "description":  "heads/master"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "526227eebe1efff3fb14dbf494b9c5b44c2e9c1f",
+                                          "path":  "externals/dynarmic",
+                                          "description":  "heads/master"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "8bd0f7538b9ed7bedf90e789ffbd9eaeb484b28d",
+                                          "path":  "externals/dynarmic/externals/biscuit",
+                                          "description":  "v0.16.0-4-g8bd0f75"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "76f70b1403dbc0781216f49e20e45b71f7eccdd8",
+                                          "path":  "externals/dynarmic/externals/catch",
+                                          "description":  "v3.8.0-1-g76f70b14"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "7b273fbb541c7c9058800bc613f4291274b2d26e",
+                                          "path":  "externals/dynarmic/externals/fmt",
+                                          "description":  "11.1.4-12-g7b273fbb"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "5fc4beaf331037649b10625736b41365defb4f50",
+                                          "path":  "externals/dynarmic/externals/mcl",
+                                          "description":  "0.1.14"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "94c726ce0338b054eb8cb5ea91de8fe6c19f4392",
+                                          "path":  "externals/dynarmic/externals/oaknut",
+                                          "description":  "2.0.2-5-g94c726c"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "054ec5ad67440fcd65e0497e5a27ef31f53fcc7f",
+                                          "path":  "externals/dynarmic/externals/robin-map",
+                                          "description":  "v1.3.0-6-g054ec5a"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "860169b08e8f0f104fd483222659871b4c8e70cd",
+                                          "path":  "externals/dynarmic/externals/xbyak",
+                                          "description":  "v3.71-1479-g860169b"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "0b2432ced0884fd152b471d97ecf0258ff4d859f",
+                                          "path":  "externals/dynarmic/externals/zycore",
+                                          "description":  "v1.5.2"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "bffbb610cfea643b98e87658b9058382f7522807",
+                                          "path":  "externals/dynarmic/externals/zydis",
+                                          "description":  "v4.0.0-64-gbffbb61"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "38d4f0285e6157ee840ea82a9b90aba71c8a705d",
+                                          "path":  "externals/dynarmic/externals/zydis/dependencies/zycore",
+                                          "description":  "v1.5.0-4-g38d4f02"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "2662c0de09e36f2a2030ccc2c528a3e4c9e8138a",
+                                          "path":  "externals/enet",
+                                          "description":  "v1.3.15-47-g2662c0d"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "216f00e8ddba6f2c64caf481a04f1ddd78b93e78",
+                                          "path":  "externals/faad2/faad2",
+                                          "description":  "2.11.1"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "e424e3f2e607da02742f73db84873b8084fc714c",
+                                          "path":  "externals/fmt",
+                                          "description":  "12.0.0"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "fc9889c889561c5882e83819dcaffef5ed45529b",
+                                          "path":  "externals/glslang",
+                                          "description":  "11.1.0-1230-gfc9889c8"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "5cc5e2c24642513aaa5b19126aad42d0e4e0923e",
+                                          "path":  "externals/inih/inih",
+                                          "description":  "r58"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "8fae8ce254dfc1344527e05301e43f37dea2df80",
+                                          "path":  "externals/libadrenotools",
+                                          "description":  "v1.0-18-g8fae8ce"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "aa3975893d83ef1bc84c321ec60c65fbf1287887",
+                                          "path":  "externals/libadrenotools/lib/linkernsbypass",
+                                          "description":  "heads/master"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "3b3e28dbe6d033395ce2967fa8030825e7b89de7",
+                                          "path":  "externals/library-headers",
+                                          "description":  "3b3e28d"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "e4333898279e4a6e3e195e3737bcc354aa03ac22",
+                                          "path":  "externals/libressl",
+                                          "description":  "heads/master-1-ge433389"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "d52e355daa09f17ce64819122cb067b8a2ee0d4b",
+                                          "path":  "externals/libusb/libusb",
+                                          "description":  "v1.0.23-rc1-517-gd52e355d"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "6f729fbe658a40dfd993fa8b22bd612bb17cde5c",
+                                          "path":  "externals/libyuv",
+                                          "description":  "6f729fbe"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "0b1d9ccfc2093e5d6620cd9a11d03ee6ff6705f5",
+                                          "path":  "externals/lodepng/lodepng",
+                                          "description":  "0b1d9cc"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "f4d8659decbfe5d234f04134b5002b82dc515a44",
+                                          "path":  "externals/nihstro",
+                                          "description":  "heads/master"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "6b1d57ea7ed4882d32a91eeaa6557b0ecb4da152",
+                                          "path":  "externals/oaknut",
+                                          "description":  "2.0.2"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "7f309dcbc5e45a52843df27d3ea1e39e0d98e49a",
+                                          "path":  "externals/openal-soft",
+                                          "description":  "1.24.1-1-g7f309dcbc"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "5d249570393f7a37e037abf22cd6012a4cc56a71",
+                                          "path":  "externals/sdl2/SDL",
+                                          "description":  "release-2.32.10"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "37d49d2aa4c0a62f872720d6e5f2eaf90b2c95fa",
+                                          "path":  "externals/sirit/sirit",
+                                          "description":  "37d49d2"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "3f17b2af6784bfa2c5aa5dbb8e0e74a607dd8b3b",
+                                          "path":  "externals/sirit/sirit/externals/SPIRV-Headers",
+                                          "description":  "1.5.4.raytracing.fixed-386-g3f17b2a"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "9ef8458d8561d9471dd20e9619e3be4cfe564796",
+                                          "path":  "externals/soundtouch",
+                                          "description":  "2.3.3-9-g9ef8458"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "aa6cef192b8e693916eb713e7a9ccadf06062ceb",
+                                          "path":  "externals/spirv-headers",
+                                          "description":  "1.5.4.raytracing.fixed-411-gaa6cef1"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "a62abcb402009b9ca5975e6167c09f237f630e0e",
+                                          "path":  "externals/spirv-tools",
+                                          "description":  "v2022.4-759-ga62abcb4"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "3d697a18df504f4677b65129d9ab14c7c597e3eb",
+                                          "path":  "externals/teakra",
+                                          "description":  "heads/master"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "c788c52156f3ef7bc7ab769cb03c110a53ac8fcb",
+                                          "path":  "externals/vma",
+                                          "description":  "v2.1.0-933-gc788c52"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "409c16be502e39fe70dd6fe2d9ad4842ef2c9a53",
+                                          "path":  "externals/vulkan-headers",
+                                          "description":  "v1.4.313"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "0d67fd1530016b7c56f3cd74b3fca920f4c3e2b4",
+                                          "path":  "externals/xbyak",
+                                          "description":  "v3.71-1460-g0d67fd1"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "e626a72bc2321cd320e953a0ccf1584cad60f363",
+                                          "path":  "externals/xxHash",
+                                          "description":  "v0.8.3"
+                                      },
+                                      {
+                                          "state":  " ",
+                                          "commit":  "f8745da6ff1ad1e7bab384bd1f9d742439278e99",
+                                          "path":  "externals/zstd",
+                                          "description":  "v1.5.7"
+                                      }
+                                  ]
+               },
+    "artifacts":  {
+                      "azahar.js":  {
+                                        "path":  "web/azahar.js",
+                                        "bytes":  2915625,
+                                        "sha256":  "54ecab181161d1e2eb7969a8ced17a2b5ff790fd22fb3f621ac8bd17dd7cff8c"
+                                    },
+                      "azahar.wasm":  {
+                                          "path":  "web/azahar.wasm",
+                                          "bytes":  10610650,
+                                          "sha256":  "32f1c122c08e5afb482523750f12396c60c079d7f73ee56117d67fbfa16ee3dc"
+                                      }
+                  }
+}
