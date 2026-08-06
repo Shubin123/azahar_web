@@ -12,7 +12,7 @@ The web build is verified through configuration, compilation, artifact generatio
 - `node tests/web_artifact_smoke.cjs` passes against both `web/` and `build-web/bin/Release/`.
 - The local server supplies COOP/COEP headers, and the browser test confirms `crossOriginIsolated` before initializing the pthread-enabled module.
 - Puppeteer loads the served UI, initializes real WASM, mounts a decrypted `.3ds` without an unnecessary second heap copy, and preserves its extension as `/rom.3ds` for loader selection.
-- The real-ROM regression steps one frame, runs the continuous loop, checks the canvas, and fails on browser console/page errors. The verified kiosk-demo pass stopped cleanly at frame 58.
+- The real-ROM regression steps one frame, runs the continuous loop, checks the canvas, and fails on browser console/page errors. Its opt-in extended boot check verified the kiosk-demo title framebuffer: 162,999 non-black pixels and 942 sampled colors at frame 1,349, without browser console or page errors.
 - The encrypted CIA fixture is rejected with the explicit encrypted-ROM status; that is an expected negative result, not a threading or loader regression.
 
 ## Pending
@@ -33,6 +33,8 @@ $env:AZAHAR_ROM_PATH = "C:\path\to\decrypted-game.3ds"
 node tests/browser_regression.cjs
 npm uninstall --no-save puppeteer-core
 ```
+
+To require a visible game framebuffer (rather than only the fast smoke checks), add `AZAHAR_REAL_ROM_BOOT_MS=45000`. `AZAHAR_CAPTURE_PATH` optionally writes one final diagnostic image after that check succeeds.
 
 The test starts `web/server.cjs` itself unless `AZAHAR_WEB_URL` is provided. That server is required because pthreads need cross-origin isolation.
 

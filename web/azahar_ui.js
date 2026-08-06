@@ -88,6 +88,17 @@
             // script so it does not create an unbound canvas target.
             window.Module = window.Module || {};
             window.Module.canvas = canvas;
+            // Keep native frontend/core diagnostics visible in the browser UI.
+            // Emscripten invokes these hooks for stdout and stderr after the
+            // generated runtime starts, which lets real-ROM testing expose
+            // service/configuration failures instead of appearing as a
+            // permanently black canvas.
+            window.Module.print = function (message) {
+                log(`[native] ${message}`);
+            };
+            window.Module.printErr = function (message) {
+                log(`[native] ${message}`);
+            };
             script.onload = function () {
                 // Emscripten-generated Module object
                 if (typeof Module !== 'undefined') {

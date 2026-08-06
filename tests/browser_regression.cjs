@@ -5,6 +5,8 @@ const {listen: listenWeb} = require('../web/server.cjs');
 const root = path.resolve(__dirname, '..');
 const romPath = process.env.AZAHAR_ROM_PATH ||
     path.join(root, 'test_games', 'Super Mario 3D Land (Europe) (EnFrDeEsIt) (Demo) (Kiosk).cia');
+const realRomBootMs = Number.parseInt(process.env.AZAHAR_REAL_ROM_BOOT_MS || '0', 10) || 0;
+const capturePath = process.env.AZAHAR_CAPTURE_PATH;
 
 async function waitForStatus(page, predicate, timeout = 120000) {
     await page.waitForFunction(predicate, {timeout});
@@ -76,6 +78,33 @@ async function main() {
         if (!runningStatus.startsWith('Running')) {
             throw new Error(`Continuous emulation failed to start: ${runningStatus}`);
         }
+
+        // A real title takes appreciably longer than a synthetic fixture to
+        // initialize. This opt-in path verifies a visible, non-black game
+        // framebuffer without making the normal smoke test slow.
+        let visibleFrame = null;
+        if (realRomBootMs > 0) {
+            await new Promise(resolve => setTimeout(resolve, realRomBootMs));
+            visibleFrame = await page.evaluate(() => {
+                const canvas = document.querySelector('#canvas');
+                const data = canvas.getContext('2d')
+                    .getImageData(0, 0, canvas.width, canvas.height).data;
+                const colors = new Set();
+                for (let index = 0; index < data.length; index += 32) {
+                    colors.add(`${data[index]},${data[index + 1]},${data[index + 2]}`);
+                }
+                return {
+                    colors: colors.size,
+                    nonblackPixels: Module._azahar_framebuffer_nonblack_pixels(),
+                };
+            });
+            if (visibleFrame.nonblackPixels === 0 || visibleFrame.colors < 2) {
+                throw new Error(`No visible game framebuffer after ${realRomBootMs} ms: ` +
+                    JSON.stringify(visibleFrame));
+            }
+            if (capturePath) await page.screenshot({path: capturePath, fullPage: true});
+        }
+
         await page.click('#btn-stop');
         await waitForStatus(page, () => /^Stopped at frame \d+$/.test(document.querySelector('#status').textContent));
         const finalStatus = await page.$eval('#status', element => element.textContent);
@@ -109,6 +138,7 @@ async function main() {
             loadStatus,
             finalStatus,
             canvasStats,
+            visibleFrame,
         }));
     } catch (error) {
         const diagnostics = await page.evaluate(() => ({
