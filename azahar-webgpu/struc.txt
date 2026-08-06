@@ -1,0 +1,50 @@
+azahar-webgpu/                    # Your overlay directory (outside azahar/)
+├── README.md                      # Your documentation
+├── CMakeLists.txt                 # Top-level CMake that includes azahar
+├── src/                           # WebGPU-specific code
+│   ├── webgpu_core/              # Core WebGPU wrapper
+│   │   ├── webgpu_device.h
+│   │   ├── webgpu_device.cpp
+│   │   ├── webgpu_buffer.h
+│   │   ├── webgpu_buffer.cpp
+│   │   ├── webgpu_shader.h
+│   │   ├── webgpu_shader.cpp
+│   │   ├── webgpu_texture.h
+│   │   ├── webgpu_texture.cpp
+│   │   ├── webgpu_pipeline.h
+│   │   └── webgpu_pipeline.cpp
+│   ├── renderer/                  # Renderer implementation
+│   │   ├── renderer_webgpu.h
+│   │   └── renderer_webgpu.cpp
+│   └── shaders/                   # WGSL shaders
+│       ├── screen_vertex.wgsl
+│       ├── screen_fragment.wgsl
+│       └── convert_texture.wgsl
+├── tests/                         # Unit tests for WebGPU components
+│   ├── test_device.cpp
+│   ├── test_buffer.cpp
+│   ├── test_shader.cpp
+│   ├── test_texture.cpp
+│   ├── test_pipeline.cpp
+│   └── test_renderer.cpp
+├── examples/                      # Standalone examples
+│   ├── 01_triangle/              # Simple triangle test
+│   ├── 02_texture/               # Texture loading test
+│   ├── 03_compute/               # Compute shader test
+│   └── 04_integration/           # Integration with Azahar
+├── scripts/                       # Build and test scripts
+│   ├── build-desktop.sh
+│   ├── build-web.sh
+│   ├── run-tests.sh
+│   └── setup.sh
+├── cmake/                         # CMake modules
+│   ├── WebGPU.cmake
+│   └── Testing.cmake
+└── external/                      # External dependencies
+    ├── dawn/                     # Git submodule (optional)
+    └── googletest/               # Git submodule
+
+azahar/                           # Original Azahar repo (unchanged!)
+├── src/
+├── CMakeLists.txt
+└── ...

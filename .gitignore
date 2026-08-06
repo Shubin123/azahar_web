@@ -1,0 +1,42 @@
+# The outer repository tracks the web proof-of-concept, tests, build scripts,
+# and documentation. The full emulator source is the upstream Git checkout
+# in azahar/ and must not be vendored into this repository.
+/azahar/
+# Keep the overlay's source/build files, but never vendor its copied upstream
+# dependencies or generated output.
+/azahar-webgpu/externals/
+/azahar-webgpu/build-*/
+/azahar-webgpu/src/fmt/
+
+# Generated build trees and temporary CMake probes
+/build-web/
+/build-integration/
+/_test_cmake/
+/tmp_test/
+
+# Local ROM/test data (large and license-sensitive)
+/test_games/
+
+# Generated WebAssembly deployment artifacts; keep web/index.html and
+# web/azahar_ui.js under version control and regenerate these files locally.
+/web/azahar.html
+/web/azahar.js
+/web/azahar.wasm
+
+# Generated test reports and local traces
+/tests/e2e/test_results.json
+/tests/e2e/latest_run.tap
+/trace.log
+
+# Agent/editor/local environment state
+/.agents/
+/.codex/
+.vscode/
+.idea/
+*.swp
+*.pyc
+__pycache__/
+
+# OS files
+Thumbs.db
+.DS_Store

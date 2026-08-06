@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Azahar Web — Nintendo 3DS Emulator</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #1a1a2e;
+            color: #e0e0e0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            padding: 16px;
+        }
+        header {
+            text-align: center;
+            margin-bottom: 16px;
+        }
+        header h1 { font-size: 1.5rem; color: #ff6b6b; }
+        header p { font-size: 0.85rem; color: #888; }
+
+        .main-layout {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 16px;
+            max-width: 1100px;
+            width: 100%;
+            justify-content: center;
+        }
+        .canvas-panel {
+            flex: 1 1 auto;
+            min-width: 400px;
+            max-width: 800px;
+            text-align: center;
+        }
+        canvas {
+            border: 2px solid #333;
+            border-radius: 4px;
+            background: #000;
+            width: 100%;
+            image-rendering: pixelated;
+        }
+        .controls-panel {
+            flex: 0 0 280px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .card {
+            background: #16213e;
+            border: 1px solid #0f3460;
+            border-radius: 8px;
+            padding: 16px;
+        }
+        .card h2 {
+            font-size: 1rem;
+            margin-bottom: 10px;
+            color: #e94560;
+            border-bottom: 1px solid #0f3460;
+            padding-bottom: 6px;
+        }
+        .btn {
+            display: inline-block;
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            font-weight: 600;
+            text-align: center;
+            width: 100%;
+            margin-bottom: 6px;
+            transition: opacity 0.2s;
+        }
+        .btn:hover { opacity: 0.85; }
+        .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .btn-primary { background: #e94560; color: #fff; }
+        .btn-secondary { background: #0f3460; color: #e0e0e0; }
+        .btn-success { background: #2d6a4f; color: #fff; }
+
+        input[type="file"] {
+            display: none;
+        }
+        .file-label {
+            display: block;
+            padding: 8px 16px;
+            border: 2px dashed #0f3460;
+            border-radius: 4px;
+            cursor: pointer;
+            text-align: center;
+            font-size: 0.9rem;
+            margin-bottom: 6px;
+            word-break: break-all;
+        }
+        .file-label:hover { border-color: #e94560; }
+
+        #status {
+            font-size: 0.8rem;
+            color: #aaa;
+            min-height: 1.2em;
+            word-break: break-all;
+        }
+        #status.error { color: #ff6b6b; }
+        #status.ok { color: #6bff6b; }
+
+        .log-box {
+            background: #0a0a1a;
+            border: 1px solid #333;
+            border-radius: 4px;
+            padding: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.7rem;
+            color: #aaa;
+            max-height: 120px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>🎮 Azahar Web</h1>
+        <p>Nintendo 3DS Emulator — WebAssembly Proof-of-Concept</p>
+    </header>
+
+    <div class="main-layout">
+        <div class="canvas-panel">
+            <canvas id="canvas" width="800" height="480"></canvas>
+            <p style="font-size:0.7rem;color:#555;margin-top:4px;">
+                800×480 — Top: 400×240, Bottom: 320×240
+            </p>
+        </div>
+
+        <div class="controls-panel">
+            <div class="card">
+                <h2>📂 ROM File</h2>
+                <input type="file" id="rom-file" accept=".3ds,.3dsx,.cia,.elf,.cxi,.app,.cci">
+                <label for="rom-file" class="file-label" id="file-label">
+                    Choose a 3DS ROM file...
+                </label>
+                <button class="btn btn-primary" id="btn-load" disabled>Load ROM</button>
+                <div id="status">Ready. Load a ROM to begin.</div>
+            </div>
+
+            <div class="card">
+                <h2>▶ Controls</h2>
+                <button class="btn btn-primary" id="btn-init">Initialize Emulator</button>
+                <button class="btn btn-success" id="btn-step" disabled>Step Frame</button>
+                <button class="btn btn-secondary" id="btn-run" disabled>▶ Run (60 FPS)</button>
+                <button class="btn btn-secondary" id="btn-stop" disabled>⏹ Stop</button>
+            </div>
+
+            <div class="card">
+                <h2>📋 Log</h2>
+                <div class="log-box" id="log"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="azahar_ui.js"></script>
+</body>
+</html>
