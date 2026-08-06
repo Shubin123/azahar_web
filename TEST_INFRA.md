@@ -35,6 +35,7 @@ Targeting all 12 features defined in `PROJECT.md`:
 - **Execution Command**: `node tests/e2e/run_e2e_tests.js` (138 legacy mock/static cases; diagnostic only)
 - **Artifact Smoke Command**: `node tests/web_artifact_smoke.cjs` (checks real generated JS/WASM files)
 - **Browser Regression**: `tests/browser_regression.cjs` (Puppeteer; starts `web/server.cjs`, verifies cross-origin isolation, initializes pthread-enabled WASM, uploads a ROM, auto-starts the loop, and checks a multi-color real-ROM framebuffer. Set `AZAHAR_REAL_ROM_BOOT_MS=20000` to enable the timed check.)
+- **Gameplay fixture and benchmark**: `tests/capture_gameplay_state.cjs` creates an ignored local `.cst` after the Mario kiosk demo reaches its movement tutorial. `tests/benchmark_browser.cjs --state <fixture.cst>` installs it in the normal web user-state directory, calls the non-blocking core load signal, and requires a non-black/colorful restored canvas before sampling. This is the benchmark mode for optimization work; boot/title-only runs are diagnostic.
 - **Output Format**: JSON test result report saved to `tests/e2e/test_results.json` and console TAP output.
 - **Current web pass criteria**: `node tests/web_artifact_smoke.cjs` and the real-ROM browser regression exit 0. The broader 138-case legacy-suite gate remains pending modernization.
 

@@ -6,12 +6,13 @@
  * (SharedArrayBuffer, Web Workers) that raw Node.js cannot provide.
  *
  * Usage:
- *   node tests/benchmark_browser.cjs [--duration-seconds N] [--warmup-seconds N] [--rom PATH] [--output PATH]
+ *   node tests/benchmark_browser.cjs [--duration-seconds N] [--warmup-seconds N] [--rom PATH] [--state PATH] [--output PATH]
  *
  * Options:
  *   --duration-seconds N Benchmark duration after the title-screen warmup (default: 15)
  *   --warmup-seconds N   Warmup duration before measuring (default: 30)
  *   --rom PATH    ROM file path (default: first .3ds/.3dsx/.cia in test_games/)
+ *   --state PATH  Local .cst fixture to restore after ROM load; measures real gameplay rather than boot/title
  *   --output PATH JSON output path (default: tests/benchmark_results.json)
  *   --repeat N    Repeat the benchmark N times (default: 3)
  *   --profile     Sample perf counters every ~1s during benchmark
@@ -43,6 +44,7 @@ function argFlag(flag) { return argv.includes(flag); }
 const BENCH_SECONDS = Number(argVal('--duration-seconds', '15'));
 const WARMUP_SECONDS = Number(argVal('--warmup-seconds', '30'));
 const ROM_ARG = argVal('--rom', null);
+const STATE_ARG = argVal('--state', null);
 const OUTPUT_PATH = argVal('--output', path.join(__dirname, 'benchmark_results.json'));
 const REPEAT = Number(argVal('--repeat', '3'));
 const PROFILE = argFlag('--profile');
@@ -67,10 +69,12 @@ function findRom() {
 }
 
 // ── Combined server: web/ + ROM endpoint ──────────────────────────
-function createBenchServer(romPath) {
+function createBenchServer(romPath, statePath) {
     const webServer = createWebServer(path.join(root, 'web'));
     const romBuffer = fs.readFileSync(romPath);
     const romName = path.basename(romPath);
+    const stateBuffer = statePath ? fs.readFileSync(statePath) : null;
+    const stateName = statePath ? path.basename(statePath) : null;
 
     const server = http.createServer((req, res) => {
         const url = new URL(req.url, 'http://localhost');
@@ -87,17 +91,29 @@ function createBenchServer(romPath) {
             res.end(romBuffer);
             return;
         }
+        if (url.pathname === '/bench_state' && stateBuffer) {
+            res.writeHead(200, {
+                'Content-Type': 'application/octet-stream',
+                'Content-Length': stateBuffer.length,
+                'Cross-Origin-Opener-Policy': 'same-origin',
+                'Cross-Origin-Embedder-Policy': 'require-corp',
+                'Cross-Origin-Resource-Policy': 'cross-origin',
+                'Cache-Control': 'no-store',
+            });
+            res.end(stateBuffer);
+            return;
+        }
         // Delegate everything else to the web server
         webServer.emit('request', req, res);
     });
 
-    return { server, romName };
+    return { server, romName, stateName };
 }
 
 // ── Benchmark script (runs inside page.evaluate) ──────────────────
-async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableProfile, manualStart) {
+async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableProfile, manualStart, stateName) {
     return await page.evaluate(async ({
-        romExt_, benchSeconds_, warmupSeconds_, enableProfile_, manualStart_
+        romExt_, benchSeconds_, warmupSeconds_, enableProfile_, manualStart_, stateName_
     }) => {
         const perf = performance;
         const Module = window.Module;
@@ -128,6 +144,48 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
             const target = document.querySelector('#canvas');
             if (!target || !Module.canvas || Module.canvas === target) return;
             target.getContext('2d').drawImage(Module.canvas, 0, 0, target.width, target.height);
+        }
+
+        function readCanvasSceneStats() {
+            const canvas = document.querySelector('#canvas');
+            const context = canvas?.getContext('2d', {willReadFrequently: true});
+            if (!context) return null;
+            const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
+            let samples = 0;
+            let nonBlack = 0;
+            let colorful = 0;
+            for (let i = 0; i < data.length; i += 64) {
+                const r = data[i], g = data[i + 1], b = data[i + 2];
+                const high = Math.max(r, g, b);
+                if (high > 8) nonBlack++;
+                if (high - Math.min(r, g, b) > 24) colorful++;
+                samples++;
+            }
+            return {samples, nonBlackCoverage: nonBlack / samples,
+                colorfulCoverage: colorful / samples,
+                rendererNonblackPixels: Module._azahar_framebuffer_nonblack_pixels?.() ?? -1};
+        }
+
+        async function restoreState() {
+            // The web frontend stores per-user states here.  The file name encodes
+            // the title id and slot, and the core performs validation while loading.
+            const response = await fetch('/bench_state');
+            if (!response.ok) throw new Error('Failed to fetch savestate: ' + response.status);
+            const bytes = new Uint8Array(await response.arrayBuffer());
+            const stateDir = '/home/web_user/.local/share/azahar-emu/states';
+            Module.FS.mkdirTree(stateDir);
+            Module.FS.writeFile(`${stateDir}/${stateName_}`, bytes, {canOwn: false});
+            const request = Module._azahar_load_state(1);
+            if (request !== 0) throw new Error(`azahar_load_state rejected slot 1: ${request}`);
+            // SendSignal is consumed by the emulation loop.  Give the restored
+            // scene a short, unmeasured settle window before collecting samples.
+            const settle = await runForDuration(3, false);
+            const visual = readCanvasSceneStats();
+            if (!visual || visual.rendererNonblackPixels <= 0 || visual.nonBlackCoverage < 0.03 ||
+                visual.colorfulCoverage < 0.005) {
+                throw new Error(`Restored state did not produce a rendered game scene: ${JSON.stringify(visual)}`);
+            }
+            return {...settle, visual};
         }
 
         // Execute through the same browser refresh loop and canvas-copy path
@@ -245,7 +303,10 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
 
             // Warmup
             let warmupStats = null;
-            if (manualStart_) {
+            let restoreStats = null;
+            if (stateName_) {
+                restoreStats = await restoreState();
+            } else if (manualStart_) {
                 await runUntilManualStart();
             } else if (warmupSeconds_ > 0) {
                 warmupStats = await runForDuration(warmupSeconds_, false);
@@ -261,6 +322,9 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
             runs.push({
                 run: rep + 1,
                 initMs, loadMs,
+                restoredState: stateName_ || null,
+                restore: restoreStats ? { avg: restoreStats.avg, fps: restoreStats.fps,
+                    p50: restoreStats.p50, p95: restoreStats.p95, visual: restoreStats.visual } : null,
                 heapInit: heapAfterWrite,
                 heapAfter,
                 warmup: warmupStats ? { avg: warmupStats.avg, fps: warmupStats.fps, p50: warmupStats.p50, p95: warmupStats.p95 } : null,
@@ -281,12 +345,17 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
         warmupSeconds_: warmupSeconds,
         enableProfile_: enableProfile,
         manualStart_: manualStart,
+        stateName_: stateName,
     });
 }
 
 // ── Main ──────────────────────────────────────────────────────────
 async function main() {
     const romPath = findRom();
+    if (STATE_ARG && !fs.existsSync(STATE_ARG)) throw new Error(`Savestate not found: ${STATE_ARG}`);
+    if (STATE_ARG && path.extname(STATE_ARG).toLowerCase() !== '.cst') {
+        throw new Error(`Savestate must be a .cst file: ${STATE_ARG}`);
+    }
     const romSizeMB = (fs.statSync(romPath).size / 1024 / 1024).toFixed(1);
 
     console.log(`# Azahar Web Benchmark (browser)`);
@@ -294,12 +363,13 @@ async function main() {
     console.log(`# Duration: ${BENCH_SECONDS}s  Warmup: ${WARMUP_SECONDS}s  Repeats: ${REPEAT}`);
     console.log(`# Mode: ${INTERACTIVE ? 'interactive browser' : 'headless diagnostic'}`);
     console.log(`# Start: ${MANUAL_START ? 'manual gameplay marker (F8/click)' : 'timed warmup'}`);
+    console.log(`# State: ${STATE_ARG ? path.basename(STATE_ARG) : 'none (boot/title path)'}`);
     console.log(`# Profile: ${PROFILE ? 'on' : 'off'}`);
     console.log(`# Started: ${new Date().toISOString()}`);
     console.log('');
 
     // Start the combined web + ROM server
-    const { server, romName } = createBenchServer(romPath);
+    const { server, romName, stateName } = createBenchServer(romPath, STATE_ARG);
     const romExt = path.extname(romPath).toLowerCase() || '.bin';
     await new Promise((resolve, reject) => {
         server.once('error', reject);
@@ -386,13 +456,19 @@ async function main() {
             }
 
             const runs = await runBenchInPage(page, romExt, BENCH_SECONDS, WARMUP_SECONDS, PROFILE,
-                MANUAL_START);
+                MANUAL_START, stateName);
 
             for (const run of runs) {
                 const b = run.bench;
                 console.log(`   Init: ${run.initMs.toFixed(0)}ms  Load: ${run.loadMs.toFixed(0)}ms`);
                 if (run.warmup) {
                     console.log(`   Warmup: avg ${run.warmup.avg.toFixed(2)}ms/frame`);
+                }
+                if (run.restore) {
+                    console.log(`   State restore settle: avg ${run.restore.avg.toFixed(2)}ms/frame`);
+                    console.log(`   Restored scene: nonblack ${(run.restore.visual.nonBlackCoverage * 100).toFixed(1)}% `
+                        + `colorful ${(run.restore.visual.colorfulCoverage * 100).toFixed(1)}% `
+                        + `renderer=${run.restore.visual.rendererNonblackPixels}`);
                 }
                 console.log(`   Browser rAF: avg ${b.avg.toFixed(2)}ms/callback, `
                     + `${b.fps.toFixed(1)} callbacks/s`);
@@ -441,6 +517,7 @@ async function main() {
                 profileEnabled: PROFILE,
                 interactive: INTERACTIVE,
                 manualStart: MANUAL_START,
+                savestate: STATE_ARG ? path.basename(STATE_ARG) : null,
             },
             environment,
             aggregate,

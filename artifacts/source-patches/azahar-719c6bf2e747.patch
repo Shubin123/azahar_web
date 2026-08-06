@@ -1,0 +1,1503 @@
+﻿From 8fe8b7bc11b4444bb56cdb8a9d38a0c9d45e6389 Mon Sep 17 00:00:00 2001
+From: Shubin123 <44554264+Shubin123@users.noreply.github.com>
+Date: Thu, 6 Aug 2026 03:02:03 -0700
+Subject: [PATCH 1/8] Add threaded web frontend real-ROM rendering
+
+---
+ CMakeLists.txt                                |  45 ++-
+ README.md                                     |  21 ++
+ externals/CMakeLists.txt                      |   3 +-
+ src/CMakeLists.txt                            |   1 +
+ src/citra_meta/CMakeLists.txt                 |   6 +
+ src/citra_sdl/CMakeLists.txt                  |  49 +++
+ src/citra_sdl/emscripten_main.cpp             | 290 ++++++++++++++++++
+ src/citra_sdl/emu_window/emu_window_sdl2.cpp  |  10 +-
+ .../emu_window/emu_window_sdl2_sw.cpp         |  13 +
+ src/common/logging/backend.cpp                |   6 +
+ src/common/thread.cpp                         |   4 +
+ src/core/loader/loader.cpp                    |  16 +
+ src/core/loader/ncch.cpp                      |  23 +-
+ src/core/loader/ncch.h                        |  13 +-
+ src/input_common/CMakeLists.txt               |  19 +-
+ src/input_common/sdl/sdl_impl.cpp             |   6 +
+ src/input_common/udp/udp.h                    |   8 +
+ src/input_common/udp/udp_emscripten.cpp       |  16 +
+ .../renderer_software/renderer_software.cpp   |  33 +-
+ 19 files changed, 549 insertions(+), 33 deletions(-)
+ create mode 100644 src/citra_sdl/emscripten_main.cpp
+ create mode 100644 src/input_common/udp/udp_emscripten.cpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 1c0e51b67..490963487 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -20,6 +20,17 @@ include(CMakeDependentOption)
+ include(FindPkgConfig)
+ 
+ project(citra LANGUAGES C CXX ASM)
++
++if (EMSCRIPTEN)
++    # wasm32 uses 32-bit unsigned long; existing ResultVal<T> call sites use
++    # integer literals such as 0ULL and Clang diagnoses those conversions.
++    # Shared WebAssembly memory requires atomics in every object that reaches
++    # the final link, including bundled libraries such as boost_iostreams.
++    # Emscripten's current spelling is -pthread; its USE_PTHREADS setting is
++    # retained on azahar_web for the installed Unity toolchain.
++    add_compile_options(-Wno-c++11-narrowing -pthread)
++endif()
++
+ if (CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
+     enable_language(OBJC OBJCXX)
+ endif()
+@@ -305,8 +316,19 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin/$<CONFIG>)
+ # ======================
+ 
+ # Prefer the -pthread flag on Linux.
+-set(THREADS_PREFER_PTHREAD_FLAG ON)
+-find_package(Threads REQUIRED)
++# Emscripten provides pthreads via -pthread compiler/linker flag; FindThreads
++# cross-compilation detection is unreliable, so skip it for Emscripten builds.
++if (NOT EMSCRIPTEN)
++    set(THREADS_PREFER_PTHREAD_FLAG ON)
++    find_package(Threads REQUIRED)
++else()
++    add_library(Threads::Threads INTERFACE IMPORTED)
++    target_compile_options(Threads::Threads INTERFACE -pthread)
++    target_link_options(Threads::Threads INTERFACE -pthread)
++    set(CMAKE_THREAD_LIBS_INIT "")
++    set(CMAKE_HAVE_THREADS_LIBRARY 1)
++    set(Threads_FOUND TRUE)
++endif()
+ 
+ if (ENABLE_QT)
+     if (NOT USE_SYSTEM_QT)
+@@ -346,6 +368,13 @@ endif()
+ 
+ # Use system tsl::robin_map if available (otherwise we fallback to version bundled with dynarmic)
+ find_package(tsl-robin-map QUIET)
++if (NOT TARGET tsl::robin_map)
++    add_library(tsl::robin_map INTERFACE IMPORTED)
++    set_target_properties(tsl::robin_map PROPERTIES
++        INTERFACE_INCLUDE_DIRECTORIES
++            "${CMAKE_CURRENT_SOURCE_DIR}/externals/dynarmic/externals/robin-map/include"
++    )
++endif()
+ 
+ # Platform-specific library requirements
+ # ======================================
+@@ -484,7 +513,15 @@ if (NOT USE_SYSTEM_BOOST)
+ endif()
+ 
+ # SDL2
+-if (ENABLE_SDL2 AND USE_SYSTEM_SDL2)
++if (ENABLE_SDL2 AND EMSCRIPTEN)
++    # Emscripten provides SDL2 via its ports system (-s USE_SDL=2).
++    # Headers and libraries are automatically on the include/link path;
++    # we just need to create the CMake target for linking.
++    add_library(SDL2 INTERFACE)
++    target_compile_options(SDL2 INTERFACE "-sUSE_SDL=2")
++    target_link_options(SDL2 INTERFACE "-sUSE_SDL=2")
++    add_library(SDL2::SDL2 ALIAS SDL2)
++elseif (ENABLE_SDL2 AND USE_SYSTEM_SDL2)
+     find_package(SDL2 REQUIRED)
+     add_library(SDL2 INTERFACE)
+     target_link_libraries(SDL2 INTERFACE "${SDL2_LIBRARY}")
+@@ -509,7 +546,7 @@ set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT c
+ 
+ # Create target for outputting distributable bundles.
+ # Not supported for mobile platforms as distributables are built differently.
+-if (NOT ANDROID AND NOT IOS)
++if (NOT ANDROID AND NOT IOS AND NOT EMSCRIPTEN)
+     include(BundleTarget)
+     if (ENABLE_QT)
+         qt_bundle_target(citra_meta)
+diff --git a/README.md b/README.md
+index 35616e343..50c0e89f1 100644
+--- a/README.md
++++ b/README.md
+@@ -78,6 +78,27 @@ The Flatpak build of Azahar also has native Wayland support disabled by default.
+ 
+ Please refer this repository's [wiki](https://github.com/azahar-emu/azahar/wiki/Building-From-Source) for build instructions
+ 
++## Experimental WebAssembly Build
++
++An experimental Emscripten frontend is available in the workspace `web/` directory. It uses the software renderer and an HTML5 canvas; desktop Qt, OpenGL, Vulkan, audio backends, scripting, room services, and UDP input are disabled for the browser build.
++
++From a shell with Emscripten and Ninja available:
++
++```powershell
++cmake -B build-web -S azahar -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DENABLE_QT=OFF -DENABLE_SDL2=ON -DENABLE_SDL2_FRONTEND=ON -DENABLE_SOFTWARE_RENDERER=ON -DENABLE_OPENGL=OFF -DENABLE_VULKAN=OFF -DENABLE_SCRIPTING=OFF -DENABLE_TESTS=OFF
++cmake --build build-web --parallel 8
++```
++
++The generated `azahar.html`, `azahar.js`, and `azahar.wasm` files are placed in `build-web/bin/Release/`; copy the JS and WASM files beside `web/index.html`. This build uses Emscripten pthreads (a 32-worker pool), so it must be served with `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` headers. The supplied server also sends a same-origin resource policy header. From the workspace root, use it with:
++
++```powershell
++node web/server.cjs
++```
++
++Then open `http://127.0.0.1:8765/`. The web target starts with 512MB of shared memory, may grow to 4GB, and uses a 2MB stack setting.
++
++The browser path has been verified with a legally owned, decrypted `.3ds` kiosk demo image: it reaches a visible Super Mario 3D Land title framebuffer in the browser after its boot period. Encrypted CIA files are intentionally rejected with a clear error; extract and use a decrypted cartridge image, keeping its `.3ds` extension. This software-rendered interpreter path is still substantially below full 3DS speed, so browser execution remains experimental and is not a general compatibility guarantee.
++
+ # How can I contribute?
+ 
+ ### Pull requests
+diff --git a/externals/CMakeLists.txt b/externals/CMakeLists.txt
+index 01e76a095..c8969d487 100644
+--- a/externals/CMakeLists.txt
++++ b/externals/CMakeLists.txt
+@@ -203,7 +203,8 @@ set(BUILD_TESTING OFF CACHE BOOL "")
+ add_subdirectory(teakra EXCLUDE_FROM_ALL)
+ 
+ # SDL2
+-if (ENABLE_SDL2 AND NOT USE_SYSTEM_SDL2)
++# Emscripten provides SDL2 via its ports system; skip the bundled build.
++if (ENABLE_SDL2 AND NOT USE_SYSTEM_SDL2 AND NOT EMSCRIPTEN)
+     add_subdirectory(sdl2)
+ endif()
+ 
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 69d17bac2..31be44c6e 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -168,6 +168,7 @@ endif()
+ if(ENABLE_SOFTWARE_RENDERER)
+     add_compile_definitions(ENABLE_SOFTWARE_RENDERER)
+ endif()
++
+ if(ENABLE_OPENGL)
+     add_compile_definitions(ENABLE_OPENGL)
+ endif()
+diff --git a/src/citra_meta/CMakeLists.txt b/src/citra_meta/CMakeLists.txt
+index 3b6d2b230..1e06d5426 100644
+--- a/src/citra_meta/CMakeLists.txt
++++ b/src/citra_meta/CMakeLists.txt
+@@ -1,3 +1,7 @@
++# The citra_meta executable is the desktop entry point (main.cpp).
++# For Emscripten builds, azahar_web is used instead (from citra_sdl/CMakeLists.txt).
++if (NOT EMSCRIPTEN)
++
+ add_executable(citra_meta
+     citra.rc
+     main.cpp
+@@ -97,3 +101,5 @@ endif()
+ if(UNIX AND NOT APPLE)
+     install(TARGETS citra_meta RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}/bin")
+ endif()
++
++endif() # NOT EMSCRIPTEN
+diff --git a/src/citra_sdl/CMakeLists.txt b/src/citra_sdl/CMakeLists.txt
+index cf3deda2d..038b397fe 100644
+--- a/src/citra_sdl/CMakeLists.txt
++++ b/src/citra_sdl/CMakeLists.txt
+@@ -46,3 +46,52 @@ endif()
+ if (CITRA_USE_PRECOMPILED_HEADERS)
+     target_precompile_headers(citra_sdl PRIVATE precompiled_headers.h)
+ endif()
++
++# Emscripten WebAssembly executable target
++if (EMSCRIPTEN)
++    add_executable(azahar_web
++        emscripten_main.cpp
++    )
++    target_link_libraries(azahar_web PRIVATE citra_sdl citra_common citra_core input_common network)
++    target_link_libraries(azahar_web PRIVATE inih SDL2::SDL2 Threads::Threads)
++    set_target_properties(azahar_web PROPERTIES
++        OUTPUT_NAME "azahar"
++        SUFFIX ".html"
++    )
++    # Emscripten-specific linker flags
++    target_link_options(azahar_web PRIVATE
++        # Enable SharedArrayBuffer-backed POSIX threads.  Keep this legacy
++        # setting alongside -pthread (from Threads::Threads) for the Unity
++        # Emscripten toolchain used by the web build.
++        -sUSE_PTHREADS=1
++        # The core can create worker threads while a synchronous JS export is
++        # still running.  Pre-create workers so pthread_create does not need
++        # to wait for a subsequent browser event-loop turn.
++        # Shader-cache warmup can create one worker per reported CPU, in
++        # addition to the emulator's long-lived service threads.  Eight
++        # workers is therefore insufficient even for a modest desktop
++        # browser and Emscripten cannot synchronously grow this pool while a
++        # WASM export is active.
++        -sPTHREAD_POOL_SIZE=32
++        -sINITIAL_MEMORY=512MB
++        -sSTACK_SIZE=2MB
++        -sALLOW_MEMORY_GROWTH=1
++        # The provided .3ds workload is a full 2 GiB cartridge image. Leave
++        # address space for it and the emulator rather than stopping at
++        # Emscripten's 2 GiB default growth limit.
++        -sMAXIMUM_MEMORY=4GB
++        # Keep browser failures actionable during the web-port validation
++        # phase.  Without this, a wasm trap is reported only as
++        # "Aborted(undefined)", which cannot distinguish an assertion from a
++        # loader or allocation failure.
++        -sASSERTIONS=2
++        # The desktop loader uses C++ exceptions for recoverable file and
++        # allocation failures.  Emscripten otherwise aborts as soon as one is
++        # thrown, before the caller can report a ResultStatus.
++        -sNO_DISABLE_EXCEPTION_CATCHING=1
++        -sUSE_SDL=2
++        "-sEXPORTED_FUNCTIONS=['_azahar_init','_azahar_load_rom','_azahar_step_frame','_azahar_framebuffer_nonblack_pixels','_azahar_shutdown','_azahar_run_loop','_malloc','_free','_emscripten_resize_heap']"
++        "-sEXPORTED_RUNTIME_METHODS=['ccall','cwrap','FS','HEAPU8','HEAP32']"
++        -sNO_EXIT_RUNTIME=1
++    )
++endif()
+diff --git a/src/citra_sdl/emscripten_main.cpp b/src/citra_sdl/emscripten_main.cpp
+new file mode 100644
+index 000000000..b5f5e0cfa
+--- /dev/null
++++ b/src/citra_sdl/emscripten_main.cpp
+@@ -0,0 +1,290 @@
++// Copyright Azahar Emulator Project
++// Licensed under GPLv2 or any later version
++// Emscripten/WebAssembly entry point — replaces citra_sdl.cpp main for web builds.
++
++#include <cstring>
++#include <memory>
++
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#include <emscripten/html5.h>
++#endif
++
++#include "citra_sdl/config.h"
++#include "citra_sdl/emu_window/emu_window_sdl2.h"
++#ifdef ENABLE_SOFTWARE_RENDERER
++#include "citra_sdl/emu_window/emu_window_sdl2_sw.h"
++#endif
++#include "common/file_util.h"
++#include "common/logging/backend.h"
++#include "common/logging/log.h"
++#include "common/scm_rev.h"
++#include "common/settings.h"
++#include "core/core.h"
++#include "core/frontend/applets/default_applets.h"
++#include "core/hle/service/service.h"
++#include "video_core/gpu.h"
++#include "video_core/renderer_base.h"
++#ifdef ENABLE_SOFTWARE_RENDERER
++#include "video_core/renderer_software/renderer_software.h"
++#endif
++
++namespace {
++
++Core::System* g_system = nullptr;
++std::unique_ptr<EmuWindow_SDL2> g_emu_window;
++bool g_initialized = false;
++bool g_rom_loaded = false;
++
++} // anonymous namespace
++
++/// One-time initialization of the emulator core and software renderer window.
++/// Returns 0 on success, non-zero on failure.
++extern "C" int azahar_init() {
++    if (g_initialized) {
++        LOG_WARNING(Frontend, "azahar_init called but already initialized");
++        return 0;
++    }
++
++    Common::Log::Initialize();
++    Common::Log::SetColorConsoleBackendEnabled(true);
++    Common::Log::Start();
++
++    LOG_INFO(Frontend, "Azahar WebAssembly {} | {}-{}", Common::g_build_fullname,
++             Common::g_scm_branch, Common::g_scm_desc);
++
++    g_system = &Core::System::GetInstance();
++
++    // Load the standard SDL defaults so every setting that System::Load and
++    // the HLE services expect has a defined value. This is the same frontend
++    // setup the native SDL entry point performs; the generated INI remains in
++    // MEMFS for this browser session.
++    SdlConfig web_config;
++
++    // Override desktop-only defaults after loading the configuration.
++    Settings::values.graphics_api.SetValue(Settings::GraphicsAPI::Software);
++    Settings::values.use_cpu_jit.SetValue(false);
++
++    // The SDL and Qt frontends populate this map while loading their config
++    // files.  The web frontend has no config file, but Service::Init still
++    // performs a lookup for every module.  Populate the desktop defaults
++    // explicitly so normal HLE services are selected instead of throwing
++    // std::out_of_range from unordered_map::at during game load.
++    Settings::values.lle_modules.clear();
++    for (const auto& service_module : Service::service_module_map) {
++        Settings::values.lle_modules.emplace(service_module.name, false);
++    }
++
++    // Match the native SDL frontend's initialization order. In particular,
++    // ApplySettings configures the core before System::Load constructs the
++    // GPU and emulated services for the selected title.
++    g_system->ApplySettings();
++
++#ifdef ENABLE_SOFTWARE_RENDERER
++    Frontend::RegisterDefaultApplets(*g_system);
++    EmuWindow_SDL2::InitializeSDL2();
++
++    // Create the software-rendered window (no fullscreen on web, not secondary)
++    g_emu_window = std::make_unique<EmuWindow_SDL2_SW>(*g_system, false, false);
++#else
++    LOG_CRITICAL(Frontend, "Software renderer not enabled in this build!");
++    return -1;
++#endif
++
++    g_initialized = true;
++    LOG_INFO(Frontend, "azahar_init OK");
++    return 0;
++}
++
++/// Load a ROM file from the given MEMFS path.
++/// Returns 0 on success, non-zero on failure.
++extern "C" int azahar_load_rom(const char* path) {
++    if (!g_initialized || !g_system || !g_emu_window) {
++        LOG_CRITICAL(Frontend, "azahar_load_rom: not initialized");
++        return -1;
++    }
++
++    if (!path || !path[0]) {
++        LOG_CRITICAL(Frontend, "azahar_load_rom: empty path");
++        return -4;
++    }
++
++    if (std::strlen(path) >= 4096) {
++        LOG_CRITICAL(Frontend, "azahar_load_rom: path length exceeds limit");
++        return -5;
++    }
++
++    if (!FileUtil::Exists(path)) {
++        LOG_CRITICAL(Frontend, "File does not exist: {}", path);
++        return -4;
++    }
++
++    FileUtil::IOFile check_file(path, "rb");
++    if (check_file.GetSize() == 0) {
++        LOG_CRITICAL(Frontend, "File is empty: {}", path);
++        return -3;
++    }
++
++    LOG_INFO(Frontend, "Loading ROM from: {}", path);
++
++    const auto scope = g_emu_window->Acquire();
++
++    const Core::System::ResultStatus load_result{
++        g_system->Load(*g_emu_window, std::string(path))};
++
++    switch (load_result) {
++    case Core::System::ResultStatus::Success:
++        g_rom_loaded = true;
++        LOG_INFO(Frontend, "azahar_load_rom OK");
++        return 0;
++    case Core::System::ResultStatus::ErrorGetLoader:
++        LOG_CRITICAL(Frontend, "Failed to obtain loader for {}!", path);
++        return -3;
++    case Core::System::ResultStatus::ErrorLoader:
++        LOG_CRITICAL(Frontend, "Failed to load ROM!");
++        return -3;
++    case Core::System::ResultStatus::ErrorLoader_ErrorEncrypted:
++        LOG_CRITICAL(Frontend, "ROM is encrypted and must be decrypted first.");
++        return -4;
++    case Core::System::ResultStatus::ErrorLoader_ErrorInvalidFormat:
++        LOG_CRITICAL(Frontend, "ROM format is not supported.");
++        return -3;
++    default:
++        LOG_ERROR(Frontend, "Error loading ROM: {}", g_system->GetStatusDetails());
++        return -6;
++    }
++}
++
++/// Step one emulation frame: run the CPU loop, render, and present.
++/// Returns 0 on success, negative on error, 1 if shutdown was requested.
++extern "C" int azahar_step_frame() {
++    if (!g_initialized || !g_system || !g_emu_window) {
++        return -1;
++    }
++
++    if (!g_rom_loaded) {
++        return -2;
++    }
++
++    // Poll SDL events (required for Emscripten SDL event pump)
++    g_emu_window->PollEvents();
++
++    if (!g_emu_window->IsOpen()) {
++        return 1; // shutdown requested
++    }
++
++    // A single RunLoop slice advances only a small amount of emulated time.
++    // The JavaScript UI yields for roughly one display interval between calls,
++    // so doing just one here caps dyncom at a few percent of normal speed.
++    // Batch slices for a bounded portion of each browser tick: this gives the
++    // interpreter enough work to reach a title screen while preserving a
++    // regular opportunity for the browser to process input and paint.
++    Core::System::ResultStatus result = Core::System::ResultStatus::Success;
++#ifdef __EMSCRIPTEN__
++    constexpr int max_slices_per_tick = 16;
++    const double deadline_ms = emscripten_get_now() + 12.0;
++    for (int slice = 0; slice < max_slices_per_tick && emscripten_get_now() < deadline_ms;
++         ++slice) {
++        result = g_system->RunLoop();
++        if (result != Core::System::ResultStatus::Success) {
++            break;
++        }
++    }
++#else
++    result = g_system->RunLoop();
++#endif
++
++    switch (result) {
++    case Core::System::ResultStatus::ShutdownRequested:
++        g_emu_window->RequestClose();
++        return 1;
++    case Core::System::ResultStatus::Success:
++        break;
++    default:
++        LOG_ERROR(Frontend, "Error in run loop: {}", g_system->GetStatusDetails());
++        return -3;
++    }
++
++    // Present single frame (non-blocking for Emscripten)
++    g_emu_window->Present();
++
++    return 0;
++}
++
++/// Return the number of non-black pixels held by the software renderer's
++/// primary displays. This is intentionally small diagnostic surface for the
++/// browser regression: it separates core rendering failures from SDL/canvas
++/// presentation failures without copying a framebuffer into JavaScript.
++extern "C" int azahar_framebuffer_nonblack_pixels() {
++#ifdef ENABLE_SOFTWARE_RENDERER
++    if (!g_initialized || !g_system) {
++        return -1;
++    }
++
++    const auto& renderer = static_cast<const SwRenderer::RendererSoftware&>(g_system->GPU().Renderer());
++    int nonblack_pixels{};
++    for (const auto screen_id : {VideoCore::ScreenId::TopLeft, VideoCore::ScreenId::Bottom}) {
++        const auto& pixels = renderer.Screen(screen_id).pixels;
++        for (std::size_t offset = 0; offset + 3 < pixels.size(); offset += 4) {
++            if (pixels[offset] || pixels[offset + 1] || pixels[offset + 2]) {
++                ++nonblack_pixels;
++            }
++        }
++    }
++    return nonblack_pixels;
++#else
++    return -1;
++#endif
++}
++
++/// Shut down the emulator and free resources.
++extern "C" void azahar_shutdown() {
++    LOG_INFO(Frontend, "azahar_shutdown");
++
++    if (g_emu_window) {
++        g_emu_window.reset();
++    }
++
++    if (g_system) {
++        g_system->Shutdown();
++    }
++
++    Common::Log::Stop();
++
++    g_initialized = false;
++    g_rom_loaded = false;
++    g_system = nullptr;
++}
++
++#ifdef __EMSCRIPTEN__
++/// Emscripten main loop callback — steps one frame per invocation.
++/// Registered via emscripten_set_main_loop when using the event-loop model.
++static void emscripten_main_loop_callback() {
++    int result = azahar_step_frame();
++    if (result != 0) {
++        if (result == 1) {
++            LOG_INFO(Frontend, "Emulation ended (shutdown requested)");
++        } else {
++            LOG_ERROR(Frontend, "Frame step error: {}", result);
++        }
++        emscripten_cancel_main_loop();
++        azahar_shutdown();
++    }
++}
++
++/// Start the emulator with Emscripten's built-in main loop.
++/// Alternative to calling azahar_step_frame() manually from JS.
++/// The ROM must already be loaded via azahar_load_rom().
++extern "C" int azahar_run_loop() {
++    if (!g_rom_loaded) {
++        LOG_CRITICAL(Frontend, "azahar_run_loop: no ROM loaded");
++        return -1;
++    }
++
++    LOG_INFO(Frontend, "Starting Emscripten main loop");
++    // 0 FPS = use requestAnimationFrame (browser vsync)
++    // 1 = simulate infinite loop so emscripten doesn't yield to browser
++    emscripten_set_main_loop(emscripten_main_loop_callback, 0, 1);
++    return 0;
++}
++#endif // __EMSCRIPTEN__
+diff --git a/src/citra_sdl/emu_window/emu_window_sdl2.cpp b/src/citra_sdl/emu_window/emu_window_sdl2.cpp
+index a84e38669..b7d5bc75f 100644
+--- a/src/citra_sdl/emu_window/emu_window_sdl2.cpp
++++ b/src/citra_sdl/emu_window/emu_window_sdl2.cpp
+@@ -117,7 +117,15 @@ EmuWindow_SDL2::~EmuWindow_SDL2() {
+ }
+ 
+ void EmuWindow_SDL2::InitializeSDL2() {
+-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) < 0) {
++#ifdef __EMSCRIPTEN__
++    // The browser SDL2 port only needs the canvas/video subsystem. The
++    // desktop game-controller subsystem is not available in every browser
++    // build and can make SDL_Init fail before the emulator is initialized.
++    constexpr u32 sdl_init_flags = SDL_INIT_VIDEO;
++#else
++    constexpr u32 sdl_init_flags = SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER;
++#endif
++    if (SDL_Init(sdl_init_flags) < 0) {
+         LOG_CRITICAL(Frontend, "Failed to initialize SDL2: {}! Exiting...", SDL_GetError());
+         exit(1);
+     }
+diff --git a/src/citra_sdl/emu_window/emu_window_sdl2_sw.cpp b/src/citra_sdl/emu_window/emu_window_sdl2_sw.cpp
+index 8da894fec..9cc02efc1 100644
+--- a/src/citra_sdl/emu_window/emu_window_sdl2_sw.cpp
++++ b/src/citra_sdl/emu_window/emu_window_sdl2_sw.cpp
+@@ -68,6 +68,14 @@ void EmuWindow_SDL2_SW::Present() {
+ 
+     using VideoCore::ScreenId;
+ 
++#ifdef __EMSCRIPTEN__
++    // Emscripten: render a single frame and return (non-blocking).
++    // The browser event loop calls us repeatedly via azahar_step_frame().
++    if (!IsOpen()) {
++        return;
++    }
++#endif
++
+     while (IsOpen()) {
+         SDL_SetRenderDrawColor(renderer,
+                                static_cast<Uint8>(Settings::values.bg_red.GetValue() * 255),
+@@ -91,6 +99,11 @@ void EmuWindow_SDL2_SW::Present() {
+ 
+         SDL_RenderPresent(renderer);
+         SDL_UpdateWindowSurface(render_window);
++
++#ifdef __EMSCRIPTEN__
++        // Single frame for Emscripten; return control to the browser.
++        return;
++#endif
+     }
+ }
+ 
+diff --git a/src/common/logging/backend.cpp b/src/common/logging/backend.cpp
+index 36fcfeccf..46f083352 100644
+--- a/src/common/logging/backend.cpp
++++ b/src/common/logging/backend.cpp
+@@ -236,7 +236,13 @@ public:
+     }
+ 
+     static void Start() {
++#ifdef __EMSCRIPTEN__
++        // Browser builds run their UI on the main event loop. Keep logging
++        // initialized, but avoid a separate asynchronous logging worker.
++        return;
++#else
+         instance->StartBackendThread();
++#endif
+     }
+ 
+     static void Stop() {
+diff --git a/src/common/thread.cpp b/src/common/thread.cpp
+index 68004a614..75c384d00 100644
+--- a/src/common/thread.cpp
++++ b/src/common/thread.cpp
+@@ -92,6 +92,9 @@ void SetCurrentThreadName(const char* name) {
+ // MinGW with the POSIX threading model does not support pthread_setname_np
+ #if !defined(_WIN32) || defined(_MSC_VER)
+ void SetCurrentThreadName(const char* name) {
++#ifdef __EMSCRIPTEN__
++    (void)name;
++#else
+ #ifdef __APPLE__
+     pthread_setname_np(name);
+ #elif defined(__Bitrig__) || defined(__DragonFly__) || defined(__FreeBSD__) || defined(__OpenBSD__)
+@@ -109,6 +112,7 @@ void SetCurrentThreadName(const char* name) {
+ #else
+     pthread_setname_np(pthread_self(), name);
+ #endif
++#endif
+ }
+ #endif
+ 
+diff --git a/src/core/loader/loader.cpp b/src/core/loader/loader.cpp
+index f1d610d9e..8ea310107 100644
+--- a/src/core/loader/loader.cpp
++++ b/src/core/loader/loader.cpp
+@@ -8,6 +8,7 @@
+ #include "common/string_util.h"
+ #include "core/core.h"
+ #include "core/hle/kernel/process.h"
++#include "core/file_sys/cia_container.h"
+ #include "core/loader/3dsx.h"
+ #include "core/loader/artic.h"
+ #include "core/loader/elf.h"
+@@ -29,6 +30,11 @@ FileType IdentifyFile(FileUtil::IOFile& file) {
+ 
+ #undef CHECK_TYPE
+ 
++    FileSys::CIAContainer cia_container;
++    if (cia_container.Load(&file) == ResultStatus::Success) {
++        return FileType::CIA;
++    }
++
+     return FileType::Unknown;
+ }
+ 
+@@ -111,6 +117,16 @@ static std::unique_ptr<AppLoader> GetFileLoader(Core::System& system, FileUtil::
+     case FileType::CCI:
+         return std::make_unique<AppLoader_NCCH>(system, std::move(file), filepath);
+ 
++    // CIA container format.
++    case FileType::CIA: {
++        FileSys::CIAContainer cia_container;
++        if (cia_container.Load(&file) == ResultStatus::Success) {
++            u32 ncch_offset = static_cast<u32>(cia_container.GetContentOffset(0));
++            return std::make_unique<AppLoader_NCCH>(system, std::move(file), filepath, ncch_offset);
++        }
++        return nullptr;
++    }
++
+     case FileType::ARTIC: {
+         Apploader_Artic::ArticInitMode mode = Apploader_Artic::ArticInitMode::NONE;
+         if (filename.starts_with("articinio://")) {
+diff --git a/src/core/loader/ncch.cpp b/src/core/loader/ncch.cpp
+index 0b2058293..8a7e02106 100644
+--- a/src/core/loader/ncch.cpp
++++ b/src/core/loader/ncch.cpp
+@@ -35,9 +35,9 @@ namespace Loader {
+ using namespace Common::Literals;
+ static constexpr u64 UPDATE_TID_HIGH = 0x0004000e00000000;
+ 
+-FileType AppLoader_NCCH::IdentifyType(FileUtil::IOFile* file) {
++FileType AppLoader_NCCH::IdentifyType(FileUtil::IOFile* file, u32 ncch_offset) {
+     u32 magic;
+-    file->Seek(0x100, SEEK_SET);
++    file->Seek(ncch_offset + 0x100, SEEK_SET);
+     if (1 != file->ReadArray<u32>(&magic, 1))
+         return FileType::Error;
+ 
+@@ -50,18 +50,19 @@ FileType AppLoader_NCCH::IdentifyType(FileUtil::IOFile* file) {
+     std::unique_ptr<FileUtil::IOFile> file_crypto = HW::UniqueData::OpenUniqueCryptoFile(
+         file->Filename(), "rb", HW::UniqueData::UniqueCryptoFileID::NCCH);
+ 
+-    file_crypto->Seek(0x100, SEEK_SET);
+-    if (1 != file_crypto->ReadArray<u32>(&magic, 1))
+-        return FileType::Error;
+-
+-    if (MakeMagic('N', 'C', 'S', 'D') == magic)
+-        return FileType::CCI;
++    if (file_crypto) {
++        file_crypto->Seek(ncch_offset + 0x100, SEEK_SET);
++        if (1 == file_crypto->ReadArray<u32>(&magic, 1)) {
++            if (MakeMagic('N', 'C', 'S', 'D') == magic)
++                return FileType::CCI;
+ 
+-    if (MakeMagic('N', 'C', 'C', 'H') == magic)
+-        return FileType::CXI;
++            if (MakeMagic('N', 'C', 'C', 'H') == magic)
++                return FileType::CXI;
++        }
++    }
+ 
+     std::optional<u32> magic_zstd = FileUtil::Z3DSReadIOFile::GetUnderlyingFileMagic(file);
+-    if (!magic_zstd.has_value()) {
++    if (!magic_zstd.has_value() && file_crypto) {
+         magic_zstd = FileUtil::Z3DSReadIOFile::GetUnderlyingFileMagic(file_crypto.get());
+     }
+ 
+diff --git a/src/core/loader/ncch.h b/src/core/loader/ncch.h
+index f1bf69855..18de8e423 100644
+--- a/src/core/loader/ncch.h
++++ b/src/core/loader/ncch.h
+@@ -15,19 +15,24 @@ namespace Loader {
+ /// Loads an NCCH file (e.g. from a CCI, or the first NCCH in a CXI)
+ class AppLoader_NCCH final : public AppLoader {
+ public:
+-    AppLoader_NCCH(Core::System& system_, FileUtil::IOFile&& file, const std::string& filepath)
+-        : AppLoader(system_, std::move(file)), base_ncch(filepath), overlay_ncch(&base_ncch),
++    AppLoader_NCCH(Core::System& system_, FileUtil::IOFile&& file, const std::string& filepath,
++                   u32 ncch_offset = 0)
++        : AppLoader(system_, std::move(file)), base_ncch(filepath, ncch_offset), overlay_ncch(&base_ncch),
+           filepath(filepath) {
+-        filetype = IdentifyType(this->file.get());
++        filetype = IdentifyType(this->file.get(), ncch_offset);
++        if (ncch_offset != 0 && filetype != FileType::Error) {
++            filetype = FileType::CIA;
++        }
+         this->file.reset();
+     }
+ 
+     /**
+      * Returns the type of the file
+      * @param file FileUtil::IOFile open file
++     * @param ncch_offset Offset of NCCH container in file
+      * @return FileType found, or FileType::Error if this loader doesn't know it
+      */
+-    static FileType IdentifyType(FileUtil::IOFile* file);
++    static FileType IdentifyType(FileUtil::IOFile* file, u32 ncch_offset = 0);
+ 
+     FileType GetFileType() override {
+         return filetype;
+diff --git a/src/input_common/CMakeLists.txt b/src/input_common/CMakeLists.txt
+index 70d36cbfd..3c564e2cc 100644
+--- a/src/input_common/CMakeLists.txt
++++ b/src/input_common/CMakeLists.txt
+@@ -12,14 +12,21 @@ add_library(input_common STATIC
+     touch_from_button.h
+     sdl/sdl.cpp
+     sdl/sdl.h
+-    udp/client.cpp
+-    udp/client.h
+-    udp/protocol.cpp
+-    udp/protocol.h
+-    udp/udp.cpp
+-    udp/udp.h
+ )
+ 
++if (NOT EMSCRIPTEN)
++    target_sources(input_common PRIVATE
++        udp/client.cpp
++        udp/client.h
++        udp/protocol.cpp
++        udp/protocol.h
++        udp/udp.cpp
++        udp/udp.h
++    )
++else()
++    target_sources(input_common PRIVATE udp/udp_emscripten.cpp)
++endif()
++
+ if(ENABLE_SDL2)
+     target_sources(input_common PRIVATE
+         sdl/sdl_impl.cpp
+diff --git a/src/input_common/sdl/sdl_impl.cpp b/src/input_common/sdl/sdl_impl.cpp
+index 1833e49cb..a0874157b 100644
+--- a/src/input_common/sdl/sdl_impl.cpp
++++ b/src/input_common/sdl/sdl_impl.cpp
+@@ -820,8 +820,14 @@ SDLState::SDLState() {
+     RegisterFactory<AnalogDevice>("sdl", std::make_shared<SDLAnalogFactory>(*this));
+     RegisterFactory<MotionDevice>("sdl", std::make_shared<SDLMotionFactory>(*this));
+ 
++    // Emscripten owns the browser event loop and does not provide the desktop
++    // polling-thread model used by SDL's game-controller backend.
++#ifdef __EMSCRIPTEN__
++    start_thread = false;
++#else
+     // If the frontend is going to manage the event loop, then we dont start one here
+     start_thread = !SDL_WasInit(SDL_INIT_GAMECONTROLLER);
++#endif
+     if (start_thread && SDL_Init(SDL_INIT_GAMECONTROLLER) < 0) {
+         LOG_CRITICAL(Input, "SDL_Init(SDL_INIT_GAMECONTROLLER) failed with: {}", SDL_GetError());
+         return;
+diff --git a/src/input_common/udp/udp.h b/src/input_common/udp/udp.h
+index 3eac8c7ea..5c4cb180b 100644
+--- a/src/input_common/udp/udp.h
++++ b/src/input_common/udp/udp.h
+@@ -5,7 +5,13 @@
+ #pragma once
+ 
+ #include <memory>
++#ifndef __EMSCRIPTEN__
+ #include "input_common/udp/client.h"
++#else
++namespace InputCommon::CemuhookUDP {
++class Client;
++}
++#endif
+ 
+ namespace InputCommon::CemuhookUDP {
+ 
+@@ -16,7 +22,9 @@ public:
+     void ReloadUDPClient();
+ 
+ private:
++#ifndef __EMSCRIPTEN__
+     std::unique_ptr<Client> client;
++#endif
+ };
+ 
+ std::unique_ptr<State> Init();
+diff --git a/src/input_common/udp/udp_emscripten.cpp b/src/input_common/udp/udp_emscripten.cpp
+new file mode 100644
+index 000000000..c409705c5
+--- /dev/null
++++ b/src/input_common/udp/udp_emscripten.cpp
+@@ -0,0 +1,16 @@
++// Copyright 2026 Azahar Emulator Project
++// Licensed under GPLv2 or any later version.
++
++#include "input_common/udp/udp.h"
++
++namespace InputCommon::CemuhookUDP {
++
++State::State() = default;
++State::~State() = default;
++void State::ReloadUDPClient() {}
++
++std::unique_ptr<State> Init() {
++    return std::make_unique<State>();
++}
++
++} // namespace InputCommon::CemuhookUDP
+diff --git a/src/video_core/renderer_software/renderer_software.cpp b/src/video_core/renderer_software/renderer_software.cpp
+index 87bd47311..a3ed5e077 100644
+--- a/src/video_core/renderer_software/renderer_software.cpp
++++ b/src/video_core/renderer_software/renderer_software.cpp
+@@ -44,14 +44,31 @@ void RendererSoftware::LoadFBToScreenInfo(int i, const Pica::ColorFill& color_fi
+     const s32 bpp = Pica::BytesPerPixel(framebuffer.color_format);
+     const u8* framebuffer_data = memory.GetPhysicalPointer(framebuffer_addr);
+ 
+-    const s32 pixel_stride = framebuffer.stride / bpp;
+-    info.height = framebuffer.height;
+-    info.width = pixel_stride;
++    const u32 source_width = static_cast<u32>(framebuffer.stride / bpp);
++    const u32 source_height = framebuffer.height;
++#ifdef __EMSCRIPTEN__
++    // LCD framebuffer memory is 90 degrees from the browser's logical screen
++    // layout. Store the rotated dimensions so SDL scales the top screen as
++    // 400x240 and the bottom screen as 320x240, rather than stretching their
++    // physical 240x400 / 240x320 source buffers.
++    info.width = source_height;
++    info.height = source_width;
++#else
++    info.width = source_width;
++    info.height = source_height;
++#endif
+     info.pixels.resize(info.width * info.height * 4);
+ 
+-    for (u32 y = 0; y < info.height; y++) {
+-        for (u32 x = 0; x < info.width; x++) {
+-            const u8* pixel = framebuffer_data + (y * pixel_stride + pixel_stride - x) * bpp;
++    for (u32 y = 0; y < source_height; y++) {
++        for (u32 x = 0; x < source_width; x++) {
++#ifdef __EMSCRIPTEN__
++            // 3DS display memory stores scanlines right-to-left. Rotate it
++            // into the browser's row-major logical-screen orientation.
++            const u8* pixel =
++                framebuffer_data + (y * source_width + (source_width - 1 - x)) * bpp;
++#else
++            const u8* pixel = framebuffer_data + (y * source_width + source_width - x) * bpp;
++#endif
+             Common::Vec4 color = [&] {
+                 if (color_fill.is_enabled) {
+                     return Common::Vec4<u8>(color_fill.color_r, color_fill.color_g,
+@@ -72,7 +89,11 @@ void RendererSoftware::LoadFBToScreenInfo(int i, const Pica::ColorFill& color_fi
+                 }
+                 UNREACHABLE();
+             }();
++#ifdef __EMSCRIPTEN__
++            const u32 output_offset = (x * info.width + y) * 4;
++#else
+             const u32 output_offset = (x * info.height + y) * 4;
++#endif
+             u8* dest = info.pixels.data() + output_offset;
+             std::memcpy(dest, color.AsArray(), sizeof(color));
+         }
+-- 
+2.39.1.windows.1
+
+
+From 88bd9706fa10914a4868714e89d25c5e7e770495 Mon Sep 17 00:00:00 2001
+From: Shubin123 <44554264+Shubin123@users.noreply.github.com>
+Date: Thu, 6 Aug 2026 15:05:24 -0700
+Subject: [PATCH 2/8] web: restore canvas presentation and persist runtime
+ assets
+
+---
+ README.md                                     |  4 +-
+ externals/libressl                            |  2 +-
+ externals/openal-soft                         |  2 +-
+ src/citra_sdl/CMakeLists.txt                  | 52 +++++++++++++++----
+ src/citra_sdl/emscripten_main.cpp             | 47 +++++++++++++++--
+ .../emu_window/emu_window_sdl2_sw.cpp         | 52 +++++++++++++------
+ src/citra_sdl/emu_window/emu_window_sdl2_sw.h |  5 ++
+ .../renderer_software/sw_rasterizer.cpp       | 17 ++++++
+ 8 files changed, 149 insertions(+), 32 deletions(-)
+
+diff --git a/README.md b/README.md
+index 50c0e89f1..1a3c72990 100644
+--- a/README.md
++++ b/README.md
+@@ -89,7 +89,7 @@ cmake -B build-web -S azahar -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_
+ cmake --build build-web --parallel 8
+ ```
+ 
+-The generated `azahar.html`, `azahar.js`, and `azahar.wasm` files are placed in `build-web/bin/Release/`; copy the JS and WASM files beside `web/index.html`. This build uses Emscripten pthreads (a 32-worker pool), so it must be served with `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` headers. The supplied server also sends a same-origin resource policy header. From the workspace root, use it with:
++The generated `azahar.html`, `azahar.js`, and `azahar.wasm` files are placed in `build-web/bin/Release/`. A normal CMake build automatically synchronizes the JS and WASM files beside `web/index.html`; `build_web.bat` also verifies their hashes. This build uses Emscripten pthreads (a 32-worker pool), so it must be served with `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` headers. The supplied server also sends a same-origin resource policy header. From the workspace root, use it with:
+ 
+ ```powershell
+ node web/server.cjs
+@@ -97,6 +97,8 @@ node web/server.cjs
+ 
+ Then open `http://127.0.0.1:8765/`. The web target starts with 512MB of shared memory, may grow to 4GB, and uses a 2MB stack setting.
+ 
++For LAN testing on port 9000, run `serve_web.bat` and open `http://<your-LAN-IP>:9000/web/index.html` (the supplied server accepts both `/` and `/web/index.html`). Do not use a generic static server unless it sends the same COOP/COEP headers. On static HTTPS hosting such as GitHub Pages, the bundled `coi-serviceworker.js` adds those headers after one controlled reload; plain HTTP LAN IPs still require a header-aware server.
++
+ The browser path has been verified with a legally owned, decrypted `.3ds` kiosk demo image: it reaches a visible Super Mario 3D Land title framebuffer in the browser after its boot period. Encrypted CIA files are intentionally rejected with a clear error; extract and use a decrypted cartridge image, keeping its `.3ds` extension. This software-rendered interpreter path is still substantially below full 3DS speed, so browser execution remains experimental and is not a general compatibility guarantee.
+ 
+ # How can I contribute?
+diff --git a/externals/libressl b/externals/libressl
+index 88b8e41b7..e43338982 160000
+--- a/externals/libressl
++++ b/externals/libressl
+@@ -1 +1 @@
+-Subproject commit 88b8e41b71099fabc57813bc06d8bc1aba050a19
++Subproject commit e4333898279e4a6e3e195e3737bcc354aa03ac22
+diff --git a/externals/openal-soft b/externals/openal-soft
+index 90191edd2..7f309dcbc 160000
+--- a/externals/openal-soft
++++ b/externals/openal-soft
+@@ -1 +1 @@
+-Subproject commit 90191edd20bb877c5cbddfdac7ec0fe49ad93727
++Subproject commit 7f309dcbc5e45a52843df27d3ea1e39e0d98e49a
+diff --git a/src/citra_sdl/CMakeLists.txt b/src/citra_sdl/CMakeLists.txt
+index 038b397fe..eed0a48f5 100644
+--- a/src/citra_sdl/CMakeLists.txt
++++ b/src/citra_sdl/CMakeLists.txt
+@@ -49,6 +49,13 @@ endif()
+ 
+ # Emscripten WebAssembly executable target
+ if (EMSCRIPTEN)
++    # The checked-in UI is served from the outer workspace's web/ directory.
++    # Keep its generated glue/WASM artifacts synchronized automatically after
++    # every link and on every normal CMake build. Override this only for a
++    # separate deployment directory.
++    set(AZAHAR_WEB_ASSET_DIR "${PROJECT_SOURCE_DIR}/../web" CACHE PATH
++        "Directory receiving azahar.js and azahar.wasm for the web UI")
++
+     add_executable(azahar_web
+         emscripten_main.cpp
+     )
+@@ -64,15 +71,12 @@ if (EMSCRIPTEN)
+         # setting alongside -pthread (from Threads::Threads) for the Unity
+         # Emscripten toolchain used by the web build.
+         -sUSE_PTHREADS=1
+-        # The core can create worker threads while a synchronous JS export is
+-        # still running.  Pre-create workers so pthread_create does not need
+-        # to wait for a subsequent browser event-loop turn.
+-        # Shader-cache warmup can create one worker per reported CPU, in
+-        # addition to the emulator's long-lived service threads.  Eight
+-        # workers is therefore insufficient even for a modest desktop
+-        # browser and Emscripten cannot synchronously grow this pool while a
+-        # WASM export is active.
+-        -sPTHREAD_POOL_SIZE=32
++        # Pre-create a modest worker pool so that the long-lived service
++        # threads (audio, logging, input) can start without waiting for
++        # the next browser event-loop turn.  The software rasterizer runs
++        # inline on the main thread in web builds, so the large pool that
++        # shader-cache warmup would otherwise require is not needed here.
++        -sPTHREAD_POOL_SIZE=8
+         -sINITIAL_MEMORY=512MB
+         -sSTACK_SIZE=2MB
+         -sALLOW_MEMORY_GROWTH=1
+@@ -90,8 +94,36 @@ if (EMSCRIPTEN)
+         # thrown, before the caller can report a ResultStatus.
+         -sNO_DISABLE_EXCEPTION_CATCHING=1
+         -sUSE_SDL=2
+-        "-sEXPORTED_FUNCTIONS=['_azahar_init','_azahar_load_rom','_azahar_step_frame','_azahar_framebuffer_nonblack_pixels','_azahar_shutdown','_azahar_run_loop','_malloc','_free','_emscripten_resize_heap']"
++        "-sEXPORTED_FUNCTIONS=['_azahar_init','_azahar_load_rom','_azahar_step_frame','_azahar_framebuffer_nonblack_pixels','_azahar_get_perf_stats','_azahar_shutdown','_azahar_run_loop','_malloc','_free','_emscripten_resize_heap']"
+         "-sEXPORTED_RUNTIME_METHODS=['ccall','cwrap','FS','HEAPU8','HEAP32']"
+         -sNO_EXIT_RUNTIME=1
+     )
++
++    # Sync immediately when the executable relinks, including callers that
++    # build the azahar_web target directly.
++    add_custom_command(TARGET azahar_web POST_BUILD
++        COMMAND ${CMAKE_COMMAND} -E make_directory "${AZAHAR_WEB_ASSET_DIR}"
++        COMMAND ${CMAKE_COMMAND} -E copy_if_different
++            "$<TARGET_FILE_DIR:azahar_web>/azahar.js"
++            "${AZAHAR_WEB_ASSET_DIR}/azahar.js"
++        COMMAND ${CMAKE_COMMAND} -E copy_if_different
++            "$<TARGET_FILE_DIR:azahar_web>/azahar.wasm"
++            "${AZAHAR_WEB_ASSET_DIR}/azahar.wasm"
++        COMMENT "Synchronizing Azahar web runtime artifacts"
++    )
++
++    # Custom targets run on every ordinary `cmake --build build-web`, even
++    # when the linker is already up-to-date. This repairs a missing or stale
++    # served artifact without any manual Copy-Item step.
++    add_custom_target(azahar_web_assets ALL
++        DEPENDS azahar_web
++        COMMAND ${CMAKE_COMMAND} -E make_directory "${AZAHAR_WEB_ASSET_DIR}"
++        COMMAND ${CMAKE_COMMAND} -E copy_if_different
++            "$<TARGET_FILE_DIR:azahar_web>/azahar.js"
++            "${AZAHAR_WEB_ASSET_DIR}/azahar.js"
++        COMMAND ${CMAKE_COMMAND} -E copy_if_different
++            "$<TARGET_FILE_DIR:azahar_web>/azahar.wasm"
++            "${AZAHAR_WEB_ASSET_DIR}/azahar.wasm"
++        COMMENT "Ensuring web/ contains the current Azahar runtime"
++    )
+ endif()
+diff --git a/src/citra_sdl/emscripten_main.cpp b/src/citra_sdl/emscripten_main.cpp
+index b5f5e0cfa..121b172db 100644
+--- a/src/citra_sdl/emscripten_main.cpp
++++ b/src/citra_sdl/emscripten_main.cpp
+@@ -181,8 +181,13 @@ extern "C" int azahar_step_frame() {
+     // regular opportunity for the browser to process input and paint.
+     Core::System::ResultStatus result = Core::System::ResultStatus::Success;
+ #ifdef __EMSCRIPTEN__
+-    constexpr int max_slices_per_tick = 16;
+-    const double deadline_ms = emscripten_get_now() + 12.0;
++    // Balance emulation throughput against browser responsiveness.  Each
++    // RunLoop slice advances a small amount of emulated time.  Batching
++    // slices lets the dyncom interpreter make meaningful progress during
++    // each ~16.7 ms display callback while the deadline keeps the tab
++    // responsive for input and painting.
++    constexpr int max_slices_per_tick = 20;
++    const double deadline_ms = emscripten_get_now() + 14.0;
+     for (int slice = 0; slice < max_slices_per_tick && emscripten_get_now() < deadline_ms;
+          ++slice) {
+         result = g_system->RunLoop();
+@@ -237,6 +242,39 @@ extern "C" int azahar_framebuffer_nonblack_pixels() {
+ #endif
+ }
+ 
++/// Write performance counters into a caller-allocated buffer of 8 doubles.
++/// Returns 0 on success, negative on error.
++/// Buffer layout (8 × f64):
++///   [0] game_fps        — GSP frame submissions per second
++///   [1] system_fps      — LCD VBlank events per second
++///   [2] emulation_speed — walltime / emulated-time ratio (1.0 = full speed)
++///   [3] time_gpu        — wall seconds per vblank spent in GPU processing
++///   [4] time_swap       — wall seconds per vblank spent presenting
++///   [5] time_vblank     — total wall seconds per vblank interval
++///   [6] mean_frametime  — arithmetic mean of frametimes in the history ring
++///   [7] frame_limit_pct — active frame-limit percentage (0 = unlimited)
++extern "C" int azahar_get_perf_stats(double* out_buffer, int buffer_size) {
++    if (!out_buffer || buffer_size < 8) {
++        return -1;
++    }
++    if (!g_initialized || !g_system) {
++        return -2;
++    }
++
++    const auto stats = g_system->GetLastPerfStats();
++
++    out_buffer[0] = stats.game_fps;
++    out_buffer[1] = stats.system_fps;
++    out_buffer[2] = stats.emulation_speed;
++    out_buffer[3] = stats.time_gpu;
++    out_buffer[4] = stats.time_swap;
++    out_buffer[5] = stats.time_vblank_interval;
++    out_buffer[6] = g_system->perf_stats ? g_system->perf_stats->GetMeanFrametime() : 0.0;
++    out_buffer[7] = Settings::values.frame_limit.GetValue();
++
++    return 0;
++}
++
+ /// Shut down the emulator and free resources.
+ extern "C" void azahar_shutdown() {
+     LOG_INFO(Frontend, "azahar_shutdown");
+@@ -283,8 +321,9 @@ extern "C" int azahar_run_loop() {
+ 
+     LOG_INFO(Frontend, "Starting Emscripten main loop");
+     // 0 FPS = use requestAnimationFrame (browser vsync)
+-    // 1 = simulate infinite loop so emscripten doesn't yield to browser
+-    emscripten_set_main_loop(emscripten_main_loop_callback, 0, 1);
++    // 0 = non-blocking: callback fires from the browser event loop without
++    //     Atomics.wait on the main thread, keeping the tab responsive.
++    emscripten_set_main_loop(emscripten_main_loop_callback, 0, 0);
+     return 0;
+ }
+ #endif // __EMSCRIPTEN__
+diff --git a/src/citra_sdl/emu_window/emu_window_sdl2_sw.cpp b/src/citra_sdl/emu_window/emu_window_sdl2_sw.cpp
+index 9cc02efc1..7cdd601ef 100644
+--- a/src/citra_sdl/emu_window/emu_window_sdl2_sw.cpp
++++ b/src/citra_sdl/emu_window/emu_window_sdl2_sw.cpp
+@@ -54,6 +54,13 @@ EmuWindow_SDL2_SW::EmuWindow_SDL2_SW(Core::System& system_, bool fullscreen, boo
+ }
+ 
+ EmuWindow_SDL2_SW::~EmuWindow_SDL2_SW() {
++    // Free the cached screen surfaces.
++    for (auto*& surface : screen_surfaces) {
++        if (surface) {
++            SDL_FreeSurface(surface);
++            surface = nullptr;
++        }
++    }
+     SDL_DestroyRenderer(renderer);
+     SDL_DestroyWindow(render_window);
+ }
+@@ -77,12 +84,11 @@ void EmuWindow_SDL2_SW::Present() {
+ #endif
+ 
+     while (IsOpen()) {
+-        SDL_SetRenderDrawColor(renderer,
+-                               static_cast<Uint8>(Settings::values.bg_red.GetValue() * 255),
+-                               static_cast<Uint8>(Settings::values.bg_green.GetValue() * 255),
+-                               static_cast<Uint8>(Settings::values.bg_blue.GetValue() * 255), 0xFF);
+-        SDL_RenderClear(renderer);
+-
++        // Use LoadFramebuffer (with surface caching) and SDL_BlitSurface
++        // for proper pixel-format conversion.  The software renderer
++        // outputs ABGR8888; the window surface varies by platform
++        // (e.g. BGR888 on Emscripten, ABGR8888 on desktop).
++        // SDL_BlitSurface handles the conversion automatically.
+         const auto draw_screen = [&](ScreenId screen_id) {
+             const auto dst_rect =
+                 screen_id == ScreenId::TopLeft ? layout.top_screen : layout.bottom_screen;
+@@ -91,18 +97,20 @@ void EmuWindow_SDL2_SW::Present() {
+                               static_cast<int>(dst_rect.GetHeight())};
+             SDL_Surface* screen = LoadFramebuffer(screen_id);
+             SDL_BlitSurface(screen, nullptr, window_surface, &sdl_rect);
+-            SDL_FreeSurface(screen);
+         };
+ 
+         draw_screen(ScreenId::TopLeft);
+         draw_screen(ScreenId::Bottom);
+ 
+         SDL_RenderPresent(renderer);
++        // The software path writes the composed frame into the SDL window
++        // surface.  On Emscripten this call is what transfers that surface
++        // into Module.canvas; SDL_RenderPresent alone presents the unrelated
++        // SDL_Renderer target and leaves the browser-facing canvas black.
+         SDL_UpdateWindowSurface(render_window);
+ 
+ #ifdef __EMSCRIPTEN__
+-        // Single frame for Emscripten; return control to the browser.
+-        return;
++        return; // single frame; return control to the browser
+ #endif
+     }
+ }
+@@ -112,10 +120,24 @@ SDL_Surface* EmuWindow_SDL2_SW::LoadFramebuffer(VideoCore::ScreenId screen_id) {
+     const auto& info = renderer.Screen(screen_id);
+     const int width = static_cast<int>(info.width);
+     const int height = static_cast<int>(info.height);
+-    SDL_Surface* surface =
+-        SDL_CreateRGBSurfaceWithFormat(0, width, height, 0, SDL_PIXELFORMAT_ABGR8888);
+-    SDL_LockSurface(surface);
+-    std::memcpy(surface->pixels, info.pixels.data(), info.pixels.size());
+-    SDL_UnlockSurface(surface);
+-    return surface;
++
++    const auto idx = static_cast<size_t>(screen_id);
++    SDL_Surface*& cached = screen_surfaces[idx];
++
++    // Reuse the cached surface; reallocate only when dimensions change.
++    if (!cached || cached->w != width || cached->h != height) {
++        if (cached) {
++            SDL_FreeSurface(cached);
++        }
++        cached = SDL_CreateRGBSurfaceWithFormat(0, width, height, 0, SDL_PIXELFORMAT_ABGR8888);
++        if (!cached) {
++            LOG_CRITICAL(Frontend, "Failed to create cached screen surface: {}", SDL_GetError());
++            return nullptr;
++        }
++    }
++
++    SDL_LockSurface(cached);
++    std::memcpy(cached->pixels, info.pixels.data(), info.pixels.size());
++    SDL_UnlockSurface(cached);
++    return cached;
+ }
+diff --git a/src/citra_sdl/emu_window/emu_window_sdl2_sw.h b/src/citra_sdl/emu_window/emu_window_sdl2_sw.h
+index 12f446e33..a1fbdcea9 100644
+--- a/src/citra_sdl/emu_window/emu_window_sdl2_sw.h
++++ b/src/citra_sdl/emu_window/emu_window_sdl2_sw.h
+@@ -40,4 +40,9 @@ private:
+ 
+     /// The window surface
+     SDL_Surface* window_surface;
++
++    /// Cached screen surfaces reused every frame to avoid per-frame
++    /// SDL_CreateRGBSurfaceWithFormat / SDL_FreeSurface churn.  Indexed by
++    /// static_cast<size_t>(VideoCore::ScreenId).
++    SDL_Surface* screen_surfaces[3]{};
+ };
+diff --git a/src/video_core/renderer_software/sw_rasterizer.cpp b/src/video_core/renderer_software/sw_rasterizer.cpp
+index 36aa2b03b..eb2303472 100644
+--- a/src/video_core/renderer_software/sw_rasterizer.cpp
++++ b/src/video_core/renderer_software/sw_rasterizer.cpp
+@@ -102,7 +102,13 @@ private:
+ 
+ RasterizerSoftware::RasterizerSoftware(Memory::MemorySystem& memory_, Pica::PicaCore& pica_)
+     : memory{memory_}, pica{pica_}, regs{pica.regs.internal},
++#ifdef __EMSCRIPTEN__
++      // Web: rasterize inline on the calling thread so the browser main
++      // thread never blocks on a condition variable (see AddTriangle).
++      num_sw_threads{0},
++#else
+       num_sw_threads{std::max(std::thread::hardware_concurrency(), 2U)},
++#endif
+       sw_workers{num_sw_threads, "SwRenderer workers"}, fb{memory, regs.framebuffer} {}
+ 
+ void RasterizerSoftware::AddTriangle(const Pica::OutputVertex& v0, const Pica::OutputVertex& v1,
+@@ -466,9 +472,20 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+                 }
+             }
+         };
++#ifdef __EMSCRIPTEN__
++        // Execute inline on the calling thread.  The Web build enables
++        // pthreads so SharedArrayBuffer is available, but blocking the
++        // main browser thread on a condition variable (WaitForRequests)
++        // would freeze the tab.  Process each scanline synchronously
++        // instead of dispatching to the worker pool.
++        process_scanline();
++#else
+         sw_workers.QueueWork(std::move(process_scanline));
++#endif
+     }
++#ifndef __EMSCRIPTEN__
+     sw_workers.WaitForRequests();
++#endif
+ }
+ 
+ std::array<Common::Vec4<u8>, 4> RasterizerSoftware::TextureColor(
+-- 
+2.39.1.windows.1
+
+
+From 4c950ef60a18053c9d5301ce0df6e4a2e0d79294 Mon Sep 17 00:00:00 2001
+From: Shubin123 <44554264+Shubin123@users.noreply.github.com>
+Date: Thu, 6 Aug 2026 15:18:04 -0700
+Subject: [PATCH 3/8] web: let browser drive emulation frame pacing
+
+---
+ src/citra_sdl/emscripten_main.cpp | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/src/citra_sdl/emscripten_main.cpp b/src/citra_sdl/emscripten_main.cpp
+index 121b172db..b068d7733 100644
+--- a/src/citra_sdl/emscripten_main.cpp
++++ b/src/citra_sdl/emscripten_main.cpp
+@@ -64,6 +64,13 @@ extern "C" int azahar_init() {
+     // Override desktop-only defaults after loading the configuration.
+     Settings::values.graphics_api.SetValue(Settings::GraphicsAPI::Software);
+     Settings::values.use_cpu_jit.SetValue(false);
++#ifdef __EMSCRIPTEN__
++    // The browser's requestAnimationFrame loop is the presentation clock.
++    // Keeping the native 100% frame limiter enabled makes RunLoop sleep on
++    // the browser main thread as well, wasting its bounded frame budget and
++    // severely reducing interpreter throughput.
++    Settings::values.frame_limit.SetValue(0);
++#endif
+ 
+     // The SDL and Qt frontends populate this map while loading their config
+     // files.  The web frontend has no config file, but Service::Init still
+-- 
+2.39.1.windows.1
+
+
+From 1f266c84bdad6fde313acbb69e426dc6ae9bc57f Mon Sep 17 00:00:00 2001
+From: Shubin123 <44554264+Shubin123@users.noreply.github.com>
+Date: Thu, 6 Aug 2026 15:21:44 -0700
+Subject: [PATCH 4/8] web: parallelize software rasterization
+
+---
+ .../renderer_software/sw_rasterizer.cpp        | 18 ++++--------------
+ 1 file changed, 4 insertions(+), 14 deletions(-)
+
+diff --git a/src/video_core/renderer_software/sw_rasterizer.cpp b/src/video_core/renderer_software/sw_rasterizer.cpp
+index eb2303472..84da95137 100644
+--- a/src/video_core/renderer_software/sw_rasterizer.cpp
++++ b/src/video_core/renderer_software/sw_rasterizer.cpp
+@@ -103,9 +103,10 @@ private:
+ RasterizerSoftware::RasterizerSoftware(Memory::MemorySystem& memory_, Pica::PicaCore& pica_)
+     : memory{memory_}, pica{pica_}, regs{pica.regs.internal},
+ #ifdef __EMSCRIPTEN__
+-      // Web: rasterize inline on the calling thread so the browser main
+-      // thread never blocks on a condition variable (see AddTriangle).
+-      num_sw_threads{0},
++      // Keep raster work inside the preallocated Emscripten pthread pool.
++      // A fixed count avoids attempting to create one browser worker per
++      // reported hardware CPU while leaving capacity for core service threads.
++      num_sw_threads{4},
+ #else
+       num_sw_threads{std::max(std::thread::hardware_concurrency(), 2U)},
+ #endif
+@@ -472,20 +473,9 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+                 }
+             }
+         };
+-#ifdef __EMSCRIPTEN__
+-        // Execute inline on the calling thread.  The Web build enables
+-        // pthreads so SharedArrayBuffer is available, but blocking the
+-        // main browser thread on a condition variable (WaitForRequests)
+-        // would freeze the tab.  Process each scanline synchronously
+-        // instead of dispatching to the worker pool.
+-        process_scanline();
+-#else
+         sw_workers.QueueWork(std::move(process_scanline));
+-#endif
+     }
+-#ifndef __EMSCRIPTEN__
+     sw_workers.WaitForRequests();
+-#endif
+ }
+ 
+ std::array<Common::Vec4<u8>, 4> RasterizerSoftware::TextureColor(
+-- 
+2.39.1.windows.1
+
+
+From a83e5989e8deaee992f8445b86352354be3e1ee7 Mon Sep 17 00:00:00 2001
+From: Shubin123 <44554264+Shubin123@users.noreply.github.com>
+Date: Thu, 6 Aug 2026 15:26:28 -0700
+Subject: [PATCH 5/8] web: batch software rasterizer scanline work
+
+---
+ .../renderer_software/sw_rasterizer.cpp        | 18 ++++++++++++++----
+ 1 file changed, 14 insertions(+), 4 deletions(-)
+
+diff --git a/src/video_core/renderer_software/sw_rasterizer.cpp b/src/video_core/renderer_software/sw_rasterizer.cpp
+index 84da95137..c79341d83 100644
+--- a/src/video_core/renderer_software/sw_rasterizer.cpp
++++ b/src/video_core/renderer_software/sw_rasterizer.cpp
+@@ -309,9 +309,18 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+ 
+     // Enter rasterization loop, starting at the center of the topleft bounding box corner.
+     // TODO: Not sure if looping through x first might be faster
+-    for (u16 y = min_y + 8; y < max_y; y += 0x10) {
+-        const auto process_scanline = [&, y] {
+-            for (u16 x = min_x + 8; x < max_x; x += 0x10) {
++    // A one-task-per-scanline strategy spends substantial time contending on
++    // the shared worker queue for small triangles. Rows do not overlap in the
++    // framebuffer, so process a short contiguous row band per task instead.
++    constexpr u16 scanlines_per_task = 4;
++    constexpr u16 rasterizer_pixel_step = 0x10;
++    for (u16 y_begin = min_y + 8; y_begin < max_y;
++         y_begin += rasterizer_pixel_step * scanlines_per_task) {
++        const u16 y_end = std::min<u16>(
++            max_y, static_cast<u16>(y_begin + rasterizer_pixel_step * scanlines_per_task));
++        const auto process_row_band = [&, y_begin, y_end] {
++            for (u16 y = y_begin; y < y_end; y += rasterizer_pixel_step) {
++                for (u16 x = min_x + 8; x < max_x; x += rasterizer_pixel_step) {
+                 // Do not process the pixel if it's inside the scissor box and the scissor mode is
+                 // set to Exclude.
+                 if (regs.rasterizer.scissor_test.mode == RasterizerRegs::ScissorMode::Exclude) {
+@@ -471,9 +480,10 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+                 if (regs.framebuffer.framebuffer.allow_color_write != 0) {
+                     fb.DrawPixel(x >> 4, y >> 4, result);
+                 }
++                }
+             }
+         };
+-        sw_workers.QueueWork(std::move(process_scanline));
++        sw_workers.QueueWork(std::move(process_row_band));
+     }
+     sw_workers.WaitForRequests();
+ }
+-- 
+2.39.1.windows.1
+
+
+From 3f68c48b491b9b80c28971b1d88ddd758d3f7a12 Mon Sep 17 00:00:00 2001
+From: Shubin123 <44554264+Shubin123@users.noreply.github.com>
+Date: Thu, 6 Aug 2026 15:29:44 -0700
+Subject: [PATCH 6/8] web: scale software rasterizer workers
+
+---
+ src/video_core/renderer_software/sw_rasterizer.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/video_core/renderer_software/sw_rasterizer.cpp b/src/video_core/renderer_software/sw_rasterizer.cpp
+index c79341d83..aba2a2082 100644
+--- a/src/video_core/renderer_software/sw_rasterizer.cpp
++++ b/src/video_core/renderer_software/sw_rasterizer.cpp
+@@ -106,7 +106,7 @@ RasterizerSoftware::RasterizerSoftware(Memory::MemorySystem& memory_, Pica::Pica
+       // Keep raster work inside the preallocated Emscripten pthread pool.
+       // A fixed count avoids attempting to create one browser worker per
+       // reported hardware CPU while leaving capacity for core service threads.
+-      num_sw_threads{4},
++      num_sw_threads{6},
+ #else
+       num_sw_threads{std::max(std::thread::hardware_concurrency(), 2U)},
+ #endif
+-- 
+2.39.1.windows.1
+
+
+From 26b30cc3df848d3e48fbb0847b294bb3dd1154d7 Mon Sep 17 00:00:00 2001
+From: Shubin123 <44554264+Shubin123@users.noreply.github.com>
+Date: Thu, 6 Aug 2026 15:30:50 -0700
+Subject: [PATCH 7/8] docs: describe web worker pool accurately
+
+---
+ README.md | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/README.md b/README.md
+index 1a3c72990..1f67dd834 100644
+--- a/README.md
++++ b/README.md
+@@ -89,7 +89,7 @@ cmake -B build-web -S azahar -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_
+ cmake --build build-web --parallel 8
+ ```
+ 
+-The generated `azahar.html`, `azahar.js`, and `azahar.wasm` files are placed in `build-web/bin/Release/`. A normal CMake build automatically synchronizes the JS and WASM files beside `web/index.html`; `build_web.bat` also verifies their hashes. This build uses Emscripten pthreads (a 32-worker pool), so it must be served with `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` headers. The supplied server also sends a same-origin resource policy header. From the workspace root, use it with:
++The generated `azahar.html`, `azahar.js`, and `azahar.wasm` files are placed in `build-web/bin/Release/`. A normal CMake build automatically synchronizes the JS and WASM files beside `web/index.html`; `build_web.bat` also verifies their hashes. This build uses Emscripten pthreads (an 8-worker pool, including six software-rasterizer workers), so it must be served with `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` headers. The supplied server also sends a same-origin resource policy header. From the workspace root, use it with:
+ 
+ ```powershell
+ node web/server.cjs
+-- 
+2.39.1.windows.1
+
+
+From 719c6bf2e747b068c5231330bd5e9b582c93b9cc Mon Sep 17 00:00:00 2001
+From: Shubin123 <44554264+Shubin123@users.noreply.github.com>
+Date: Thu, 6 Aug 2026 16:03:13 -0700
+Subject: [PATCH 8/8] web: expose non-blocking savestate slots
+
+---
+ src/citra_sdl/CMakeLists.txt      |  2 +-
+ src/citra_sdl/emscripten_main.cpp | 17 +++++++++++++++++
+ 2 files changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/src/citra_sdl/CMakeLists.txt b/src/citra_sdl/CMakeLists.txt
+index eed0a48f5..02cd933e4 100644
+--- a/src/citra_sdl/CMakeLists.txt
++++ b/src/citra_sdl/CMakeLists.txt
+@@ -94,7 +94,7 @@ if (EMSCRIPTEN)
+         # thrown, before the caller can report a ResultStatus.
+         -sNO_DISABLE_EXCEPTION_CATCHING=1
+         -sUSE_SDL=2
+-        "-sEXPORTED_FUNCTIONS=['_azahar_init','_azahar_load_rom','_azahar_step_frame','_azahar_framebuffer_nonblack_pixels','_azahar_get_perf_stats','_azahar_shutdown','_azahar_run_loop','_malloc','_free','_emscripten_resize_heap']"
++        "-sEXPORTED_FUNCTIONS=['_azahar_init','_azahar_load_rom','_azahar_step_frame','_azahar_framebuffer_nonblack_pixels','_azahar_save_state','_azahar_load_state','_azahar_get_perf_stats','_azahar_shutdown','_azahar_run_loop','_malloc','_free','_emscripten_resize_heap']"
+         "-sEXPORTED_RUNTIME_METHODS=['ccall','cwrap','FS','HEAPU8','HEAP32']"
+         -sNO_EXIT_RUNTIME=1
+     )
+diff --git a/src/citra_sdl/emscripten_main.cpp b/src/citra_sdl/emscripten_main.cpp
+index b068d7733..a1f2bea39 100644
+--- a/src/citra_sdl/emscripten_main.cpp
++++ b/src/citra_sdl/emscripten_main.cpp
+@@ -249,6 +249,23 @@ extern "C" int azahar_framebuffer_nonblack_pixels() {
+ #endif
+ }
+ 
++/// Queue a save-state operation for the next emulation slice. Serialization
++/// remains inside RunLoop, so it cannot race active emulation or input.
++extern "C" int azahar_save_state(int slot) {
++    if (!g_initialized || !g_rom_loaded || !g_system || slot < 0 || slot > 10) {
++        return -1;
++    }
++    return g_system->SendSignal(Core::System::Signal::Save, static_cast<u32>(slot)) ? 0 : -2;
++}
++
++/// Queue loading a previously captured state for the next emulation slice.
++extern "C" int azahar_load_state(int slot) {
++    if (!g_initialized || !g_rom_loaded || !g_system || slot < 0 || slot > 10) {
++        return -1;
++    }
++    return g_system->SendSignal(Core::System::Signal::Load, static_cast<u32>(slot)) ? 0 : -2;
++}
++
+ /// Write performance counters into a caller-allocated buffer of 8 doubles.
+ /// Returns 0 on success, negative on error.
+ /// Buffer layout (8 × f64):
+-- 
+2.39.1.windows.1
+

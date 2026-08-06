@@ -87,10 +87,13 @@ Browser: Chrome headless, 30-second title-screen warmup, 15-second rAF measureme
 | Inline rasterizer baseline | 8.1 FPS | 2.0 | 3% | 488 ms | 347 ms |
 | Six-worker rasterizer | 19.5 FPS | 4.0 | 7% | 216 ms | 199 ms |
 
-These results are deliberately taken after a title-screen warmup rather than
-during loading. Software GPU command processing remains the dominant measured
-cost; dyncom already caches translated instruction blocks and should be
-profiled independently before changing its dispatch path.
+These historical title-screen figures are not gameplay performance claims.
+For optimization decisions, capture and use the ignored local gameplay state
+below. It starts in Mario's movement tutorial, restores through the core's
+queued save-state signal, and rejects an empty/low-information restored canvas.
+Software GPU command processing remains the dominant measured cost; dyncom
+already caches translated instruction blocks and should be profiled independently
+before changing its dispatch path.
 
 ### Benchmark Commands
 
@@ -105,6 +108,13 @@ node tests/benchmark_browser.cjs --duration-seconds 15 --warmup-seconds 30 --rep
 
 # With profiling (perf counter samples every ~1s)
 node tests/benchmark_browser.cjs --duration-seconds 15 --warmup-seconds 30 --repeat 1 --profile
+
+# First-time local gameplay fixture (takes several minutes; ROM/state stay ignored)
+$env:AZAHAR_ROM_PATH = (Resolve-Path 'test_games\Super Mario 3D Land (Europe) (En,Fr,De,Es,It) (Demo) (Kiosk).3ds').Path
+node tests/capture_gameplay_state.cjs
+
+# Real-scene browser benchmark. Use --interactive to include visible presentation.
+node tests/benchmark_browser.cjs --state tmp_test/gameplay_state/000400000007D500.01.cst --duration-seconds 15 --warmup-seconds 0 --repeat 3 --profile
 
 # Direct Node.js benchmark (non-pthreads builds only)
 node tests/benchmark.cjs --frames 300 --warmup 30 --repeat 3
