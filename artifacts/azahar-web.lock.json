@@ -4,12 +4,12 @@
                    "repository":  "azahar/",
                    "remote":  "https://github.com/azahar-emu/azahar.git",
                    "upstream":  "origin/master",
-                   "commit":  "88bd9706fa10914a4868714e89d25c5e7e770495",
+                   "commit":  "1f266c84bdad6fde313acbb69e426dc6ae9bc57f",
                    "publishedToUpstream":  false,
                    "recoveryPatch":  {
-                                         "path":  "artifacts/source-patches/azahar-88bd9706fa10.patch",
+                                         "path":  "artifacts/source-patches/azahar-1f266c84bdad.patch",
                                          "baseCommit":  "dd65ef47491ff659b02ed1257411317ab4975f29",
-                                         "sha256":  "f7be85a137d9d5721037ff5ea81b946f96516916cb1deabf8373e4821161d2a8"
+                                         "sha256":  "132ef14e2393ad04884af0dde91bdb0acc7d4ae35f60f14b26db0d8019614e22"
                                      },
                    "submodules":  [
                                       {
@@ -324,12 +324,12 @@
                       "azahar.js":  {
                                         "path":  "web/azahar.js",
                                         "bytes":  2915625,
-                                        "sha256":  "54ecab181161d1e2eb7969a8ced17a2b5ff790fd22fb3f621ac8bd17dd7cff8c"
+                                        "sha256":  "7f56f1f0ec1c4896a8830a48f5f4d5c82b2c840bd43a459bc0198e941de730e4"
                                     },
                       "azahar.wasm":  {
                                           "path":  "web/azahar.wasm",
-                                          "bytes":  10610650,
-                                          "sha256":  "32f1c122c08e5afb482523750f12396c60c079d7f73ee56117d67fbfa16ee3dc"
+                                          "bytes":  10613916,
+                                          "sha256":  "d8921a2bf7c15a13035c590b107e2cdc4b4d1d50761a83dc20d4793f9fd98374"
                                       }
                   }
 }
