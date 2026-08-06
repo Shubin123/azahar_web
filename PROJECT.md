@@ -21,7 +21,7 @@ Azahar WebAssembly port targeting modern web browsers via Emscripten.
 | 6 | Main Loop Event Unrolling | Replace blocking while loops with `emscripten_set_main_loop` / `azahar_step_frame` | M2 | Survey Explorer 2 |
 | 7 | HTML5 Canvas Framebuffer Blit | Output rendered 3DS framebuffers directly onto `<canvas>` element | M2 | ORIGINAL_REQUEST §R2 |
 | 8 | Web UI & Game File Loader | HTML/JS interface to load `.3ds`, `.3dsx`, `.cia`, `.elf` into MEMFS | M3 | ORIGINAL_REQUEST §R2 |
-| 9 | WASM Memory and Thread Safety | Set linker flags (`INITIAL_MEMORY=512MB`, `STACK_SIZE=2MB`, `ALLOW_MEMORY_GROWTH=1`, `MAXIMUM_MEMORY=4GB`) and preallocate a 32-worker pthread pool | M4 | Survey Explorer 3 |
+| 9 | WASM Memory and Thread Safety | Set linker flags (`INITIAL_MEMORY=512MB`, `STACK_SIZE=2MB`, `ALLOW_MEMORY_GROWTH=1`, `MAXIMUM_MEMORY=4GB`) and preallocate an 8-worker pthread pool | M4 | Survey Explorer 3 |
 | 10 | Memory Access Bounds Guard | Prevent WASM out-of-bounds traps (`RuntimeError: memory access out of bounds`) | M4 | ORIGINAL_REQUEST §Acceptance Criteria |
 | 11 | WebGPU Overlay Alignment | Ensure `azahar-webgpu/` overlay architecture builds alongside Emscripten targets | M4 | ORIGINAL_REQUEST §R3 |
 | 12 | E2E Test Suite & Real-ROM Pass | Verify WASM instantiation, decrypted ROM loading, continuous emulation, and canvas output | M5 | ORIGINAL_REQUEST §Acceptance Criteria |
@@ -32,7 +32,7 @@ Azahar WebAssembly port targeting modern web browsers via Emscripten.
 | M1 | Emscripten Build & CMake Setup | CMake configuration, dependency stubbing, dyncom & renderer_software selection | None | COMPLETE |
 | M2 | Canvas Frontend & Loop Unrolling | `EmuWindow_SDL2_SW` adaptation, main loop unrolling, HTML5 canvas output | M1 | COMPLETE |
 | M3 | Web UI & ROM Loading Pipeline | Minimal HTML/JS frontend, MEMFS file mounting, C++ file loading API | M2 | COMPLETE |
-| M4 | WASM Memory Safety, Threading & WebGPU Overlay | Growable 512MB-to-4GB memory, 2MB stack, 32-worker pthread pool, out-of-bounds guards, WebGPU overlay link | M1, M2 | COMPLETE |
+| M4 | WASM Memory Safety, Threading & WebGPU Overlay | Growable 512MB-to-4GB memory, 2MB stack, 8-worker pthread pool, out-of-bounds guards, WebGPU overlay link | M1, M2 | COMPLETE |
 | M5 | E2E Verification & Real-ROM Rendering | Browser-driven WASM initialization, decrypted ROM execution, continuous frame loop, and canvas rendering verification | M1, M2, M3, M4 | COMPLETE |
 
 ## Interface Contracts
@@ -105,10 +105,10 @@ node tests/web_artifact_smoke.cjs
 # Browser benchmark (requires Puppeteer)
 npm install --no-save puppeteer-core
 $env:CHROME_PATH = "$env:ProgramFiles\Google\Chrome\Application\chrome.exe"
-node tests/benchmark_browser.cjs --frames 300 --warmup 30 --repeat 3
+node tests/benchmark_browser.cjs --duration-seconds 15 --warmup-seconds 30 --repeat 3
 
 # With profiling (perf counter samples every ~1s)
-node tests/benchmark_browser.cjs --frames 300 --warmup 30 --repeat 1 --profile
+node tests/benchmark_browser.cjs --duration-seconds 15 --warmup-seconds 30 --repeat 1 --profile
 
 # Direct Node.js benchmark (non-pthreads builds only)
 node tests/benchmark.cjs --frames 300 --warmup 30 --repeat 3

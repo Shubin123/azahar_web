@@ -18,8 +18,9 @@ The web build is verified through configuration, compilation, artifact generatio
 ## Verified (2026-08-06)
 
 - Performance benchmarking suite operational via `tests/benchmark_browser.cjs` (Puppeteer) and `tests/benchmark.cjs` (direct Node.js, non-pthreads builds only).
-- Super Mario 3D Land kiosk demo runs at **93% emulation speed, 59.8 FPS** with the software renderer + dyncom interpreter (Chrome headless).
-- SDL framebuffer presentation optimized: direct window-surface write bypasses intermediate surfaces, swap time averages 0.77 ms.
+- The browser benchmark now uses `requestAnimationFrame`, a 30-second title-screen warmup, and a 15-second sustained measurement; it does not report loader or tight-loop call rates as gameplay performance.
+- The current six-worker software-rasterizer build reaches **19.5 browser callbacks/s, 4.0 game FPS, and 7% emulation speed** on the kiosk-demo title in Chrome headless. This remains an experimental, slow path rather than a near-full-speed claim.
+- SDL surface presentation is verified end-to-end by a compositor screenshot signature; renderer output alone is not considered proof of visible graphics.
 - SDL presentation:
   - `EmuWindow_SDL2_SW` uses an Emscripten fast path that writes framebuffer pixels directly to the window surface, eliminating per-frame SDL surface allocation and SDL_BlitSurface overhead.
   - `SDL_RenderClear` and `SDL_UpdateWindowSurface` skipped on Emscripten (unnecessary with full-area overwrites and canvas backend).
@@ -50,7 +51,7 @@ To require a visible multi-color game framebuffer, add `AZAHAR_REAL_ROM_BOOT_MS=
 ### Performance Benchmark (headless Chrome)
 ```powershell
 $env:CHROME_PATH = "$env:ProgramFiles\Google\Chrome\Application\chrome.exe"
-node tests/benchmark_browser.cjs --frames 300 --warmup 30 --repeat 3 --profile
+node tests/benchmark_browser.cjs --duration-seconds 15 --warmup-seconds 30 --repeat 3 --profile
 ```
 Results → `tests/benchmark_results.json`.
 

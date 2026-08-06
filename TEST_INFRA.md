@@ -17,7 +17,7 @@ Targeting all 12 features defined in `PROJECT.md`:
 6. **Main Loop Event Unrolling**: Replaces blocking loops with `azahar_step_frame` / Emscripten main loop.
 7. **HTML5 Canvas Framebuffer Blit**: Renders 3DS framebuffers onto `<canvas>` element.
 8. **Web UI & Game File Loader**: HTML/JS interface loading `.3ds`, `.3dsx`, `.cia`, `.elf` into MEMFS.
-9. **WASM Memory and Thread Safety**: Sets linker flags (`INITIAL_MEMORY=512MB`, `STACK_SIZE=2MB`, `ALLOW_MEMORY_GROWTH=1`, `MAXIMUM_MEMORY=4GB`) and a preallocated 32-worker pthread pool.
+9. **WASM Memory and Thread Safety**: Sets linker flags (`INITIAL_MEMORY=512MB`, `STACK_SIZE=2MB`, `ALLOW_MEMORY_GROWTH=1`, `MAXIMUM_MEMORY=4GB`) and a preallocated 8-worker pthread pool.
 10. **Memory Access Bounds Guard**: Prevents WASM memory out-of-bounds crashes (`RuntimeError: memory access out of bounds`).
 11. **WebGPU Overlay Alignment**: Ensures `azahar-webgpu/` architecture links cleanly alongside WASM target.
 12. **E2E Test Suite & Real-ROM Pass**: Verifies WASM instantiation, decrypted ROM loading, first-frame rendering, and continuous execution.
