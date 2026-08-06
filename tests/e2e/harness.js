@@ -305,9 +305,10 @@ class RealMEMFSWrapper {
 }
 
 class E2EHarness {
-    constructor() {
+    constructor(opts = {}) {
         this.canvas = new MockCanvas('canvas', 400, 480);
         this.fs = new RealMEMFSWrapper(this);
+        this.noMockCanvas = !!opts.noMockCanvas;
         this.setupGlobals();
         this.wasmModule = null;
     }
@@ -363,6 +364,18 @@ class E2EHarness {
 
         this.setupGlobals();
 
+        // Emscripten's pthreads build resolves the Module synchronously with
+        // stubs for the exported functions, but the WASM runtime compiles and
+        // instantiates asynchronously.  Wait for the runtime-initialized
+        // callback before any caller can invoke an export.
+        let runtimeResolve;
+        const runtimeReady = new Promise(r => { runtimeResolve = r; });
+        const prevOnInit = global.Module.onRuntimeInitialized;
+        global.Module.onRuntimeInitialized = () => {
+            if (prevOnInit) prevOnInit();
+            runtimeResolve();
+        };
+
         let mod = require(targetPath);
         if (typeof mod === 'function') {
             mod = await mod();
@@ -370,12 +383,18 @@ class E2EHarness {
             mod = await mod;
         }
 
-        let attempts = 0;
-        while (!mod._azahar_init && attempts < 100) {
-            await new Promise(r => setTimeout(r, 20));
-            attempts++;
+        // If the runtime already initialized during the require(), resolve now
+        if (mod.calledRun) {
+            runtimeResolve();
         }
 
+        // Wait for the runtime to be ready (timeout after 60s)
+        await Promise.race([
+            runtimeReady,
+            new Promise((_, reject) => setTimeout(() => reject(new Error('WASM runtime initialization timed out after 60s')), 60000)),
+        ]);
+
+        // Verify we have the exports we need
         if (!mod._azahar_init) {
             throw new Error('Failed to initialize WASM module exports');
         }
@@ -408,25 +427,27 @@ class E2EHarness {
             return -6;
         };
 
-        const realStepFrame = mod._azahar_step_frame;
-        const self = this;
-        mod._azahar_step_frame = () => {
-            const res = realStepFrame();
-            if (res === 0) {
-                const ctx = self.canvas.getContext('2d');
-                if (ctx) {
-                    const imgData = ctx.createImageData(self.canvas.width, self.canvas.height);
-                    for (let i = 0; i < imgData.data.length; i += 4) {
-                        imgData.data[i] = 200;
-                        imgData.data[i + 1] = 100;
-                        imgData.data[i + 2] = 50;
-                        imgData.data[i + 3] = 255;
+        if (!this.noMockCanvas) {
+            const realStepFrame = mod._azahar_step_frame;
+            const self = this;
+            mod._azahar_step_frame = () => {
+                const res = realStepFrame();
+                if (res === 0) {
+                    const ctx = self.canvas.getContext('2d');
+                    if (ctx) {
+                        const imgData = ctx.createImageData(self.canvas.width, self.canvas.height);
+                        for (let i = 0; i < imgData.data.length; i += 4) {
+                            imgData.data[i] = 200;
+                            imgData.data[i + 1] = 100;
+                            imgData.data[i + 2] = 50;
+                            imgData.data[i + 3] = 255;
+                        }
+                        ctx.putImageData(imgData, 0, 0);
                     }
-                    ctx.putImageData(imgData, 0, 0);
                 }
-            }
-            return res;
-        };
+                return res;
+            };
+        }
 
         return this.wasmModule;
     }

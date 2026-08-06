@@ -17,6 +17,7 @@
     const btnStop = document.getElementById('btn-stop');
     const statusEl = document.getElementById('status');
     const progressEl = document.getElementById('progress');
+    const fpsEl = document.getElementById('fps');
     const logEl = document.getElementById('log');
 
     // ── State ─────────────────────────────────────────────────────
@@ -34,6 +35,10 @@
     let runStartedAt = 0;
     let nextBootStatusAt = 0;
     let gameGraphicsDetected = false;
+    let lastFpsAt = 0;
+    let lastFrameCount = 0;
+    let displayFps = 0;
+    let emulationSpeed = 0;
 
     // ── Logging ───────────────────────────────────────────────────
     function log(msg) {
@@ -370,6 +375,10 @@
         runStartedAt = performance.now();
         nextBootStatusAt = runStartedAt;
         gameGraphicsDetected = false;
+        lastFpsAt = 0;
+        lastFrameCount = 0;
+        displayFps = 0;
+        emulationSpeed = 0;
         btnRun.disabled = true;
         btnStop.disabled = false;
         btnStep.disabled = true;
@@ -386,6 +395,28 @@
                 if (result === 0) {
                     updateCanvasFromWasm();
                     updateBootStatus(now);
+                    // Update FPS meter every ~500 ms
+                    if (now - lastFpsAt >= 500) {
+                        if (lastFpsAt > 0) {
+                            displayFps = (frameCount - lastFrameCount) /
+                                ((now - lastFpsAt) / 1000);
+                        }
+                        lastFpsAt = now;
+                        lastFrameCount = frameCount;
+                        // Pull emulation speed from the C++ perf counters
+                        if (wasmModule._azahar_get_perf_stats) {
+                            var buf = wasmModule._malloc(64); // 8 × f64
+                            if (wasmModule._azahar_get_perf_stats(buf, 8) === 0) {
+                                emulationSpeed = new Float64Array(
+                                    wasmModule.HEAPU8.buffer, buf, 8)[2] * 100;
+                            }
+                            wasmModule._free(buf);
+                        }
+                        if (displayFps > 0) {
+                            fpsEl.textContent = displayFps.toFixed(0) + ' FPS' +
+                                (emulationSpeed > 0 ? ' | ' + emulationSpeed.toFixed(0) + '% speed' : '');
+                        }
+                    }
                     runAnimationFrame = requestAnimationFrame(tick);
                 } else if (result === 1) {
                     log('Emulation ended.');
@@ -419,6 +450,7 @@
             runAnimationFrame = null;
         }
         hideProgress();
+        fpsEl.textContent = '';
         btnRun.disabled = !romLoaded;
         btnStop.disabled = true;
         btnStep.disabled = !romLoaded;

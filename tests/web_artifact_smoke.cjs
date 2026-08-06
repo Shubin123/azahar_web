@@ -13,6 +13,7 @@ const expectedExports = [
     'azahar_init',
     'azahar_load_rom',
     'azahar_framebuffer_nonblack_pixels',
+    'azahar_get_perf_stats',
     'azahar_run_loop',
     'azahar_shutdown',
     'azahar_step_frame',

@@ -15,28 +15,49 @@ The web build is verified through configuration, compilation, artifact generatio
 - The real-ROM regression loads and automatically starts the display-scheduled loop, checks the canvas, and fails on browser console/page errors. Its opt-in extended check waits for a multi-color kiosk-demo framebuffer and reports the elapsed boot time.
 - The encrypted CIA fixture is rejected with the explicit encrypted-ROM status; that is an expected negative result, not a threading or loader regression.
 
+## Verified (2026-08-06)
+
+- Performance benchmarking suite operational via `tests/benchmark_browser.cjs` (Puppeteer) and `tests/benchmark.cjs` (direct Node.js, non-pthreads builds only).
+- Super Mario 3D Land kiosk demo runs at **93% emulation speed, 59.8 FPS** with the software renderer + dyncom interpreter (Chrome headless).
+- SDL framebuffer presentation optimized: direct window-surface write bypasses intermediate surfaces, swap time averages 0.77 ms.
+- SDL presentation:
+  - `EmuWindow_SDL2_SW` uses an Emscripten fast path that writes framebuffer pixels directly to the window surface, eliminating per-frame SDL surface allocation and SDL_BlitSurface overhead.
+  - `SDL_RenderClear` and `SDL_UpdateWindowSurface` skipped on Emscripten (unnecessary with full-area overwrites and canvas backend).
+
 ## Pending
 
 - Broader game compatibility and longer stability/performance testing.
 - Modernizing the 138-case legacy mock/static suite so it can be a reliable release gate for the current Emscripten artifact.
+- Non-pthreads WASM build target for direct Node.js benchmarking without Puppeteer.
 
 ## Test Commands
 
-The legacy diagnostic suite remains available as `node tests/e2e/run_e2e_tests.js`; it writes `tests/e2e/test_results.json` but is not the web release gate.
+### Artifact Smoke (always run after build)
+```powershell
+node tests/web_artifact_smoke.cjs
+```
 
-For the browser regression, install Puppeteer locally without saving it, point the test at a legally owned decrypted `.3ds`, then run:
-
+### Browser Regression (real-ROM in headless Chrome)
 ```powershell
 npm install --no-save --no-package-lock puppeteer-core
 $env:CHROME_PATH = "$env:ProgramFiles\Google\Chrome\Application\chrome.exe"
 $env:AZAHAR_ROM_PATH = "C:\path\to\decrypted-game.3ds"
 node tests/browser_regression.cjs
-npm uninstall --no-save puppeteer-core
 ```
 
-To require a visible multi-color game framebuffer (rather than only the fast smoke checks), add `AZAHAR_REAL_ROM_BOOT_MS=20000`. `AZAHAR_CAPTURE_PATH` optionally writes one final diagnostic image after that check succeeds. The browser UI also reports file-read percentage, emulator initialization, mount/open stages, and boot elapsed time.
+To require a visible multi-color game framebuffer, add `AZAHAR_REAL_ROM_BOOT_MS=20000`. `AZAHAR_CAPTURE_PATH` optionally writes a diagnostic screenshot. The test starts `web/server.cjs` itself unless `AZAHAR_WEB_URL` is provided.
 
-The test starts `web/server.cjs` itself unless `AZAHAR_WEB_URL` is provided. That server is required because pthreads need cross-origin isolation.
+### Performance Benchmark (headless Chrome)
+```powershell
+$env:CHROME_PATH = "$env:ProgramFiles\Google\Chrome\Application\chrome.exe"
+node tests/benchmark_browser.cjs --frames 300 --warmup 30 --repeat 3 --profile
+```
+Results → `tests/benchmark_results.json`.
+
+### Legacy E2E Suite (diagnostic only)
+```powershell
+node tests/e2e/run_e2e_tests.js   # writes tests/e2e/test_results.json
+```
 
 ## Coverage Summary
 | Tier | Count | Description |
