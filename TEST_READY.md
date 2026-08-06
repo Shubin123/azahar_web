@@ -1,6 +1,6 @@
 # E2E Test Suite and Web Build Status
 
-The web build is verified through configuration, compilation, artifact generation, and exported API checks. This file does not claim that browser ROM execution or the complete E2E suite has passed.
+The web build is verified through configuration, compilation, artifact generation, exported API checks, and real browser execution of a decrypted `.3ds` demo. The legacy mock/static suite remains diagnostic only.
 
 ## Verified
 
@@ -10,18 +10,31 @@ The web build is verified through configuration, compilation, artifact generatio
 - The generated API exports include `azahar_init`, `azahar_load_rom`, `azahar_step_frame`, `azahar_run_loop`, and `azahar_shutdown`.
 - The generated JS/WASM files are present beside the UI in `web/`.
 - `node tests/web_artifact_smoke.cjs` passes against both `web/` and `build-web/bin/Release/`.
-- `node tests/e2e/run_e2e_tests.js` passes all 138 existing mock/static cases.
+- The local server supplies COOP/COEP headers, and the browser test confirms `crossOriginIsolated` before initializing the pthread-enabled module.
+- Puppeteer loads the served UI, initializes real WASM, mounts a decrypted `.3ds` without an unnecessary second heap copy, and preserves its extension as `/rom.3ds` for loader selection.
+- The real-ROM regression steps one frame, runs the continuous loop, checks the canvas, and fails on browser console/page errors. The verified kiosk-demo pass stopped cleanly at frame 58.
+- The encrypted CIA fixture is rejected with the explicit encrypted-ROM status; that is an expected negative result, not a threading or loader regression.
 
 ## Pending
 
-- Browser smoke testing with the served UI.
-- Loading and executing a real ROM in a browser.
-- Browser automation and real-ROM execution; the local browser-harness command is not installed.
+- Broader game compatibility and longer stability/performance testing.
+- Modernizing the 138-case legacy mock/static suite so it can be a reliable release gate for the current Emscripten artifact.
 
-## Test Runner
-- **Command**: `node tests/e2e/run_e2e_tests.js`
-- **Expected Outcome**: All 138 tests pass with exit code 0
-- **Output Report**: `tests/e2e/test_results.json`
+## Test Commands
+
+The legacy diagnostic suite remains available as `node tests/e2e/run_e2e_tests.js`; it writes `tests/e2e/test_results.json` but is not the web release gate.
+
+For the browser regression, install Puppeteer locally without saving it, point the test at a legally owned decrypted `.3ds`, then run:
+
+```powershell
+npm install --no-save --no-package-lock puppeteer-core
+$env:CHROME_PATH = "$env:ProgramFiles\Google\Chrome\Application\chrome.exe"
+$env:AZAHAR_ROM_PATH = "C:\path\to\decrypted-game.3ds"
+node tests/browser_regression.cjs
+npm uninstall --no-save puppeteer-core
+```
+
+The test starts `web/server.cjs` itself unless `AZAHAR_WEB_URL` is provided. That server is required because pthreads need cross-origin isolation.
 
 ## Coverage Summary
 | Tier | Count | Description |
@@ -50,7 +63,8 @@ The web build is verified through configuration, compilation, artifact generatio
 
 ## Real-World Game ROM Verification
 Available local test game resources located at `C:\Users\shubadub\Documents\azahar\test_games`:
-- `Super Mario 3D Land (Europe) (EnFrDeEsIt) (Demo) (Kiosk).cia` (39.3 MB)
-- `Super Mario (USA) (Beta) (E3 2011 demo).7z` (82.9 MB)
+- `Super Mario 3D Land (Europe) (EnFrDeEsIt) (Demo) (Kiosk).cia` (39.3 MB), an encrypted CIA negative fixture.
+- `Super Mario 3D Land (Europe) (EnFrDeEsIt) (Demo) (Kiosk).7z` (50.9 MB), containing the verified 128 MiB decrypted `.3ds` demo image.
+- `Super Mario (USA) (Beta) (E3 2011 demo).7z` (82.9 MB), an encrypted 2 GiB cartridge image unsuitable for this no-key regression.
 
-These resources were not executed in a browser during the current verification pass.
+The decrypted `.3ds` extracted from the kiosk-demo archive was executed in the browser during the verification pass.

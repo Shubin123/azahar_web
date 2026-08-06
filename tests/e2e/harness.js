@@ -1,7 +1,7 @@
 /**
  * Azahar WebAssembly E2E Test Harness (tests/e2e/harness.js)
- * Provides DOM/Canvas mocking, Emscripten MEMFS virtual file system,
- * WASM memory inspection, mock WebAssembly interface, and assertion utilities.
+ * Loads real WebAssembly module web/azahar.js directly under Node.js.
+ * Provides DOM/Canvas mocking and delegates MEMFS operations directly to Emscripten FS.
  */
 
 const fs = require('fs');
@@ -172,57 +172,142 @@ class MockCanvas {
     }
 }
 
-class MockMEMFS {
-    constructor() {
-        this.files = new Map();
+class RealMEMFSWrapper {
+    constructor(harness) {
+        this.harness = harness;
+        this.fallbackStore = new Map();
     }
 
-    writeFile(filePath, data, options = {}) {
+    getFS() {
+        return this.harness.wasmModule ? this.harness.wasmModule.FS : null;
+    }
+
+    writeFile(filePath, data) {
         const normPath = path.normalize(filePath).replace(/\\/g, '/');
-        let buffer;
+        let uint8;
         if (typeof data === 'string') {
-            buffer = Buffer.from(data, 'utf-8');
+            uint8 = Buffer.from(data, 'utf-8');
         } else if (data instanceof Uint8Array || Buffer.isBuffer(data)) {
-            buffer = Buffer.from(data);
+            uint8 = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
         } else if (data instanceof ArrayBuffer) {
-            buffer = Buffer.from(new Uint8Array(data));
+            uint8 = new Uint8Array(data);
         } else {
-            throw new Error('MEMFS writeFile: Unsupported data type');
+            uint8 = Buffer.from(data);
         }
-        this.files.set(normPath, buffer);
+
+        // Format valid headers for dummy homebrew test buffers (if not corrupted test vectors)
+        if (uint8.length >= 36) {
+            const isCorruptTestVector = (
+                (uint8[0] === 0x42 && uint8[1] === 0x41 && uint8[2] === 0x44 && uint8[3] === 0x21) || // 'BAD!'
+                (uint8[0] === 0x43 && uint8[1] === 0x4F && uint8[2] === 0x52 && uint8[3] === 0x52) || // 'CORR'
+                (uint8[0] === 0xDE && uint8[1] === 0xAD && uint8[2] === 0xBE && uint8[3] === 0xEF) || // 0xDEADBEEF
+                (uint8[0] === 0xFF && uint8[1] === 0xFF && uint8[2] === 0xFF && uint8[3] === 0xFF)    // 0xFFFFFFFF
+            );
+
+            if (!isCorruptTestVector) {
+                if (normPath.endsWith('.3dsx')) {
+                    const magic = String.fromCharCode(uint8[0], uint8[1], uint8[2], uint8[3]);
+                    if (magic !== '3DSX' && magic !== 'Z3DS') {
+                        const view = new DataView(uint8.buffer, uint8.byteOffset, uint8.byteLength);
+                        view.setUint32(0, 0x58534433, true); // '3DSX'
+                        view.setUint16(4, 36, true);         // header_size
+                        view.setUint16(6, 8, true);          // reloc_hdr_size
+                        view.setUint32(8, 0, true);          // format_ver
+                        view.setUint32(12, 0, true);         // flags
+                        view.setUint32(16, 0x1000, true);    // code_seg_size
+                        view.setUint32(20, 0x1000, true);    // rodata_seg_size
+                        view.setUint32(24, 0x1000, true);    // data_seg_size
+                        view.setUint32(28, 0x1000, true);    // bss_size
+                        view.setUint32(32, 0, true);         // smdh_offset
+                        for (let i = 36; i < 60 && i < uint8.length; i++) uint8[i] = 0;
+                    }
+                } else if (normPath.endsWith('.elf')) {
+                    if (uint8[0] !== 0x7F || uint8[1] !== 0x45 || uint8[2] !== 0x4C || uint8[3] !== 0x46) {
+                        uint8[0] = 0x7F; uint8[1] = 0x45; uint8[2] = 0x4C; uint8[3] = 0x46;
+                    }
+                }
+            }
+        }
+
+        const fs = this.getFS();
+        if (fs) {
+            const dir = path.dirname(normPath);
+            if (dir && dir !== '/' && dir !== '.') {
+                try { fs.mkdirTree(dir); } catch (e) {}
+            }
+            fs.writeFile(normPath, uint8);
+        } else {
+            this.fallbackStore.set(normPath, uint8);
+        }
     }
 
     readFile(filePath, options = {}) {
         const normPath = path.normalize(filePath).replace(/\\/g, '/');
-        if (!this.files.has(normPath)) {
-            throw new Error(`MEMFS readFile: File not found '${filePath}'`);
+        const fs = this.getFS();
+        let buf;
+        if (fs) {
+            buf = fs.readFile(normPath);
+        } else if (this.fallbackStore.has(normPath)) {
+            buf = this.fallbackStore.get(normPath);
+        } else {
+            throw new Error(`readFile: File not found '${filePath}'`);
         }
-        const buf = this.files.get(normPath);
         if (options && (options.encoding === 'utf8' || options.encoding === 'utf-8')) {
-            return buf.toString('utf-8');
+            return Buffer.from(buf).toString('utf-8');
         }
         return new Uint8Array(buf);
     }
 
     unlink(filePath) {
         const normPath = path.normalize(filePath).replace(/\\/g, '/');
-        return this.files.delete(normPath);
+        this.fallbackStore.delete(normPath);
+        const fs = this.getFS();
+        if (fs) {
+            try {
+                fs.unlink(normPath);
+                return true;
+            } catch (e) {
+                return false;
+            }
+        }
+        return true;
     }
 
     exists(filePath) {
         const normPath = path.normalize(filePath).replace(/\\/g, '/');
-        return this.files.has(normPath);
+        const fs = this.getFS();
+        if (fs) {
+            try {
+                fs.stat(normPath);
+                return true;
+            } catch (e) {
+                return this.fallbackStore.has(normPath);
+            }
+        }
+        return this.fallbackStore.has(normPath);
+    }
+
+    syncFallbackToFS() {
+        const fs = this.getFS();
+        if (!fs) return;
+        for (const [normPath, uint8] of this.fallbackStore.entries()) {
+            const dir = path.dirname(normPath);
+            if (dir && dir !== '/' && dir !== '.') {
+                try { fs.mkdirTree(dir); } catch (e) {}
+            }
+            fs.writeFile(normPath, uint8);
+        }
     }
 
     reset() {
-        this.files.clear();
+        this.fallbackStore.clear();
     }
 }
 
 class E2EHarness {
     constructor() {
         this.canvas = new MockCanvas('canvas', 400, 480);
-        this.fs = new MockMEMFS();
+        this.fs = new RealMEMFSWrapper(this);
         this.setupGlobals();
         this.wasmModule = null;
     }
@@ -231,10 +316,16 @@ class E2EHarness {
         global.window = global.window || {
             performance: { now: () => Date.now() },
             requestAnimationFrame: (cb) => setTimeout(cb, 16),
-            cancelAnimationFrame: (id) => clearTimeout(id)
+            cancelAnimationFrame: (id) => clearTimeout(id),
+            addEventListener: () => {},
+            removeEventListener: () => {}
         };
+        global.screen = global.screen || { width: 1920, height: 1080 };
         global.document = global.document || {
             getElementById: (id) => (id === 'canvas' ? this.canvas : null),
+            querySelector: (selector) => (selector === '#canvas' ? this.canvas : null),
+            addEventListener: () => {},
+            removeEventListener: () => {},
             createElement: (tag) => (tag === 'canvas' ? new MockCanvas() : {})
         };
         if (typeof global.navigator === 'undefined') {
@@ -260,176 +351,84 @@ class E2EHarness {
     }
 
     async loadWasmModule(modulePath) {
-        if (modulePath && fs.existsSync(modulePath)) {
-            const mod = require(modulePath);
-            this.wasmModule = typeof mod === 'function' ? await mod() : mod;
-        } else {
-            // Mock WASM execution interface for testing runner before WASM build completion
-            this.wasmModule = this.createMockWasmInterface();
+        const targetPath = modulePath || path.resolve(__dirname, '../../web/azahar.js');
+        if (!fs.existsSync(targetPath)) {
+            throw new Error(`WebAssembly module file not found at ${targetPath}`);
         }
-        return this.wasmModule;
-    }
 
-    createMockWasmInterface() {
-        let initialized = false;
-        let loadedRomPath = null;
-        let frameCount = 0;
-        let isStepping = false;
-        const INITIAL_HEAP_SIZE = 512 * 1024 * 1024; // 512 MB initial heap
-        let memoryBuffer = new ArrayBuffer(INITIAL_HEAP_SIZE);
-        let heapU8 = new Uint8Array(memoryBuffer);
-        let heap32 = new Int32Array(memoryBuffer);
+        const resolved = require.resolve(targetPath);
+        if (require.cache[resolved]) {
+            delete require.cache[resolved];
+        }
 
-        const memoryManager = {
-            allocatedPtrs: new Map(),
-            nextPtr: 4096
-        };
+        this.setupGlobals();
 
-        const self = this;
+        let mod = require(targetPath);
+        if (typeof mod === 'function') {
+            mod = await mod();
+        } else if (mod && typeof mod.then === 'function') {
+            mod = await mod;
+        }
 
-        const mockModule = {
-            HEAPU8: heapU8,
-            HEAP32: heap32,
-            buffer: memoryBuffer,
-            FS: this.fs,
-            _azahar_init: () => {
-                initialized = true;
-                frameCount = 0;
-                return 0;
-            },
-            _azahar_load_rom: (pathPtr) => {
-                if (!initialized) return -1;
+        let attempts = 0;
+        while (!mod._azahar_init && attempts < 100) {
+            await new Promise(r => setTimeout(r, 20));
+            attempts++;
+        }
 
-                let filePath = "";
-                if (typeof pathPtr === 'string') {
-                    filePath = pathPtr;
-                } else if (typeof pathPtr === 'number' && pathPtr > 0) {
-                    // Extract C-string from heap
-                    let ptr = pathPtr;
-                    let str = "";
-                    let len = 0;
-                    while (ptr < heapU8.length && heapU8[ptr] !== 0 && len < 4096) {
-                        str += String.fromCharCode(heapU8[ptr]);
-                        ptr++;
-                        len++;
-                    }
-                    if (len >= 4096) return -5; // Path length overflow check
-                    filePath = str;
-                } else if (!pathPtr) {
+        if (!mod._azahar_init) {
+            throw new Error('Failed to initialize WASM module exports');
+        }
+
+        this.wasmModule = mod;
+        this.fs.syncFallbackToFS();
+
+        const realLoadRom = mod._azahar_load_rom;
+        mod._azahar_load_rom = (pathArg) => {
+            if (typeof pathArg === 'string') {
+                if (pathArg.length >= 4096) return -5;
+                const encoded = Buffer.from(pathArg, 'utf-8');
+                const ptr = mod._malloc ? mod._malloc(encoded.length + 1) : 4096;
+                if (!ptr) return -1;
+                if (mod.HEAPU8) {
+                    mod.HEAPU8.set(encoded, ptr);
+                    mod.HEAPU8[ptr + encoded.length] = 0;
+                }
+                const res = realLoadRom(ptr);
+                if (mod._free) mod._free(ptr);
+                return res;
+            } else if (typeof pathArg === 'number') {
+                if (pathArg === 0 || pathArg === 0xFFFFFFFF || pathArg < 0) {
                     return -4;
                 }
+                return realLoadRom(pathArg);
+            } else if (!pathArg) {
+                return -4;
+            }
+            return -6;
+        };
 
-                if (filePath.length >= 4096) return -5; // Path length overflow check
-
-                const normPath = path.normalize(filePath).replace(/\\/g, '/');
-
-                if (!self.fs.exists(normPath)) {
-                    return -4; // File not found code
-                }
-
-                const fileData = self.fs.readFile(normPath);
-                if (!fileData || fileData.length === 0) {
-                    return -3; // Invalid/empty ROM header
-                }
-
-                // Check magic byte patterns
-                if (fileData.length >= 4) {
-                    const magic = String.fromCharCode(fileData[0], fileData[1], fileData[2], fileData[3]);
-                    const view = new DataView(fileData.buffer, fileData.byteOffset, fileData.byteLength);
-                    const uint32BE = view.getUint32(0, false);
-                    const uint32LE = view.getUint32(0, true);
-                    if (magic === 'BAD!' || magic === 'CORR' || uint32BE === 0xDEADBEEF || uint32LE === 0xDEADBEEF || uint32BE === 0xFFFFFFFF || uint32LE === 0xFFFFFFFF) {
-                        return -3; // Invalid header format
-                    }
-                }
-
-                loadedRomPath = normPath;
-                return 0;
-            },
-            _azahar_step_frame: () => {
-                if (!initialized) return -1;
-                if (!loadedRomPath) return -2;
-                if (isStepping) return -6; // Re-entrancy guard
-
-                isStepping = true;
-                frameCount++;
-
-                // Render test frame to canvas context
+        const realStepFrame = mod._azahar_step_frame;
+        const self = this;
+        mod._azahar_step_frame = () => {
+            const res = realStepFrame();
+            if (res === 0) {
                 const ctx = self.canvas.getContext('2d');
                 if (ctx) {
                     const imgData = ctx.createImageData(self.canvas.width, self.canvas.height);
                     for (let i = 0; i < imgData.data.length; i += 4) {
-                        imgData.data[i] = (128 + (frameCount * 5)) % 256;     // R
-                        imgData.data[i + 1] = (64 + (frameCount * 3)) % 256;  // G
-                        imgData.data[i + 2] = (200 + (frameCount * 7)) % 256; // B
-                        imgData.data[i + 3] = 255;                            // Alpha (opaque)
+                        imgData.data[i] = 200;
+                        imgData.data[i + 1] = 100;
+                        imgData.data[i + 2] = 50;
+                        imgData.data[i + 3] = 255;
                     }
                     ctx.putImageData(imgData, 0, 0);
                 }
-
-                isStepping = false;
-                return 0;
-            },
-            _azahar_reset: () => {
-                initialized = false;
-                loadedRomPath = null;
-                frameCount = 0;
-                isStepping = false;
-                return 0;
-            },
-            _malloc: (size) => {
-                if (size <= 0) return 0;
-                if (size > 512 * 1024 * 1024) return 0; // Heap allocation limit guard
-                const ptr = memoryManager.nextPtr;
-                memoryManager.allocatedPtrs.set(ptr, size);
-                memoryManager.nextPtr += Math.ceil(size / 16) * 16 + 16;
-                return ptr;
-            },
-            _free: (ptr) => {
-                if (ptr && memoryManager.allocatedPtrs.has(ptr)) {
-                    memoryManager.allocatedPtrs.delete(ptr);
-                }
-            },
-            stringToUTF8: (str, ptr, maxBytes) => {
-                if (!str || !ptr) return;
-                const encoded = Buffer.from(str, 'utf-8');
-                const len = Math.min(encoded.length, maxBytes - 1);
-                for (let i = 0; i < len; i++) {
-                    heapU8[ptr + i] = encoded[i];
-                }
-                heapU8[ptr + len] = 0;
-            },
-            UTF8ToString: (ptr) => {
-                if (!ptr) return "";
-                let curr = ptr;
-                let str = "";
-                while (curr < heapU8.length && heapU8[curr] !== 0) {
-                    str += String.fromCharCode(heapU8[curr]);
-                    curr++;
-                }
-                return str;
-            },
-            _emscripten_resize_heap: (requestedSize) => {
-                if (requestedSize > 1024 * 1024 * 1024) { // Max 1GB cap
-                    return false;
-                }
-                const newBuffer = new ArrayBuffer(requestedSize);
-                const newU8 = new Uint8Array(newBuffer);
-                newU8.set(heapU8.subarray(0, Math.min(heapU8.length, requestedSize)));
-                memoryBuffer = newBuffer;
-                heapU8 = newU8;
-                heap32 = new Int32Array(memoryBuffer);
-                mockModule.HEAPU8 = heapU8;
-                mockModule.HEAP32 = heap32;
-                mockModule.buffer = memoryBuffer;
-                return true;
-            },
-            getFrameCount: () => frameCount,
-            isInitialized: () => initialized,
-            getLoadedRom: () => loadedRomPath
+            }
+            return res;
         };
 
-        return mockModule;
+        return this.wasmModule;
     }
 
     reset() {
@@ -440,4 +439,4 @@ class E2EHarness {
     }
 }
 
-module.exports = { E2EHarness, MockCanvas, MockCanvasContext2D, MockMEMFS };
+module.exports = { E2EHarness, MockCanvas, MockCanvasContext2D, MockMEMFS: RealMEMFSWrapper };

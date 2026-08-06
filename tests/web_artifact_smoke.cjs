@@ -46,7 +46,12 @@ for (const name of expectedExports) {
 const wasmBytes = read(path.join(webDir, 'azahar.wasm'));
 const wasmModule = new WebAssembly.Module(wasmBytes);
 const moduleExports = WebAssembly.Module.exports(wasmModule);
-assert.ok(moduleExports.some(({kind}) => kind === 'memory'), 'WASM has no exported memory');
+const moduleImports = WebAssembly.Module.imports(wasmModule);
+assert.ok(
+    moduleExports.some(({kind}) => kind === 'memory') ||
+        moduleImports.some(({kind}) => kind === 'memory'),
+    'WASM has no memory import or export',
+);
 assert.ok(moduleExports.filter(({kind}) => kind === 'function').length > 100,
     'WASM export table is unexpectedly small');
 

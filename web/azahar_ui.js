@@ -21,7 +21,9 @@
     // ── State ─────────────────────────────────────────────────────
     let wasmModule = null;
     let romData = null;
+    let romMounted = false;
     let romName = '';
+    let romPath = '/rom.bin';
     let initialized = false;
     let romLoaded = false;
     let running = false;
@@ -40,17 +42,28 @@
         statusEl.className = cls || '';
     }
 
+    function memfsRomPath(filename) {
+        // Loader::GetLoader uses an extension as a fallback when a container
+        // (notably CIA) cannot be identified from its header. Keep only the
+        // final, safe extension: browser filenames are untrusted input and
+        // need not become filesystem paths in MEMFS.
+        const match = /\.[a-z0-9]+$/i.exec(filename);
+        return `/rom${match ? match[0].toLowerCase() : '.bin'}`;
+    }
+
     // ── File picker ───────────────────────────────────────────────
     romInput.addEventListener('change', function (e) {
         const file = e.target.files[0];
         if (!file) return;
 
         romName = file.name;
+        romPath = memfsRomPath(romName);
         fileLabel.textContent = `📄 ${romName} (${(file.size / 1024 / 1024).toFixed(1)} MB)`;
 
         const reader = new FileReader();
         reader.onload = function () {
             romData = new Uint8Array(reader.result);
+            romMounted = false;
             log(`File loaded: ${romName} (${romData.length} bytes)`);
             setStatus(`ROM ready: ${romName}`, 'ok');
             btnLoad.disabled = false;
@@ -70,6 +83,11 @@
         return new Promise((resolve, reject) => {
             const script = document.createElement('script');
             script.src = 'azahar.js';
+            // SDL2's Emscripten backend must use the UI canvas that already
+            // exists in the page. Set this before loading the generated glue
+            // script so it does not create an unbound canvas target.
+            window.Module = window.Module || {};
+            window.Module.canvas = canvas;
             script.onload = function () {
                 // Emscripten-generated Module object
                 if (typeof Module !== 'undefined') {
@@ -142,7 +160,7 @@
 
     // ── Load ROM ─────────────────────────────────────────────────
     btnLoad.addEventListener('click', function () {
-        if (!initialized || !romData) {
+        if (!initialized || (!romData && !romMounted)) {
             setStatus('Initialize emulator and select a ROM first.', 'error');
             return;
         }
@@ -151,10 +169,20 @@
             setStatus('Loading ROM...');
             btnLoad.disabled = true;
 
-            // Write ROM to MEMFS so the C++ side can read it
-            const romPath = '/rom.bin';
-            wasmModule.FS.writeFile(romPath, romData);
-            log(`ROM written to MEMFS: ${romPath}`);
+            // Write ROM to MEMFS so the C++ side can read it. Preserve the
+            // selected extension because the native loader uses it as a
+            // fallback for encrypted CIA containers.
+            // A retail .3ds image can be 1 GiB.  The default MEMFS write
+            // copies the FileReader buffer, briefly keeping two full browser
+            // heap copies alive before the core begins loading it.  Let
+            // MEMFS take ownership instead; the selected file can be chosen
+            // again if the user needs to retry with another image.
+            if (romData) {
+                wasmModule.FS.writeFile(romPath, romData, {canOwn: true});
+                romData = null;
+                romMounted = true;
+                log(`ROM written to MEMFS: ${romPath}`);
+            }
 
             const result = wasmModule.ccall('azahar_load_rom', 'number', ['string'], [romPath]);
             if (result === 0) {
@@ -163,6 +191,10 @@
                 setStatus('ROM loaded. Click "Step Frame" or "Run".', 'ok');
                 btnStep.disabled = false;
                 btnRun.disabled = false;
+            } else if (result === -4) {
+                setStatus('ROM is encrypted. Use a decrypted dump with your own keys.', 'error');
+                log('ERROR: azahar_load_rom rejected an encrypted ROM');
+                btnLoad.disabled = false;
             } else {
                 setStatus(`ROM load failed (code ${result})`, 'error');
                 log(`ERROR: azahar_load_rom returned ${result}`);

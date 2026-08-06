@@ -6,7 +6,8 @@ Azahar WebAssembly port targeting modern web browsers via Emscripten.
 - **Graphics Subsystem**: `SwRenderer::RendererSoftware` rasterizer operating on 32-bit RGBA8 framebuffers (OpenGL & Vulkan hardware renderers disabled).
 - **Frontend / Windowing**: Adapted `citra_sdl` / `EmuWindow_SDL2_SW` presenting software framebuffers to an HTML5 `<canvas id="canvas">`.
 - **Event Loop**: Main loop unrolled into Emscripten event loop / exported C per-frame step function (`azahar_step_frame`).
-- **File System / Loader**: HTML File API -> Emscripten MEMFS (`FS.writeFile`) -> C++ `Core::System::Load()` via standard C file IO.
+- **File System / Loader**: HTML File API -> Emscripten MEMFS (`FS.writeFile` with ownership transfer) -> C++ `Core::System::Load()` via standard C file IO. The upload keeps the selected filename extension so the core chooses the correct loader.
+- **Browser Threading**: Emscripten pthreads use `SharedArrayBuffer` workers. The served page must be cross-origin isolated with COOP/COEP headers.
 - **Overlay Layer**: `azahar-webgpu/` CMake overlay cleanly linking `citra_core`.
 
 ## Feature Inventory
@@ -20,10 +21,10 @@ Azahar WebAssembly port targeting modern web browsers via Emscripten.
 | 6 | Main Loop Event Unrolling | Replace blocking while loops with `emscripten_set_main_loop` / `azahar_step_frame` | M2 | Survey Explorer 2 |
 | 7 | HTML5 Canvas Framebuffer Blit | Output rendered 3DS framebuffers directly onto `<canvas>` element | M2 | ORIGINAL_REQUEST §R2 |
 | 8 | Web UI & Game File Loader | HTML/JS interface to load `.3ds`, `.3dsx`, `.cia`, `.elf` into MEMFS | M3 | ORIGINAL_REQUEST §R2 |
-| 9 | WASM Memory Safety Setup | Set linker flags (`INITIAL_MEMORY=512MB`, `ALLOW_MEMORY_GROWTH=1`, `STACK_SIZE=2MB`) | M4 | Survey Explorer 3 |
+| 9 | WASM Memory and Thread Safety | Set linker flags (`INITIAL_MEMORY=512MB`, `STACK_SIZE=2MB`, `ALLOW_MEMORY_GROWTH=1`, `MAXIMUM_MEMORY=4GB`) and preallocate a 32-worker pthread pool | M4 | Survey Explorer 3 |
 | 10 | Memory Access Bounds Guard | Prevent WASM out-of-bounds traps (`RuntimeError: memory access out of bounds`) | M4 | ORIGINAL_REQUEST §Acceptance Criteria |
 | 11 | WebGPU Overlay Alignment | Ensure `azahar-webgpu/` overlay architecture builds alongside Emscripten targets | M4 | ORIGINAL_REQUEST §R3 |
-| 12 | E2E Test Suite & First-Frame Pass | Verify WASM instantiation, ROM loading, and first-frame rendering pass | M5 | ORIGINAL_REQUEST §Acceptance Criteria |
+| 12 | E2E Test Suite & Real-ROM Pass | Verify WASM instantiation, decrypted ROM loading, continuous emulation, and canvas output | M5 | ORIGINAL_REQUEST §Acceptance Criteria |
 
 ## Milestones
 | # | Name | Scope | Dependencies | Status |
@@ -31,12 +32,12 @@ Azahar WebAssembly port targeting modern web browsers via Emscripten.
 | M1 | Emscripten Build & CMake Setup | CMake configuration, dependency stubbing, dyncom & renderer_software selection | None | COMPLETE |
 | M2 | Canvas Frontend & Loop Unrolling | `EmuWindow_SDL2_SW` adaptation, main loop unrolling, HTML5 canvas output | M1 | COMPLETE |
 | M3 | Web UI & ROM Loading Pipeline | Minimal HTML/JS frontend, MEMFS file mounting, C++ file loading API | M2 | COMPLETE |
-| M4 | WASM Memory Safety & WebGPU Overlay | Linker memory flags (512MB init, 2MB stack), out-of-bounds guards, WebGPU overlay link | M1, M2 | COMPLETE |
-| M5 | E2E Verification & First-Frame Rendering | 100% E2E test suite execution, ROM execution & first-frame rendering verification | M1, M2, M3, M4 | COMPLETE |
+| M4 | WASM Memory Safety, Threading & WebGPU Overlay | Growable 512MB-to-4GB memory, 2MB stack, 32-worker pthread pool, out-of-bounds guards, WebGPU overlay link | M1, M2 | COMPLETE |
+| M5 | E2E Verification & Real-ROM Rendering | Browser-driven WASM initialization, decrypted ROM execution, continuous frame loop, and canvas rendering verification | M1, M2, M3, M4 | COMPLETE |
 
 ## Interface Contracts
 ### Web UI ↔ WebAssembly Module (`web/azahar.js` / `web/azahar.wasm`)
-- `FS.writeFile(path, data)`: JS mounts uploaded ROM bytes to Emscripten MEMFS path (e.g. `/rom.3dsx`).
+- `FS.writeFile(path, data, {canOwn: true})`: JS mounts uploaded ROM bytes to Emscripten MEMFS without an extra browser-heap copy. The path retains the selected extension (for example, `/rom.3ds`).
 - `azahar_init()`: C++ export initializing `Core::System` and software renderer window. Returns `0` on success.
 - `azahar_load_rom(const char* path)`: C++ export calling `Core::System::Load()`. Returns `0` on success.
 - `azahar_step_frame()`: C++ export stepping 1 emulation frame, executing CPU ticks and blitting framebuffer to canvas.
@@ -63,4 +64,4 @@ cmake -B build-web -S azahar -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_
 cmake --build build-web --parallel 8
 ```
 
-Artifacts are generated under `build-web/bin/Release/` and copied into `web/` for serving. `node tests/web_artifact_smoke.cjs` validates both artifact copies, the generated API names, and WASM compilation; the existing 138-case mock/static suite also passes. Real ROM execution remains pending because the browser automation command is unavailable and the local game resources are archived test files.
+Artifacts are generated under `build-web/bin/Release/` and copied into `web/` for serving. `node tests/web_artifact_smoke.cjs` validates both artifact copies, the generated API names, and WASM compilation. `tests/browser_regression.cjs`, supplied with a decrypted local `.3ds` through `AZAHAR_ROM_PATH`, verifies cross-origin isolation, initialization, ROM mounting/loading, a first frame, the continuous run loop, canvas output, and browser errors. The verified kiosk-demo pass reached 58 frames without console or page errors. An encrypted CIA is expected to fail cleanly with the UI's encrypted-ROM status. The legacy Node mock suite remains diagnostic only and needs modernization before it can gate the current Emscripten artifact.
