@@ -73,28 +73,24 @@ Artifacts are generated under `build-web/bin/Release/` and automatically synchro
 | # | Optimization | Description | Impact |
 |---|-------------|-------------|--------|
 | 1 | SDL surface caching | Reuse SDL surfaces across frames instead of alloc/free per frame (~700 KB/frame saved) | Eliminates per-frame malloc overhead |
-| 2 | Emscripten direct framebuffer write | Write software renderer pixels directly to SDL window surface; bypass intermediate SDL surface + SDL_BlitSurface | Saves one full-buffer memcpy + blit per screen per frame |
-| 3 | Skip SDL_RenderClear on Emscripten | Screen blits overwrite the entire window area; clearing first is wasted work | Saves a full-frame fill per presentation |
-| 4 | Skip SDL_UpdateWindowSurface on Emscripten | No-op on the Emscripten canvas backend | Eliminates an unnecessary call per frame |
-| 5 | Software rasterizer inline execution | `sw_rasterizer.cpp` runs scanline processing inline on the main thread instead of dispatching to worker pool | Avoids browser main-thread blocking on pthread condition variables |
-| 6 | PTHREAD_POOL_SIZE reduced 32→8 | Software rasterizer runs inline; fewer workers needed | Reduces thread creation overhead and memory pressure |
-| 7 | Slice count / deadline tuning | 20 RunLoop slices with a 14 ms deadline balances emulation throughput against browser responsiveness | +3% emulation speed (90% → 93%) |
+| 2 | Correct Emscripten surface update | Preserve `SDL_UpdateWindowSurface()` after each software frame | Required for pixels to reach the browser canvas; guarded by compositor E2E |
+| 3 | Parallel software rasterizer | Six fixed Emscripten raster workers, with four-row worker tasks | Browser callbacks 8.1→19.5 FPS; game FPS 2.0→4.0 on kiosk-demo workload |
+| 4 | Browser-owned frame pacing | Disable the redundant native frame limiter for the web frontend | Removes main-thread sleeps; `requestAnimationFrame` remains the pacing clock |
 
 ### Benchmark Results (2026-08-06)
 
 ROM: Super Mario 3D Land (Europe) (Kiosk Demo), 128 MB decrypted .3ds
-Browser: Chrome headless, 100 benchmark frames, 20 warmup frames, 3 repeats
+Browser: Chrome headless, 30-second title-screen warmup, 15-second rAF measurement
 
-| Run | Avg Frame | FPS | Emulation Speed | Swap Time | σ |
-|-----|-----------|-----|-----------------|-----------|----|
-| 1   | 16.74 ms  | 59.7 | 93%             | 0.76 ms   | 0.28 ms |
-| 2   | 16.71 ms  | 59.8 | 94%             | 0.76 ms   | 0.03 ms |
-| 3   | 16.71 ms  | 59.8 | 93%             | 0.79 ms   | 0.05 ms |
-| **Agg** | **16.72 ms** | **59.8** | **93%** | **0.77 ms** | — |
+| Build | Browser callback rate | Game FPS | Emulation speed | GPU command time | Callback p95 |
+|-------|-----------------------|----------|-----------------|------------------|--------------|
+| Inline rasterizer baseline | 8.1 FPS | 2.0 | 3% | 488 ms | 347 ms |
+| Six-worker rasterizer | 19.5 FPS | 4.0 | 7% | 216 ms | 199 ms |
 
-The step rate is capped by the browser's `requestAnimationFrame` (~60 Hz). The
-tight standard deviation (σ < 0.3 ms) indicates stable, jitter-free execution.
-The dyncom CPU interpreter is the primary remaining bottleneck.
+These results are deliberately taken after a title-screen warmup rather than
+during loading. Software GPU command processing remains the dominant measured
+cost; dyncom already caches translated instruction blocks and should be
+profiled independently before changing its dispatch path.
 
 ### Benchmark Commands
 
