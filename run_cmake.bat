@@ -36,4 +36,4 @@ if %ERRORLEVEL% NEQ 0 (
 
 echo.
 echo === CMake configuration OK ===
-echo === Run the build with: cmake --build build-web
+echo === Configuration OK. Run build_web.bat to build, synchronize web/, and verify it.

@@ -2,7 +2,7 @@
 
 ## Test Philosophy
 
-The current web verification covers CMake configuration, the 8-job Ninja build, generated artifacts, exported JavaScript APIs, and a Puppeteer browser harness. The real browser regression passes with a decrypted `.3ds` demo: it verifies COOP/COEP isolation, pthread initialization, ROM loading, a first frame, continuous execution, canvas output, and the absence of browser console/page errors. Its opt-in 45-second boot check also verifies a visible Super Mario 3D Land kiosk-demo title framebuffer. The existing 138-case Node mock/static suite is retained for diagnostics but is not currently a reliable gate against the current Emscripten artifact.
+The current web verification covers CMake configuration, the 8-job Ninja build, automatic artifact synchronization, generated artifacts, exported JavaScript APIs, and a Puppeteer browser harness. The real browser regression passes with a decrypted `.3ds` demo: it verifies COOP/COEP isolation, pthread initialization, ROM loading, automatic run-loop startup, canvas output, and the absence of browser console/page errors. Its opt-in 20-second timeout waits for a multi-color Super Mario 3D Land kiosk-demo framebuffer and reports the actual elapsed boot time. The existing 138-case Node mock/static suite is retained for diagnostics but is not currently a reliable gate against the current Emscripten artifact.
 - Opaque-box, requirement-driven testing for the Azahar Emscripten WebAssembly 3DS emulator port.
 - No direct dependency on C++ internals when opaque WebAssembly JavaScript exports (`azahar_init`, `azahar_load_rom`, `azahar_step_frame`), Emscripten MEMFS (`FS.writeFile`), and HTML5 Canvas framebuffers can be exercised.
 - Methodology: 4-Tier design (Category-Partition, Boundary Value Analysis, Pairwise Combinatorial, Real-World Workload Testing).
@@ -34,7 +34,7 @@ Targeting all 12 features defined in `PROJECT.md`:
 - **Test Runner Script**: `tests/e2e/run_e2e_tests.js` (Node.js runner using mock browser environment / Emscripten shell runner)
 - **Execution Command**: `node tests/e2e/run_e2e_tests.js` (138 legacy mock/static cases; diagnostic only)
 - **Artifact Smoke Command**: `node tests/web_artifact_smoke.cjs` (checks real generated JS/WASM files)
-- **Browser Regression**: `tests/browser_regression.cjs` (Puppeteer; starts `web/server.cjs`, verifies cross-origin isolation, initializes pthread-enabled WASM, uploads a ROM, steps a frame, runs continuously, and checks canvas output and browser errors. Set `AZAHAR_REAL_ROM_BOOT_MS=45000` to require a non-black, multi-color real-ROM framebuffer.)
+- **Browser Regression**: `tests/browser_regression.cjs` (Puppeteer; starts `web/server.cjs`, verifies cross-origin isolation, initializes pthread-enabled WASM, uploads a ROM, auto-starts the loop, and checks a multi-color real-ROM framebuffer. Set `AZAHAR_REAL_ROM_BOOT_MS=20000` to enable the timed check.)
 - **Output Format**: JSON test result report saved to `tests/e2e/test_results.json` and console TAP output.
 - **Current web pass criteria**: `node tests/web_artifact_smoke.cjs` and the real-ROM browser regression exit 0. The broader 138-case legacy-suite gate remains pending modernization.
 

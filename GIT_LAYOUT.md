@@ -21,11 +21,10 @@ The upstream checkout owns its own `.gitmodules`, including Boost, Dynarmic, SDL
 
 ```powershell
 cmake -B build-web -S azahar -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DENABLE_QT=OFF -DENABLE_SDL2=ON -DENABLE_SDL2_FRONTEND=ON -DENABLE_SOFTWARE_RENDERER=ON -DENABLE_OPENGL=OFF -DENABLE_VULKAN=OFF -DENABLE_SCRIPTING=OFF -DENABLE_TESTS=OFF
-cmake --build build-web --parallel 8
-Copy-Item build-web/bin/Release/azahar.js,build-web/bin/Release/azahar.wasm web/ -Force
+build_web.bat
 ```
 
-Only copy generated artifacts for local serving; they remain ignored by the outer repository.
+`azahar_web_assets` automatically copies the current `azahar.js` and `azahar.wasm` to `web/` on every build, and `build_web.bat` verifies their hashes. Run `serve_web.bat` to serve that directory with the required isolation headers on port 9000; both `/` and `/web/index.html` are accepted. The generated artifacts remain ignored by the outer repository.
 
 ## Two-repository rule
 

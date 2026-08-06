@@ -42,15 +42,12 @@ async function main() {
             waitUntil: 'networkidle0',
             timeout: 120000,
         });
-        await waitForStatus(page, () => !document.querySelector('#btn-init').disabled);
+        await waitForStatus(page, () => document.querySelector('#status').textContent.includes('Emulator ready'));
         const crossOriginIsolated = await page.evaluate(() => crossOriginIsolated);
         if (!crossOriginIsolated) {
             throw new Error('Web page is not cross-origin isolated; COOP/COEP headers are required for pthreads');
         }
         const wasmReadyStatus = await page.$eval('#status', element => element.textContent);
-
-        await page.click('#btn-init');
-        await waitForStatus(page, () => document.querySelector('#status').textContent.includes('Emulator ready'));
 
         await (await page.$('#rom-file')).uploadFile(romPath);
         await waitForStatus(page, () => !document.querySelector('#btn-load').disabled, 30000);
@@ -59,24 +56,24 @@ async function main() {
         await page.click('#btn-load');
         await waitForStatus(page, () => {
             const status = document.querySelector('#status').textContent;
-            return status.startsWith('ROM loaded') || status.startsWith('ROM load failed') ||
+            return document.querySelector('#btn-stop').disabled === false ||
+                status.startsWith('ROM load failed') ||
                 status.startsWith('ROM is encrypted') || status.startsWith('Load error');
         });
         const loadStatus = await page.$eval('#status', element => element.textContent);
-        if (!loadStatus.startsWith('ROM loaded')) {
+        const runningAfterLoad = await page.$eval('#btn-stop', element => !element.disabled);
+        if (!runningAfterLoad) {
             throw new Error(`ROM load failed in browser: ${loadStatus}`);
         }
-        await page.click('#btn-step');
-        await waitForStatus(page, () => document.querySelector('#status').textContent.includes('Frame 1 OK'));
+        const emulationStartMs = await page.evaluate(() => performance.now());
 
-        // A single export can succeed while an asynchronously scheduled frame
-        // attempts to create another worker. Exercise the actual 60 FPS loop
-        // and require it to advance before stopping it explicitly.
-        await page.click('#btn-run');
+        // The default UI path starts the display-scheduled loop as soon as
+        // loading succeeds. Let it run briefly to exercise worker creation
+        // and verify that it remains active before stopping it explicitly.
         await new Promise(resolve => setTimeout(resolve, 1000));
-        const runningStatus = await page.$eval('#status', element => element.textContent);
-        if (!runningStatus.startsWith('Running')) {
-            throw new Error(`Continuous emulation failed to start: ${runningStatus}`);
+        const stillRunning = await page.$eval('#btn-stop', element => !element.disabled);
+        if (!stillRunning) {
+            throw new Error(`Continuous emulation failed to start: ${loadStatus}`);
         }
 
         // A real title takes appreciably longer than a synthetic fixture to
@@ -84,8 +81,18 @@ async function main() {
         // framebuffer without making the normal smoke test slow.
         let visibleFrame = null;
         if (realRomBootMs > 0) {
-            await new Promise(resolve => setTimeout(resolve, realRomBootMs));
-            visibleFrame = await page.evaluate(() => {
+            await page.waitForFunction(() => {
+                if (typeof Module === 'undefined' || !Module._azahar_framebuffer_nonblack_pixels ||
+                    Module._azahar_framebuffer_nonblack_pixels() === 0) return false;
+                const canvas = document.querySelector('#canvas');
+                const data = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+                const colors = new Set();
+                for (let index = 0; index < data.length; index += 32) {
+                    colors.add(`${data[index]},${data[index + 1]},${data[index + 2]}`);
+                }
+                return colors.size >= 16;
+            }, {timeout: realRomBootMs, polling: 250});
+            visibleFrame = await page.evaluate(startMs => {
                 const canvas = document.querySelector('#canvas');
                 const data = canvas.getContext('2d')
                     .getImageData(0, 0, canvas.width, canvas.height).data;
@@ -94,10 +101,11 @@ async function main() {
                     colors.add(`${data[index]},${data[index + 1]},${data[index + 2]}`);
                 }
                 return {
+                    elapsedMs: performance.now() - startMs,
                     colors: colors.size,
                     nonblackPixels: Module._azahar_framebuffer_nonblack_pixels(),
                 };
-            });
+            }, emulationStartMs);
             if (visibleFrame.nonblackPixels === 0 || visibleFrame.colors < 2) {
                 throw new Error(`No visible game framebuffer after ${realRomBootMs} ms: ` +
                     JSON.stringify(visibleFrame));
@@ -106,9 +114,9 @@ async function main() {
         }
 
         await page.click('#btn-stop');
-        await waitForStatus(page, () => /^Stopped at frame \d+$/.test(document.querySelector('#status').textContent));
+        await waitForStatus(page, () => /^Stopped at step \d+$/.test(document.querySelector('#status').textContent));
         const finalStatus = await page.$eval('#status', element => element.textContent);
-        const frameMatch = /^Stopped at frame (\d+)$/.exec(finalStatus);
+        const frameMatch = /^Stopped at step (\d+)$/.exec(finalStatus);
         if (!frameMatch || Number(frameMatch[1]) < 2) {
             throw new Error(`Continuous emulation did not advance: ${finalStatus}`);
         }

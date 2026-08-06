@@ -16,6 +16,7 @@
     const btnRun = document.getElementById('btn-run');
     const btnStop = document.getElementById('btn-stop');
     const statusEl = document.getElementById('status');
+    const progressEl = document.getElementById('progress');
     const logEl = document.getElementById('log');
 
     // ── State ─────────────────────────────────────────────────────
@@ -25,10 +26,14 @@
     let romName = '';
     let romPath = '/rom.bin';
     let initialized = false;
+    let initializing = false;
     let romLoaded = false;
     let running = false;
-    let runTimer = null;
+    let runAnimationFrame = null;
     let frameCount = 0;
+    let runStartedAt = 0;
+    let nextBootStatusAt = 0;
+    let gameGraphicsDetected = false;
 
     // ── Logging ───────────────────────────────────────────────────
     function log(msg) {
@@ -40,6 +45,24 @@
     function setStatus(msg, cls) {
         statusEl.textContent = msg;
         statusEl.className = cls || '';
+    }
+
+    function showProgress(value) {
+        progressEl.hidden = false;
+        if (value === null || value === undefined) {
+            progressEl.removeAttribute('value');
+        } else {
+            progressEl.value = Math.max(0, Math.min(100, value));
+        }
+    }
+
+    function hideProgress() {
+        progressEl.hidden = true;
+        progressEl.value = 0;
+    }
+
+    function yieldToBrowser() {
+        return new Promise(resolve => requestAnimationFrame(resolve));
     }
 
     function memfsRomPath(filename) {
@@ -61,14 +84,31 @@
         fileLabel.textContent = `📄 ${romName} (${(file.size / 1024 / 1024).toFixed(1)} MB)`;
 
         const reader = new FileReader();
+        btnLoad.disabled = true;
+        showProgress(0);
+        setStatus('Reading ROM... 0%');
+        reader.onprogress = function (event) {
+            if (!event.lengthComputable) {
+                showProgress(null);
+                setStatus(`Reading ROM... ${(event.loaded / 1024 / 1024).toFixed(1)} MB`);
+                return;
+            }
+            const percent = Math.round(event.loaded / event.total * 100);
+            showProgress(percent);
+            setStatus(`Reading ROM... ${percent}%`);
+        };
         reader.onload = function () {
             romData = new Uint8Array(reader.result);
             romMounted = false;
             log(`File loaded: ${romName} (${romData.length} bytes)`);
-            setStatus(`ROM ready: ${romName}`, 'ok');
-            btnLoad.disabled = false;
+            showProgress(100);
+            setStatus(initialized ? `ROM ready: ${romName}` :
+                `ROM ready; starting emulator...`, 'ok');
+            btnLoad.disabled = !initialized;
+            window.setTimeout(hideProgress, 250);
         };
         reader.onerror = function () {
+            hideProgress();
             setStatus('Failed to read file!', 'error');
             log('ERROR: FileReader failed');
         };
@@ -77,6 +117,7 @@
 
     // ── WASM Module Loading ──────────────────────────────────────
     async function loadWasmModule() {
+        await ensureCrossOriginIsolated();
         log('Loading azahar.js glue script...');
         setStatus('Loading WebAssembly module...');
 
@@ -99,22 +140,26 @@
             window.Module.printErr = function (message) {
                 log(`[native] ${message}`);
             };
+            window.Module.setStatus = function (message) {
+                if (message) {
+                    showProgress(null);
+                    setStatus(`WASM: ${message}`);
+                }
+            };
             script.onload = function () {
                 // Emscripten-generated Module object
                 if (typeof Module !== 'undefined') {
                     Module['onRuntimeInitialized'] = function () {
                         log('WebAssembly runtime initialized.');
                         wasmModule = Module;
-                        setStatus('WASM ready. Click "Initialize Emulator".', 'ok');
-                        btnInit.disabled = false;
+                        setStatus('WASM ready. Starting emulator...', 'ok');
                         resolve(Module);
                     };
                     // In case it's already initialized
                     if (Module.calledRun) {
                         log('WebAssembly already initialized.');
                         wasmModule = Module;
-                        setStatus('WASM ready.', 'ok');
-                        btnInit.disabled = false;
+                        setStatus('WASM ready. Starting emulator...', 'ok');
                         resolve(Module);
                     }
                 } else {
@@ -126,8 +171,7 @@
                             clearInterval(check);
                             wasmModule = Module;
                             log('WebAssembly runtime detected.');
-                            setStatus('WASM ready.', 'ok');
-                            btnInit.disabled = false;
+                            setStatus('WASM ready. Starting emulator...', 'ok');
                             resolve(Module);
                         }
                     }, 200);
@@ -141,44 +185,90 @@
         });
     }
 
-    // ── Initialize Emulator ──────────────────────────────────────
-    btnInit.addEventListener('click', async function () {
+    async function ensureCrossOriginIsolated() {
+        if (window.crossOriginIsolated) {
+            try { sessionStorage.removeItem('azahar-coi-reload'); } catch (_) {}
+            return;
+        }
+
+        // GitHub Pages and other static hosts cannot set COOP/COEP headers.
+        // The local service worker can add them after one controlled reload.
+        const canUseServiceWorker = 'serviceWorker' in navigator &&
+            (window.location.protocol === 'https:' ||
+                window.location.hostname === 'localhost' ||
+                window.location.hostname === '127.0.0.1');
+        if (!canUseServiceWorker) {
+            throw new Error('This server is missing COOP/COEP headers. Use serve_web.bat or HTTPS with coi-serviceworker.js.');
+        }
+
+        let attemptedReload = false;
+        try { attemptedReload = sessionStorage.getItem('azahar-coi-reload') === '1'; } catch (_) {}
+        if (attemptedReload) {
+            throw new Error('Browser isolation is unavailable after reload. Serve web/ with COOP: same-origin and COEP: require-corp.');
+        }
+
         try {
-            btnInit.disabled = true;
-            setStatus('Initializing emulator...');
+            try { sessionStorage.setItem('azahar-coi-reload', '1'); } catch (_) {}
+            setStatus('Enabling threaded WebAssembly; reloading once...', 'ok');
+            showProgress(null);
+            await navigator.serviceWorker.register('coi-serviceworker.js', {scope: './'});
+            await navigator.serviceWorker.ready;
+            window.location.reload();
+            await new Promise(() => {});
+        } catch (error) {
+            throw new Error(`Unable to enable browser isolation: ${error.message}`);
+        }
+    }
 
-            if (!wasmModule) {
-                await loadWasmModule();
-            }
+    // ── Initialize Emulator ──────────────────────────────────────
+    async function initializeEmulator() {
+        if (initialized || initializing) return;
+        initializing = true;
+        btnInit.disabled = true;
+        showProgress(null);
+        setStatus('Initializing emulator...');
 
+        try {
+            if (!wasmModule) await loadWasmModule();
+            await yieldToBrowser();
             const result = wasmModule._azahar_init();
-            if (result === 0) {
-                initialized = true;
-                log('Emulator initialized successfully.');
-                setStatus('Emulator ready. Load a ROM to begin.', 'ok');
-                if (romData) btnLoad.disabled = false;
-            } else {
+            if (result !== 0) {
                 setStatus(`Init failed (code ${result})`, 'error');
                 log(`ERROR: azahar_init returned ${result}`);
                 btnInit.disabled = false;
+                return;
             }
+            initialized = true;
+            log('Emulator initialized successfully.');
+            hideProgress();
+            setStatus('Emulator ready. Choose a ROM to load and run.', 'ok');
+            if (romData) btnLoad.disabled = false;
         } catch (err) {
+            hideProgress();
             setStatus(`Init error: ${err.message}`, 'error');
             log(`ERROR: ${err.message}`);
             btnInit.disabled = false;
+        } finally {
+            initializing = false;
         }
+    }
+
+    btnInit.addEventListener('click', function () {
+        void initializeEmulator();
     });
 
     // ── Load ROM ─────────────────────────────────────────────────
-    btnLoad.addEventListener('click', function () {
+    async function loadAndRunRom() {
         if (!initialized || (!romData && !romMounted)) {
             setStatus('Initialize emulator and select a ROM first.', 'error');
             return;
         }
 
         try {
-            setStatus('Loading ROM...');
+            setStatus('Mounting ROM...');
+            showProgress(null);
             btnLoad.disabled = true;
+            await yieldToBrowser();
 
             // Write ROM to MEMFS so the C++ side can read it. Preserve the
             // selected extension because the native loader uses it as a
@@ -195,27 +285,36 @@
                 log(`ROM written to MEMFS: ${romPath}`);
             }
 
+            setStatus('Opening game...');
+            await yieldToBrowser();
             const result = wasmModule.ccall('azahar_load_rom', 'number', ['string'], [romPath]);
             if (result === 0) {
                 romLoaded = true;
                 log('ROM loaded successfully!');
-                setStatus('ROM loaded. Click "Step Frame" or "Run".', 'ok');
-                btnStep.disabled = false;
-                btnRun.disabled = false;
+                hideProgress();
+                btnStep.disabled = true;
+                startRunning();
             } else if (result === -4) {
+                hideProgress();
                 setStatus('ROM is encrypted. Use a decrypted dump with your own keys.', 'error');
                 log('ERROR: azahar_load_rom rejected an encrypted ROM');
                 btnLoad.disabled = false;
             } else {
+                hideProgress();
                 setStatus(`ROM load failed (code ${result})`, 'error');
                 log(`ERROR: azahar_load_rom returned ${result}`);
                 btnLoad.disabled = false;
             }
         } catch (err) {
+            hideProgress();
             setStatus(`Load error: ${err.message}`, 'error');
             log(`ERROR: ${err.message}`);
             btnLoad.disabled = false;
         }
+    }
+
+    btnLoad.addEventListener('click', function () {
+        void loadAndRunRom();
     });
 
     // ── Step One Frame ───────────────────────────────────────────
@@ -249,17 +348,35 @@
     });
 
     // ── Run Loop ─────────────────────────────────────────────────
-    btnRun.addEventListener('click', function () {
+    function updateBootStatus(now) {
+        if (now < nextBootStatusAt) return;
+        nextBootStatusAt = now + 500;
+        if (!gameGraphicsDetected && wasmModule._azahar_framebuffer_nonblack_pixels) {
+            gameGraphicsDetected = wasmModule._azahar_framebuffer_nonblack_pixels() > 0;
+        }
+        if (gameGraphicsDetected) {
+            hideProgress();
+            setStatus(`Running. Game graphics detected after ${((now - runStartedAt) / 1000).toFixed(1)}s`, 'ok');
+        } else {
+            showProgress(null);
+            setStatus(`Booting game... ${((now - runStartedAt) / 1000).toFixed(1)}s (step ${frameCount})`, 'ok');
+        }
+    }
+
+    function startRunning() {
         if (!romLoaded || running) return;
 
         running = true;
+        runStartedAt = performance.now();
+        nextBootStatusAt = runStartedAt;
+        gameGraphicsDetected = false;
         btnRun.disabled = true;
         btnStop.disabled = false;
         btnStep.disabled = true;
-        log('Starting run loop at ~60 FPS...');
-        setStatus('Running...', 'ok');
+        log('Starting run loop at display refresh rate...');
+        showProgress(null);
 
-        function tick() {
+        function tick(now) {
             if (!running) return;
 
             try {
@@ -268,7 +385,8 @@
 
                 if (result === 0) {
                     updateCanvasFromWasm();
-                    runTimer = setTimeout(tick, 16); // ~60 FPS
+                    updateBootStatus(now);
+                    runAnimationFrame = requestAnimationFrame(tick);
                 } else if (result === 1) {
                     log('Emulation ended.');
                     setStatus('Emulation ended.', '');
@@ -285,8 +403,10 @@
             }
         }
 
-        tick();
-    });
+        requestAnimationFrame(tick);
+    }
+
+    btnRun.addEventListener('click', startRunning);
 
     btnStop.addEventListener('click', function () {
         stopRunning();
@@ -294,11 +414,15 @@
 
     function stopRunning() {
         running = false;
-        if (runTimer) { clearTimeout(runTimer); runTimer = null; }
+        if (runAnimationFrame !== null) {
+            cancelAnimationFrame(runAnimationFrame);
+            runAnimationFrame = null;
+        }
+        hideProgress();
         btnRun.disabled = !romLoaded;
         btnStop.disabled = true;
         btnStep.disabled = !romLoaded;
-        if (romLoaded) setStatus(`Stopped at frame ${frameCount}`, '');
+        if (romLoaded) setStatus(`Stopped at step ${frameCount}`, '');
     }
 
     // ── Canvas Update ────────────────────────────────────────────
@@ -326,7 +450,11 @@
     // ── Auto-init on page load ───────────────────────────────────
     log('Azahar Web UI ready.');
     setStatus('Loading WASM module...');
-    loadWasmModule().catch(function (err) {
+    showProgress(null);
+    loadWasmModule().then(function () {
+        return initializeEmulator();
+    }).catch(function (err) {
+        hideProgress();
         log(`WASM load failed: ${err.message}`);
         setStatus(`Failed to load WASM: ${err.message}. Ensure azahar.js and azahar.wasm are in the same directory.`, 'error');
         // Allow manual retry via Init button

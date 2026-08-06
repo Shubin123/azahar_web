@@ -108,6 +108,13 @@
         #status.error { color: #ff6b6b; }
         #status.ok { color: #6bff6b; }
 
+        #progress {
+            width: 100%;
+            height: 7px;
+            margin-top: 6px;
+            accent-color: #e94560;
+        }
+
         .log-box {
             background: #0a0a1a;
             border: 1px solid #333;
@@ -144,15 +151,16 @@
                 <label for="rom-file" class="file-label" id="file-label">
                     Choose a 3DS ROM file...
                 </label>
-                <button class="btn btn-primary" id="btn-load" disabled>Load ROM</button>
+                <button class="btn btn-primary" id="btn-load" disabled>Load &amp; Run</button>
                 <div id="status">Ready. Load a ROM to begin.</div>
+                <progress id="progress" max="100" value="0" hidden></progress>
             </div>
 
             <div class="card">
                 <h2>▶ Controls</h2>
-                <button class="btn btn-primary" id="btn-init">Initialize Emulator</button>
+                <button class="btn btn-primary" id="btn-init" disabled>Initialize Emulator</button>
                 <button class="btn btn-success" id="btn-step" disabled>Step Frame</button>
-                <button class="btn btn-secondary" id="btn-run" disabled>▶ Run (60 FPS)</button>
+                <button class="btn btn-secondary" id="btn-run" disabled>▶ Run / Resume</button>
                 <button class="btn btn-secondary" id="btn-stop" disabled>⏹ Stop</button>
             </div>
 

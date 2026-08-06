@@ -37,6 +37,11 @@ function createWebServer(root = WEB_ROOT) {
             return;
         }
         if (pathname === '/') pathname = '/index.html';
+        // Allow both the direct server URL (/) and the user's existing
+        // /web/index.html URL when this script is launched from the workspace.
+        if (pathname === '/web' || pathname.startsWith('/web/')) {
+            pathname = pathname.slice('/web'.length) || '/index.html';
+        }
 
         const file = path.resolve(resolvedRoot, `.${pathname}`);
         if (file !== resolvedRoot && !file.startsWith(`${resolvedRoot}${path.sep}`)) {
@@ -80,7 +85,8 @@ function listen(port = 8765, host = '127.0.0.1') {
 
 if (require.main === module) {
     const port = Number.parseInt(process.env.PORT || '8765', 10);
-    listen(port).then(server => {
+    const host = process.env.HOST || '127.0.0.1';
+    listen(port, host).then(server => {
         const address = server.address();
         console.log(`Azahar web server: http://${address.address}:${address.port}/`);
     }).catch(error => {
