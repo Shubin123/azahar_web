@@ -5,10 +5,16 @@ const {listen} = require('../web/server.cjs');
 
 const requireWebGL2 = process.argv.includes('--require-webgl2');
 const interactive = process.argv.includes('--interactive');
+const artifactArgument = process.argv.indexOf('--artifact');
+const artifact = artifactArgument >= 0 ? process.argv[artifactArgument + 1] : 'software';
+if (!['software', 'webgl2'].includes(artifact)) {
+    throw new Error('Usage: node tests/webgl2_preflight.cjs [--artifact software|webgl2]');
+}
 
 async function main() {
     const server = await listen(0);
-    const url = `http://127.0.0.1:${server.address().port}/index.html`;
+    const pageName = artifact === 'webgl2' ? 'index_webgl2.html' : 'index.html';
+    const url = `http://127.0.0.1:${server.address().port}/${pageName}`;
     const browser = await puppeteer.launch({
         headless: interactive ? false : 'new',
         executablePath: process.env.CHROME_PATH,
@@ -20,17 +26,22 @@ async function main() {
         await page.goto(url, {waitUntil: 'networkidle0', timeout: 120000});
         await page.waitForFunction(() => document.querySelector('#status')?.textContent.includes('Emulator ready'),
             {timeout: 120000});
-        const report = await page.evaluate(() => {
+        const report = await page.evaluate(activeArtifact => {
             const probe = document.createElement('canvas');
             const gl = probe.getContext('webgl2', {antialias: false, depth: true, stencil: true});
             const extensions = name => Boolean(gl?.getExtension(name));
-            const currentCanvas = document.querySelector('#canvas');
             return {
+                artifact: activeArtifact,
                 crossOriginIsolated,
                 webgl2: Boolean(gl),
                 webgpu: Boolean(navigator.gpu),
-                productionCanvasContext: currentCanvas?.getContext('webgl2') ? 'webgl2' :
-                    currentCanvas?.getContext('2d') ? '2d' : 'none',
+                // Do not call getContext on #canvas here. On an unclaimed
+                // canvas that call would itself select a production context,
+                // invalidating the software/WebGL2 fallback contract.
+                productionCanvas: {
+                    id: document.querySelector('#canvas')?.id || null,
+                    untouchedByPreflight: true,
+                },
                 limits: gl ? {
                     maxTextureSize: gl.getParameter(gl.MAX_TEXTURE_SIZE),
                     maxCombinedTextureImageUnits: gl.getParameter(gl.MAX_COMBINED_TEXTURE_IMAGE_UNITS),
@@ -45,7 +56,7 @@ async function main() {
                     s3tc: extensions('WEBGL_compressed_texture_s3tc'),
                 } : null,
             };
-        });
+        }, artifact);
         if (!report.crossOriginIsolated) throw new Error('COOP/COEP isolation is missing');
         if (requireWebGL2 && !report.webgl2) throw new Error('WebGL2 is required but unavailable');
         console.log(JSON.stringify({ok: true, report}, null, 2));

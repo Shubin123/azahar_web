@@ -9,12 +9,21 @@ const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const webDir = path.join(root, 'web');
 const buildDir = path.join(root, 'build-web', 'bin', 'Release');
+const artifactArgument = process.argv.indexOf('--artifact');
+const artifactKind = artifactArgument >= 0 ? process.argv[artifactArgument + 1] : 'software';
+if (!['software', 'webgl2'].includes(artifactKind)) {
+    throw new Error('Usage: node tests/web_artifact_smoke.cjs [--artifact software|webgl2]');
+}
+const artifactName = artifactKind === 'webgl2' ? 'azahar_webgl2' : 'azahar';
+const pageName = artifactKind === 'webgl2' ? 'index_webgl2.html' : 'index.html';
 const expectedExports = [
     'azahar_init',
     'azahar_load_state',
     'azahar_load_rom',
     'azahar_framebuffer_nonblack_pixels',
+    'azahar_reset_renderer_stats',
     'azahar_get_perf_stats',
+    'azahar_get_renderer_stats',
     'azahar_run_loop',
     'azahar_save_state',
     'azahar_shutdown',
@@ -33,29 +42,34 @@ function requireFile(dir, name) {
 }
 
 for (const dir of [webDir, buildDir]) {
-    requireFile(dir, 'azahar.js');
-    requireFile(dir, 'azahar.wasm');
+    requireFile(dir, `${artifactName}.js`);
+    requireFile(dir, `${artifactName}.wasm`);
 }
 
-for (const name of ['azahar.js', 'azahar.wasm']) {
+for (const extension of ['js', 'wasm']) {
+    const name = `${artifactName}.${extension}`;
     const buildHash = crypto.createHash('sha256').update(read(path.join(buildDir, name))).digest('hex');
     const webHash = crypto.createHash('sha256').update(read(path.join(webDir, name))).digest('hex');
     assert.equal(webHash, buildHash,
         `served web/${name} is stale; rebuild the azahar_web_assets target`);
 }
 
-const html = read(path.join(webDir, 'index.html')).toString('utf8');
+const html = read(path.join(webDir, pageName)).toString('utf8');
 const ui = read(path.join(webDir, 'azahar_ui.js')).toString('utf8');
-const glue = read(path.join(webDir, 'azahar.js')).toString('utf8');
+const glue = read(path.join(webDir, `${artifactName}.js`)).toString('utf8');
 
 assert.match(html, /<canvas\s+id=["']canvas["']/i);
 assert.match(html, /azahar_ui\.js/);
-assert.match(ui, /script\.src\s*=\s*['"]azahar\.js['"]/);
+assert.match(ui, /script\.src\s*=\s*`\$\{artifactName\}\.js`/);
+if (artifactKind === 'webgl2') {
+    assert.match(html, /renderer:\s*['"]webgl2['"]/);
+    assert.match(ui, /#version 300 es/);
+}
 for (const name of expectedExports) {
     assert.match(glue, new RegExp(`_${name}\\b`), `missing ${name} in generated JS`);
 }
 
-const wasmBytes = read(path.join(webDir, 'azahar.wasm'));
+const wasmBytes = read(path.join(webDir, `${artifactName}.wasm`));
 const wasmModule = new WebAssembly.Module(wasmBytes);
 const moduleExports = WebAssembly.Module.exports(wasmModule);
 const moduleImports = WebAssembly.Module.imports(wasmModule);
@@ -67,4 +81,4 @@ assert.ok(
 assert.ok(moduleExports.filter(({kind}) => kind === 'function').length > 100,
     'WASM export table is unexpectedly small');
 
-console.log(`Web artifact smoke test passed (${moduleExports.length} WASM exports inspected).`);
+console.log(`${artifactKind} web artifact smoke test passed (${moduleExports.length} WASM exports inspected).`);

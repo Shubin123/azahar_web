@@ -102,13 +102,19 @@ before changing its dispatch path.
 # Quick smoke test: verify artifacts are in sync
 node tests/web_artifact_smoke.cjs
 
+# Build the separate experimental artifact after configuring with
+# -DENABLE_WEBGL2_RENDERER=ON. This never overwrites the stable azahar.js/.wasm.
+build_webgl2.bat
+node tests/web_artifact_smoke.cjs --artifact webgl2
+node tests/webgl2_renderer_static.cjs
+
 # Browser benchmark (requires Puppeteer)
 npm install --no-save puppeteer-core
 $env:CHROME_PATH = "$env:ProgramFiles\Google\Chrome\Application\chrome.exe"
-node tests/benchmark_browser.cjs --duration-seconds 15 --warmup-seconds 30 --repeat 3
+node tests/benchmark_browser.cjs --artifact software --duration-seconds 15 --warmup-seconds 30 --repeat 3
 
 # With profiling (perf counter samples every ~1s)
-node tests/benchmark_browser.cjs --duration-seconds 15 --warmup-seconds 30 --repeat 1 --profile
+node tests/benchmark_browser.cjs --artifact software --duration-seconds 15 --warmup-seconds 30 --repeat 1 --profile
 
 # First-time local gameplay fixture. A visible UI lets the tester clear menus
 # and move Mario before pressing the red save control (ROM/state stay ignored).
@@ -119,15 +125,20 @@ node tests/capture_gameplay_state.cjs
 # Required visual/input gate before comparing renderer or performance changes.
 # This restores the real W1-1 fixture through the normal UI, validates native and
 # compositor pixels, then holds right and requires a changed visible frame.
-node tests/browser_gameplay_state.cjs --state '<printed-moving-state-path>.cst'
+node tests/browser_gameplay_state.cjs --artifact software --state '<printed-moving-state-path>.cst'
+node tests/browser_gameplay_state.cjs --artifact webgl2 --state '<printed-moving-state-path>.cst'
 
-# Capability report for a future opt-in accelerated artifact. It probes a
-# separate canvas, leaving the proven production software canvas untouched.
-node tests/webgl2_preflight.cjs --require-webgl2
+# Capability and production-context preflight for the opt-in artifact. The
+# capability probe is separate; a context loss returns to a fresh software page.
+node tests/webgl2_preflight.cjs --require-webgl2 --artifact webgl2
+node tests/webgl2_fallback.cjs
 
 # Real-scene browser benchmark. Use the exact ignored .cst path printed by the
 # capture tool; --interactive includes visible presentation.
-node tests/benchmark_browser.cjs --interactive --state '<printed-moving-state-path>.cst' --duration-seconds 15 --warmup-seconds 0 --repeat 3 --profile
+# Compare both artifacts. The WebGL2 report includes PICA-stage/fallback
+# counters, so a presentation-only artifact cannot be mistaken for GPU draw acceleration.
+node tests/benchmark_browser.cjs --artifact software --interactive --state '<printed-moving-state-path>.cst' --duration-seconds 15 --warmup-seconds 0 --repeat 3 --profile
+node tests/benchmark_browser.cjs --artifact webgl2 --interactive --state '<printed-moving-state-path>.cst' --duration-seconds 15 --warmup-seconds 0 --repeat 3 --profile
 
 # Direct Node.js benchmark (non-pthreads builds only)
 node tests/benchmark.cjs --frames 300 --warmup 30 --repeat 3

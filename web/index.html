@@ -172,6 +172,11 @@
         </div>
     </div>
 
+    <script>
+        // Stable, known-good software artifact. Keep this page's 2D canvas
+        // ownership separate from the experimental WebGL2 bootstrap.
+        window.AzaharWebConfig = {renderer: 'software', artifact: 'azahar'};
+    </script>
     <script src="azahar_ui.js"></script>
 </body>
 </html>

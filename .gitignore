@@ -22,6 +22,9 @@
 /web/azahar.html
 /web/azahar.js
 /web/azahar.wasm
+/web/azahar_webgl2.html
+/web/azahar_webgl2.js
+/web/azahar_webgl2.wasm
 
 # Generated test reports and local traces
 /tests/e2e/test_results.json

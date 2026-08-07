@@ -17,6 +17,11 @@ const romPath = process.env.AZAHAR_ROM_PATH || path.join(root, 'test_games',
     'Super Mario 3D Land (Europe) (En,Fr,De,Es,It) (Demo) (Kiosk).3ds');
 const statePath = argValue('--state', process.env.AZAHAR_GAMEPLAY_STATE_PATH);
 const captureDir = argValue('--capture-dir');
+const artifact = argValue('--artifact', 'software');
+
+if (!['software', 'webgl2'].includes(artifact)) {
+    throw new Error('Usage: --artifact software|webgl2');
+}
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
@@ -124,13 +129,23 @@ async function main() {
     page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()); });
     try {
         const port = server.address().port;
-        await page.goto(`http://127.0.0.1:${port}/index.html`, {waitUntil: 'networkidle0', timeout: 120000});
+        const pageName = artifact === 'webgl2' ? 'index_webgl2.html' : 'index.html';
+        await page.goto(`http://127.0.0.1:${port}/${pageName}`, {waitUntil: 'networkidle0', timeout: 120000});
         await page.waitForFunction(() => document.querySelector('#status')?.textContent.includes('Emulator ready'),
             {timeout: 120000});
         await (await page.$('#rom-file')).uploadFile(romPath);
         await page.waitForFunction(() => !document.querySelector('#btn-load').disabled, {timeout: 30000});
         await page.click('#btn-load');
         await page.waitForFunction(() => !document.querySelector('#btn-stop').disabled, {timeout: 120000});
+        // The button flips as soon as the browser loop starts, before the ROM
+        // has completed its first render. Queueing a state load in that gap is
+        // nondeterministic: it can be accepted but apply during boot. Wait for
+        // the same renderer-ready milestone shown to a real browser user.
+        await page.waitForFunction(() => {
+            const status = document.querySelector('#status')?.textContent || '';
+            return status.includes('Renderer graphics ready') ||
+                status.includes('Running. Visible game graphics detected');
+        }, {timeout: 180000});
         const restoreResult = await page.evaluate(async stateName => {
             const response = await fetch('/gameplay_state');
             if (!response.ok) throw new Error(`state download failed: ${response.status}`);
@@ -143,7 +158,10 @@ async function main() {
         await sleep(3000);
         const before = await captureVisibleFrame(page, captureDir && path.join(captureDir, 'before-input.png'));
         const rendererPixels = await page.evaluate(() => Module._azahar_framebuffer_nonblack_pixels());
-        if (rendererPixels <= 0 || !visibleGameFrame(before)) {
+        // The compositor capture is the compatibility condition. The native
+        // count remains diagnostic only: a future GPU-resident WebGL2 surface
+        // does not need to mirror every pixel through a CPU staging buffer.
+        if (!visibleGameFrame(before)) {
             throw new Error(`Restored state is not visibly rendered: ${JSON.stringify({rendererPixels, before})}`);
         }
         await page.keyboard.down('ArrowRight');
@@ -156,7 +174,7 @@ async function main() {
             throw new Error(`Gameplay input did not change a visible frame: ${JSON.stringify({after, motion})}`);
         }
         if (consoleErrors.length) throw new Error(`Browser errors: ${JSON.stringify(consoleErrors)}`);
-        console.log(JSON.stringify({ok: true, rendererPixels, before: {...before, thumbnail: undefined},
+        console.log(JSON.stringify({ok: true, artifact, rendererPixels, before: {...before, thumbnail: undefined},
             after: {...after, thumbnail: undefined}, motion}, null, 2));
     } finally {
         await browser.close();

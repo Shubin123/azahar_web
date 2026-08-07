@@ -7,12 +7,20 @@
     'use strict';
 
     // ── DOM refs ──────────────────────────────────────────────────
+    const webConfig = window.AzaharWebConfig || {};
+    const isWebGL2Artifact = webConfig.renderer === 'webgl2';
+    const artifactName = webConfig.artifact || (isWebGL2Artifact ? 'azahar_webgl2' : 'azahar');
+    const softwareFallbackUrl = webConfig.softwareFallbackUrl || 'index.html';
     const canvas = document.getElementById('canvas');
     // The startup presentation guard reads pixels until the first visible
     // game frame arrives.  Request a readback-oriented 2D context once,
     // before Emscripten initializes SDL's software canvas, rather than
     // repeatedly creating an unhinted context in the run loop.
-    const canvas2dContext = canvas.getContext('2d', {willReadFrequently: true});
+    // A canvas can hold either a 2D or WebGL context, never both. The stable
+    // page claims its 2D software canvas here; the separately bootstrapped
+    // WebGL2 page intentionally leaves it untouched until SDL creates GLES 3.
+    const canvas2dContext = isWebGL2Artifact ? null :
+        canvas.getContext('2d', {willReadFrequently: true});
     const romInput = document.getElementById('rom-file');
     const fileLabel = document.getElementById('file-label');
     const btnLoad = document.getElementById('btn-load');
@@ -76,6 +84,63 @@
         return new Promise(resolve => requestAnimationFrame(resolve));
     }
 
+    let softwareFallbackStarted = false;
+
+    function restartInSoftware(reason) {
+        if (!isWebGL2Artifact || softwareFallbackStarted) return;
+        softwareFallbackStarted = true;
+        log(`WebGL2 fallback: ${reason}`);
+        setStatus(`WebGL2 unavailable (${reason}). Restarting in software...`, 'error');
+        const destination = new URL(softwareFallbackUrl, window.location.href);
+        destination.searchParams.set('webgl2-fallback', '1');
+        window.setTimeout(() => window.location.replace(destination.toString()), 0);
+    }
+
+    function compileWebGL2Probe(gl, type, source) {
+        const shader = gl.createShader(type);
+        gl.shaderSource(shader, source);
+        gl.compileShader(shader);
+        const ok = gl.getShaderParameter(shader, gl.COMPILE_STATUS);
+        const logText = gl.getShaderInfoLog(shader) || '';
+        gl.deleteShader(shader);
+        return {ok, logText};
+    }
+
+    // Validate the exact baseline used by RendererWebGL2 on an isolated probe
+    // canvas. This does not touch #canvas, preserving the fresh-session
+    // software fallback if context or shader creation fails.
+    function preflightWebGL2() {
+        if (!isWebGL2Artifact) return true;
+        const probe = document.createElement('canvas');
+        const gl = probe.getContext('webgl2', {
+            alpha: false, antialias: false, depth: true, stencil: true,
+        });
+        if (!gl) {
+            restartInSoftware('WebGL2 context creation failed');
+            return false;
+        }
+        const vertex = compileWebGL2Probe(gl, gl.VERTEX_SHADER, `#version 300 es
+precision highp float;
+layout(location = 0) in vec2 vert_position;
+void main() { gl_Position = vec4(vert_position, 0.0, 1.0); }`);
+        const fragment = compileWebGL2Probe(gl, gl.FRAGMENT_SHADER, `#version 300 es
+precision mediump float;
+out vec4 frag_color;
+void main() { frag_color = vec4(1.0); }`);
+        if (!vertex.ok || !fragment.ok) {
+            restartInSoftware(`GLSL ES 3.00 shader preflight failed: ${vertex.logText || fragment.logText}`);
+            return false;
+        }
+
+        // Context loss cannot safely become a 2D session in this document.
+        // Navigate before title loading so the stable page gets a new canvas.
+        canvas.addEventListener('webglcontextlost', event => {
+            event.preventDefault();
+            restartInSoftware('WebGL2 context lost');
+        }, {once: true});
+        return true;
+    }
+
     function memfsRomPath(filename) {
         // Loader::GetLoader uses an extension as a fallback when a container
         // (notably CIA) cannot be identified from its header. Keep only the
@@ -129,12 +194,16 @@
     // ── WASM Module Loading ──────────────────────────────────────
     async function loadWasmModule() {
         await ensureCrossOriginIsolated();
-        log('Loading azahar.js glue script...');
+        if (!preflightWebGL2()) {
+            // restartInSoftware has scheduled a navigation to a fresh canvas.
+            return new Promise(() => {});
+        }
+        log(`Loading ${artifactName}.js glue script...`);
         setStatus('Loading WebAssembly module...');
 
         return new Promise((resolve, reject) => {
             const script = document.createElement('script');
-            script.src = 'azahar.js';
+            script.src = `${artifactName}.js`;
             // SDL2's Emscripten backend must use the UI canvas that already
             // exists in the page. Set this before loading the generated glue
             // script so it does not create an unbound canvas target.
@@ -244,6 +313,10 @@
             await yieldToBrowser();
             const result = wasmModule._azahar_init();
             if (result !== 0) {
+                if (isWebGL2Artifact && result === -7) {
+                    restartInSoftware('native WebGL2 context setup failed');
+                    return;
+                }
                 setStatus(`Init failed (code ${result})`, 'error');
                 log(`ERROR: azahar_init returned ${result}`);
                 btnInit.disabled = false;
@@ -305,6 +378,9 @@
                 hideProgress();
                 btnStep.disabled = true;
                 startRunning();
+            } else if (isWebGL2Artifact && result === -7) {
+                hideProgress();
+                restartInSoftware('native GLSL ES 3.00 setup failed');
             } else if (result === -4) {
                 hideProgress();
                 setStatus('ROM is encrypted. Use a decrypted dump with your own keys.', 'error');
@@ -359,6 +435,24 @@
     });
 
     // ── Run Loop ─────────────────────────────────────────────────
+    function visibleCanvasPixels() {
+        if (canvas2dContext) {
+            return canvas2dContext.getImageData(0, 0, canvas.width, canvas.height).data;
+        }
+        // This runs only after the WebGL2 renderer has claimed the canvas.
+        // Asking for its existing context is safe; creating a 2D context here
+        // would make the experimental fallback contract impossible.
+        const gl = canvas.getContext('webgl2');
+        if (!gl) return null;
+        try {
+            const pixels = new Uint8Array(canvas.width * canvas.height * 4);
+            gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+            return pixels;
+        } catch (_) {
+            return null;
+        }
+    }
+
     function updateBootStatus(now) {
         if (now < nextBootStatusAt) return;
         nextBootStatusAt = now + 500;
@@ -369,19 +463,21 @@
             // A non-black software framebuffer proves only that emulation and
             // rasterization work. Confirm that those pixels arrived at the
             // visible UI canvas before reporting graphics as detected.
-            const data = canvas2dContext.getImageData(0, 0, canvas.width, canvas.height).data;
-            const colors = new Set();
-            let nonBlackSamples = 0;
-            for (let index = 0; index < data.length; index += 64) {
-                const red = data[index];
-                const green = data[index + 1];
-                const blue = data[index + 2];
-                if (red || green || blue) {
-                    nonBlackSamples++;
-                    colors.add(`${red},${green},${blue}`);
+            const data = visibleCanvasPixels();
+            if (data) {
+                const colors = new Set();
+                let nonBlackSamples = 0;
+                for (let index = 0; index < data.length; index += 64) {
+                    const red = data[index];
+                    const green = data[index + 1];
+                    const blue = data[index + 2];
+                    if (red || green || blue) {
+                        nonBlackSamples++;
+                        colors.add(`${red},${green},${blue}`);
+                    }
                 }
+                gameGraphicsDetected = nonBlackSamples >= 16 && colors.size >= 2;
             }
-            gameGraphicsDetected = nonBlackSamples >= 16 && colors.size >= 2;
         }
         if (gameGraphicsDetected) {
             hideProgress();
@@ -487,6 +583,11 @@
 
     // ── Canvas Update ────────────────────────────────────────────
     function updateCanvasFromWasm() {
+        if (isWebGL2Artifact || !canvas2dContext) {
+            // RendererWebGL2 draws directly to Module.canvas. A 2D blit would
+            // either fail or attempt to claim the already-WebGL canvas.
+            return;
+        }
         // SDL2 on Emscripten renders to its own canvas (Module.canvas).
         // Our canvas (#canvas) is separate, so we copy the pixels.
         // If Module.canvas is different, blit from it.
@@ -515,7 +616,7 @@
     }).catch(function (err) {
         hideProgress();
         log(`WASM load failed: ${err.message}`);
-        setStatus(`Failed to load WASM: ${err.message}. Ensure azahar.js and azahar.wasm are in the same directory.`, 'error');
+        setStatus(`Failed to load WASM: ${err.message}. Ensure ${artifactName}.js and ${artifactName}.wasm are in the same directory.`, 'error');
         // Allow manual retry via Init button
         btnInit.disabled = false;
     });

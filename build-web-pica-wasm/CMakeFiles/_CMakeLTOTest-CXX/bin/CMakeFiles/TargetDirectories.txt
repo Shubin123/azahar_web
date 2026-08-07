@@ -1,0 +1,4 @@
+C:/Users/shubadub/Documents/azahar/build-web-pica-wasm/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/foo.dir
+C:/Users/shubadub/Documents/azahar/build-web-pica-wasm/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/boo.dir
+C:/Users/shubadub/Documents/azahar/build-web-pica-wasm/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/edit_cache.dir
+C:/Users/shubadub/Documents/azahar/build-web-pica-wasm/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/rebuild_cache.dir

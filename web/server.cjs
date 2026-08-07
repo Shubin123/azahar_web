@@ -40,7 +40,7 @@ function createWebServer(root = WEB_ROOT) {
         // Allow both the direct server URL (/) and the user's existing
         // /web/index.html URL when this script is launched from the workspace.
         if (pathname === '/web' || pathname.startsWith('/web/')) {
-            pathname = pathname.slice('/web'.length) || '/index.html';
+            pathname = pathname.slice('/web'.length) || '/index_webgl2.html';
         }
 
         const file = path.resolve(resolvedRoot, `.${pathname}`);

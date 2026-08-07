@@ -6,13 +6,14 @@
  * (SharedArrayBuffer, Web Workers) that raw Node.js cannot provide.
  *
  * Usage:
- *   node tests/benchmark_browser.cjs [--duration-seconds N] [--warmup-seconds N] [--rom PATH] [--state PATH] [--output PATH]
+ *   node tests/benchmark_browser.cjs [--artifact software|webgl2] [--duration-seconds N] [--warmup-seconds N] [--rom PATH] [--state PATH] [--output PATH]
  *
  * Options:
  *   --duration-seconds N Benchmark duration after the title-screen warmup (default: 15)
  *   --warmup-seconds N   Warmup duration before measuring (default: 30)
  *   --rom PATH    ROM file path (default: first .3ds/.3dsx/.cia in test_games/)
  *   --state PATH  Local .cst fixture to restore after ROM load; measures real gameplay rather than boot/title
+ *   --artifact KIND  Test the stable software or experimental WebGL2 artifact (default: software)
  *   --output PATH JSON output path (default: tests/benchmark_results.json)
  *   --repeat N    Repeat the benchmark N times (default: 3)
  *   --profile     Sample perf counters every ~1s during benchmark
@@ -45,11 +46,16 @@ const BENCH_SECONDS = Number(argVal('--duration-seconds', '15'));
 const WARMUP_SECONDS = Number(argVal('--warmup-seconds', '30'));
 const ROM_ARG = argVal('--rom', null);
 const STATE_ARG = argVal('--state', null);
+const ARTIFACT = argVal('--artifact', 'software');
 const OUTPUT_PATH = argVal('--output', path.join(__dirname, 'benchmark_results.json'));
 const REPEAT = Number(argVal('--repeat', '3'));
 const PROFILE = argFlag('--profile');
 const INTERACTIVE = argFlag('--interactive');
 const MANUAL_START = argFlag('--manual-start');
+
+if (!['software', 'webgl2'].includes(ARTIFACT)) {
+    throw new Error('Usage: --artifact software|webgl2');
+}
 
 const root = path.resolve(__dirname, '..');
 const testGamesDir = path.join(root, 'test_games');
@@ -111,9 +117,10 @@ function createBenchServer(romPath, statePath) {
 }
 
 // ── Benchmark script (runs inside page.evaluate) ──────────────────
-async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableProfile, manualStart, stateName) {
+async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableProfile, manualStart,
+    stateName, artifact) {
     return await page.evaluate(async ({
-        romExt_, benchSeconds_, warmupSeconds_, enableProfile_, manualStart_, stateName_
+        romExt_, benchSeconds_, warmupSeconds_, enableProfile_, manualStart_, stateName_, artifact_
     }) => {
         const perf = performance;
         const Module = window.Module;
@@ -140,17 +147,70 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
             return stats;
         }
 
+        function readRendererStats() {
+            if (!Module._azahar_get_renderer_stats) return null;
+            const rendererStatsCount = 56; // 24 stable fields + 32 profile-feature counters.
+            const buf = Module._malloc(rendererStatsCount * 8);
+            let stats = null;
+            if (Module._azahar_get_renderer_stats(buf, rendererStatsCount) === 0) {
+                const v = new Float64Array(Module.HEAPU8.buffer, buf, rendererStatsCount);
+                stats = {
+                    rendererKind: v[0], picaStage: v[1], acceleratedDrawBatches: v[2],
+                    hardwareDrawAttempts: v[3], softwareDrawBatches: v[4],
+                    softwareTriangles: v[5], indexedDrawAttempts: v[6],
+                    displayTransferAttempts: v[7], textureCopyAttempts: v[8], fillAttempts: v[9],
+                    cpuVertexCandidateBatches: v[10], cpuVertexCandidateTriangles: v[11],
+                    cpuVertexRejectedBatches: v[12], cpuVertexBridgeFailures: v[13],
+                    cpuVertexRejectionMask: v[14],
+                    cpuVertexFramebufferRejects: v[15], cpuVertexOutputMergerRejects: v[16],
+                    cpuVertexTexturingRejects: v[17], cpuVertexRasterizerRejects: v[18],
+                    cpuVertexPipelineRejects: v[19], cpuVertexProfileVertices: v[20],
+                    cpuVertexProfileMaxVertices: v[21], cpuVertexModalRejectMask: v[22],
+                    cpuVertexModalRejectBatches: v[23],
+                    cpuVertexProfileFeatures: Array.from(v.slice(24, rendererStatsCount)),
+                };
+            }
+            Module._free(buf);
+            return stats;
+        }
+
         function presentToUiCanvas() {
+            // The WebGL2 artifact owns #canvas. Never acquire a 2D context
+            // there, even if a future SDL integration changes Module.canvas.
+            if (artifact_ === 'webgl2') return;
             const target = document.querySelector('#canvas');
             if (!target || !Module.canvas || Module.canvas === target) return;
             target.getContext('2d').drawImage(Module.canvas, 0, 0, target.width, target.height);
         }
 
-        function readCanvasSceneStats() {
+        async function readCanvasSceneStats() {
             const canvas = document.querySelector('#canvas');
-            const context = canvas?.getContext('2d', {willReadFrequently: true});
+            if (!canvas?.width || !canvas?.height) return null;
+            // Sampling is done through a detached 2D canvas. In particular,
+            // do not call getContext('2d') on the WebGL2 production canvas:
+            // a context claim would invalidate the backend under test.
+            const sample = document.createElement('canvas');
+            sample.width = canvas.width;
+            sample.height = canvas.height;
+            const context = sample.getContext('2d', {willReadFrequently: true});
             if (!context) return null;
-            const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
+            let bitmap = null;
+            try {
+                if (typeof createImageBitmap === 'function') {
+                    bitmap = await createImageBitmap(canvas);
+                    context.drawImage(bitmap, 0, 0);
+                } else {
+                    context.drawImage(canvas, 0, 0);
+                }
+            } catch (_) {
+                // Some browsers reject createImageBitmap for a live WebGL
+                // canvas. Drawing it as a source still leaves the production
+                // context untouched, so use that compatible fallback.
+                context.drawImage(canvas, 0, 0);
+            } finally {
+                bitmap?.close?.();
+            }
+            const data = context.getImageData(0, 0, sample.width, sample.height).data;
             let samples = 0;
             let nonBlack = 0;
             let colorful = 0;
@@ -163,7 +223,8 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
             }
             return {samples, nonBlackCoverage: nonBlack / samples,
                 colorfulCoverage: colorful / samples,
-                rendererNonblackPixels: Module._azahar_framebuffer_nonblack_pixels?.() ?? -1};
+                rendererNonblackPixels: Module._azahar_framebuffer_nonblack_pixels?.() ?? -1,
+                rendererStats: readRendererStats()};
         }
 
         async function restoreState() {
@@ -180,9 +241,9 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
             // SendSignal is consumed by the emulation loop.  Give the restored
             // scene a short, unmeasured settle window before collecting samples.
             const settle = await runForDuration(3, false);
-            const visual = readCanvasSceneStats();
-            if (!visual || visual.rendererNonblackPixels <= 0 || visual.nonBlackCoverage < 0.03 ||
-                visual.colorfulCoverage < 0.005) {
+            Module._azahar_reset_renderer_stats?.();
+            const visual = await readCanvasSceneStats();
+            if (!visual || visual.nonBlackCoverage < 0.03 || visual.colorfulCoverage < 0.005) {
                 throw new Error(`Restored state did not produce a rendered game scene: ${JSON.stringify(visual)}`);
             }
             return {...settle, visual};
@@ -227,7 +288,8 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
                     presentToUiCanvas();
                     perFrame.push(perf.now() - t0);
                     if (samplePerf && timestamp >= nextSampleAt) {
-                        samples.push({frame: perFrame.length, elapsedMs: timestamp - startedAt, perf: readPerfStats()});
+                        samples.push({frame: perFrame.length, elapsedMs: timestamp - startedAt,
+                            perf: readPerfStats(), renderer: readRendererStats()});
                         nextSampleAt = timestamp + 1000;
                     }
                     previousTick = timestamp;
@@ -315,6 +377,7 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
             // Benchmark the sustained post-warmup browser path.
             const bench = await runForDuration(benchSeconds_, enableProfile_);
             const perfStats = readPerfStats();
+            const rendererStats = readRendererStats();
             const heapAfter = Module.HEAPU8 ? Module.HEAPU8.length : 0;
 
             Module._azahar_shutdown();
@@ -335,6 +398,7 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
                     perFrame: bench.perFrame,
                 },
                 perfStats,
+                rendererStats,
                 profileSamples: bench.samples,
             });
         }
@@ -346,6 +410,7 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
         enableProfile_: enableProfile,
         manualStart_: manualStart,
         stateName_: stateName,
+        artifact_: artifact,
     });
 }
 
@@ -364,6 +429,7 @@ async function main() {
     console.log(`# Mode: ${INTERACTIVE ? 'interactive browser' : 'headless diagnostic'}`);
     console.log(`# Start: ${MANUAL_START ? 'manual gameplay marker (F8/click)' : 'timed warmup'}`);
     console.log(`# State: ${STATE_ARG ? path.basename(STATE_ARG) : 'none (boot/title path)'}`);
+    console.log(`# Artifact: ${ARTIFACT}`);
     console.log(`# Profile: ${PROFILE ? 'on' : 'off'}`);
     console.log(`# Started: ${new Date().toISOString()}`);
     console.log('');
@@ -379,7 +445,8 @@ async function main() {
         });
     });
     const addr = server.address();
-    const webUrl = `http://127.0.0.1:${addr.port}/index.html`;
+    const pageName = ARTIFACT === 'webgl2' ? 'index_webgl2.html' : 'index.html';
+    const webUrl = `http://127.0.0.1:${addr.port}/${pageName}`;
     console.log(`   Server: ${webUrl}`);
 
     // Launch browser
@@ -456,7 +523,7 @@ async function main() {
             }
 
             const runs = await runBenchInPage(page, romExt, BENCH_SECONDS, WARMUP_SECONDS, PROFILE,
-                MANUAL_START, stateName);
+                MANUAL_START, stateName, ARTIFACT);
 
             for (const run of runs) {
                 const b = run.bench;
@@ -481,6 +548,16 @@ async function main() {
                         + `speed=${(ps.emulationSpeed * 100).toFixed(0)}% `
                         + `gpu=${(ps.timeGpu * 1000).toFixed(2)}ms `
                         + `swap=${(ps.timeSwap * 1000).toFixed(2)}ms`);
+                }
+                if (run.rendererStats?.rendererKind === 1) {
+                    const rs = run.rendererStats;
+                    console.log(`   WebGL2 PICA: stage=${rs.picaStage} accelerated=`
+                        + `${rs.acceleratedDrawBatches}/${rs.hardwareDrawAttempts} attempted `
+                        + `software_batches=${rs.softwareDrawBatches} `
+                        + `triangles=${rs.softwareTriangles} `
+                        + `cpu_vertex_candidates=${rs.cpuVertexCandidateBatches} `
+                        + `rejected=${rs.cpuVertexRejectedBatches} `
+                        + `bridge_failures=${rs.cpuVertexBridgeFailures}`);
                 }
                 console.log(`   Heap: ${(run.heapAfter / 1024 / 1024).toFixed(0)}MB`);
 
@@ -507,7 +584,7 @@ async function main() {
         };
 
         const results = {
-            benchmarkVersion: 3,
+            benchmarkVersion: 4,
             runner: 'browser',
             timestamp: new Date().toISOString(),
             config: {
@@ -518,6 +595,7 @@ async function main() {
                 interactive: INTERACTIVE,
                 manualStart: MANUAL_START,
                 savestate: STATE_ARG ? path.basename(STATE_ARG) : null,
+                artifact: ARTIFACT,
             },
             environment,
             aggregate,
