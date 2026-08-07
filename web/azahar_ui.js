@@ -8,6 +8,11 @@
 
     // ── DOM refs ──────────────────────────────────────────────────
     const canvas = document.getElementById('canvas');
+    // The startup presentation guard reads pixels until the first visible
+    // game frame arrives.  Request a readback-oriented 2D context once,
+    // before Emscripten initializes SDL's software canvas, rather than
+    // repeatedly creating an unhinted context in the run loop.
+    const canvas2dContext = canvas.getContext('2d', {willReadFrequently: true});
     const romInput = document.getElementById('rom-file');
     const fileLabel = document.getElementById('file-label');
     const btnLoad = document.getElementById('btn-load');
@@ -364,7 +369,7 @@
             // A non-black software framebuffer proves only that emulation and
             // rasterization work. Confirm that those pixels arrived at the
             // visible UI canvas before reporting graphics as detected.
-            const data = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+            const data = canvas2dContext.getImageData(0, 0, canvas.width, canvas.height).data;
             const colors = new Set();
             let nonBlackSamples = 0;
             for (let index = 0; index < data.length; index += 64) {
@@ -497,8 +502,7 @@
         }
 
         if (srcCanvas && srcCanvas !== canvas) {
-            var ctx = canvas.getContext('2d');
-            ctx.drawImage(srcCanvas, 0, 0, canvas.width, canvas.height);
+            canvas2dContext.drawImage(srcCanvas, 0, 0, canvas.width, canvas.height);
         }
     }
 

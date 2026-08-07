@@ -109,12 +109,15 @@ node tests/benchmark_browser.cjs --duration-seconds 15 --warmup-seconds 30 --rep
 # With profiling (perf counter samples every ~1s)
 node tests/benchmark_browser.cjs --duration-seconds 15 --warmup-seconds 30 --repeat 1 --profile
 
-# First-time local gameplay fixture (takes several minutes; ROM/state stay ignored)
+# First-time local gameplay fixture. A visible UI lets the tester clear menus
+# and move Mario before pressing the red save control (ROM/state stay ignored).
 $env:AZAHAR_ROM_PATH = (Resolve-Path 'test_games\Super Mario 3D Land (Europe) (En,Fr,De,Es,It) (Demo) (Kiosk).3ds').Path
+$env:AZAHAR_CAPTURE_MANUAL = '1'
 node tests/capture_gameplay_state.cjs
 
-# Real-scene browser benchmark. Use --interactive to include visible presentation.
-node tests/benchmark_browser.cjs --state tmp_test/gameplay_state/000400000007D500.01.cst --duration-seconds 15 --warmup-seconds 0 --repeat 3 --profile
+# Real-scene browser benchmark. Use the exact ignored .cst path printed by the
+# capture tool; --interactive includes visible presentation.
+node tests/benchmark_browser.cjs --interactive --state '<printed-moving-state-path>.cst' --duration-seconds 15 --warmup-seconds 0 --repeat 3 --profile
 
 # Direct Node.js benchmark (non-pthreads builds only)
 node tests/benchmark.cjs --frames 300 --warmup 30 --repeat 3
