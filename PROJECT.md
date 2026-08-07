@@ -88,9 +88,10 @@ Browser: Chrome headless, 30-second title-screen warmup, 15-second rAF measureme
 | Six-worker rasterizer | 19.5 FPS | 4.0 | 7% | 216 ms | 199 ms |
 
 These historical title-screen figures are not gameplay performance claims.
-For optimization decisions, capture and use the ignored local gameplay state
-below. It starts in Mario's movement tutorial, restores through the core's
-queued save-state signal, and rejects an empty/low-information restored canvas.
+For optimization decisions, capture and use the ignored local W1-1 gameplay
+state below. It restores through the core's queued save-state signal and rejects
+an empty/low-information restored compositor frame. Do not use title, splash,
+loading, or pre-input scenes as performance evidence.
 Software GPU command processing remains the dominant measured cost; dyncom
 already caches translated instruction blocks and should be profiled independently
 before changing its dispatch path.
@@ -114,6 +115,15 @@ node tests/benchmark_browser.cjs --duration-seconds 15 --warmup-seconds 30 --rep
 $env:AZAHAR_ROM_PATH = (Resolve-Path 'test_games\Super Mario 3D Land (Europe) (En,Fr,De,Es,It) (Demo) (Kiosk).3ds').Path
 $env:AZAHAR_CAPTURE_MANUAL = '1'
 node tests/capture_gameplay_state.cjs
+
+# Required visual/input gate before comparing renderer or performance changes.
+# This restores the real W1-1 fixture through the normal UI, validates native and
+# compositor pixels, then holds right and requires a changed visible frame.
+node tests/browser_gameplay_state.cjs --state '<printed-moving-state-path>.cst'
+
+# Capability report for a future opt-in accelerated artifact. It probes a
+# separate canvas, leaving the proven production software canvas untouched.
+node tests/webgl2_preflight.cjs --require-webgl2
 
 # Real-scene browser benchmark. Use the exact ignored .cst path printed by the
 # capture tool; --interactive includes visible presentation.
