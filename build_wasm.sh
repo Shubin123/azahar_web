@@ -4,23 +4,33 @@ set -e
 
 export EM_CONFIG="$HOME/.emscripten"
 export EM_CACHE="$LOCALAPPDATA/emscripten_cache"
-export EMSDK_PYTHON="C:/Users/shubadub/AppData/Local/Programs/Python/Python312/python.exe"
+export EMSDK="C:/Users/shubadub/emsdk"
+export EMSDK_PYTHON="$EMSDK/python/3.13.3_64bit/python.exe"
 export SSLKEYLOGFILE="$TEMP/ssl-keys.log"
-
-EM_DIR="C:/Program Files/Unity/Hub/Editor/2022.3.20f1/Editor/Data/PlaybackEngines/WebGLSupport/BuildTools/Emscripten"
 
 cd "C:/Users/shubadub/Documents/azahar"
 
-# Clean previous build
-rm -rf build-web
+# Clean previous build — try old dir first, fall back to build-web2 if locked
+rm -rf build-web 2>/dev/null || true
+BUILD_DIR="build-web"
+if [ -d "build-web" ]; then
+    echo "build-web is locked, using build-web2 instead"
+    BUILD_DIR="build-web2"
+    rm -rf build-web2 2>/dev/null || true
+fi
 
 echo "=== Running CMake configuration via emcmake ==="
-"$EMSDK_PYTHON" "$EM_DIR/emscripten/emcmake.py" cmake \
+# BUILD_SHARED_LIBS=OFF prevents WASM side-module (.so) generation.
+# The citra_sdl CMakeLists already provides all necessary target_link_options
+# (pthreads, memory, SDL, etc.), so the old CMAKE_EXE_LINKER_FLAGS are removed.
+# CMAKE_SHARED_LINKER_FLAGS is also removed — shared libs should not be built.
+"$EMSDK_PYTHON" "$EMSDK/upstream/emscripten/emcmake.py" cmake \
   -G Ninja \
-  -B build-web \
+  -B "$BUILD_DIR" \
   -S azahar \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_CXX_STANDARD=20 \
+  -DBUILD_SHARED_LIBS=OFF \
   -DENABLE_QT=OFF \
   -DENABLE_SDL2=ON \
   -DENABLE_SDL2_FRONTEND=ON \
@@ -38,10 +48,10 @@ echo "=== Running CMake configuration via emcmake ==="
   -DCRYPTOPP_DISABLE_ASM=ON \
   -DCITRA_WARNINGS_AS_ERRORS=OFF \
   -DCITRA_USE_PRECOMPILED_HEADERS=OFF \
-  -DCMAKE_CXX_FLAGS="-s USE_SDL=2" \
-  -DCMAKE_EXE_LINKER_FLAGS="-s INITIAL_MEMORY=512MB -s STACK_SIZE=2MB -s ALLOW_MEMORY_GROWTH=1 -s USE_SDL=2 -s EXPORTED_RUNTIME_METHODS='[\"ccall\",\"cwrap\",\"FS\"]' -s NO_EXIT_RUNTIME=1"
+  -DCMAKE_C_FLAGS="-pthread -msimd128" \
+  -DCMAKE_CXX_FLAGS="-pthread -msimd128"
 
 echo "=== CMake configuration complete ==="
 echo "=== Starting build ==="
-cmake --build build-web -- -j1 2>&1 | tail -100
+cmake --build "$BUILD_DIR" -- -j4 2>&1 | tail -100
 echo "=== Build complete ==="

@@ -119,6 +119,9 @@ function createBenchServer(romPath, statePath) {
 // ── Benchmark script (runs inside page.evaluate) ──────────────────
 async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableProfile, manualStart,
     stateName, artifact) {
+    // Disable the 30s default evaluate timeout — ROM load + warmup + benchmark
+    // may run in a single rAF-driven loop that spans tens of seconds.
+    page.setDefaultTimeout(0);
     return await page.evaluate(async ({
         romExt_, benchSeconds_, warmupSeconds_, enableProfile_, manualStart_, stateName_, artifact_
     }) => {
@@ -149,7 +152,7 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
 
         function readRendererStats() {
             if (!Module._azahar_get_renderer_stats) return null;
-            const rendererStatsCount = 56; // 24 stable fields + 32 profile-feature counters.
+            const rendererStatsCount = 67; // 24 stable + 32 profile + 10 bridge diag + 1 gl error
             const buf = Module._malloc(rendererStatsCount * 8);
             let stats = null;
             if (Module._azahar_get_renderer_stats(buf, rendererStatsCount) === 0) {
@@ -167,7 +170,15 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
                     cpuVertexPipelineRejects: v[19], cpuVertexProfileVertices: v[20],
                     cpuVertexProfileMaxVertices: v[21], cpuVertexModalRejectMask: v[22],
                     cpuVertexModalRejectBatches: v[23],
-                    cpuVertexProfileFeatures: Array.from(v.slice(24, rendererStatsCount)),
+                    cpuVertexProfileFeatures: Array.from(v.slice(24, 56)),
+                    cpuVertexBridgeFailObjects: v[56], cpuVertexBridgeFailMemory: v[57],
+                    cpuVertexBridgeFailSurface: v[58], cpuVertexBridgeFailTexture: v[59],
+                    cpuVertexBridgeFailGlError: v[60], cpuVertexBridgeSuccess: v[61],
+                    cpuVertexBridgeLastGlError: v[62],
+                    cpuVertexBridgeFailPreDraw: v[63],
+                    cpuVertexBridgeFailFbo: v[64],
+                    cpuVertexBridgeLastVertexCount: v[65],
+                    cpuVertexBridgeFailStep: v[66],
                 };
             }
             Module._free(buf);
@@ -283,22 +294,26 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
                 }
 
                 function tick(timestamp) {
-                    const t0 = perf.now();
-                    const result = Module._azahar_step_frame();
-                    presentToUiCanvas();
-                    perFrame.push(perf.now() - t0);
-                    if (samplePerf && timestamp >= nextSampleAt) {
-                        samples.push({frame: perFrame.length, elapsedMs: timestamp - startedAt,
-                            perf: readPerfStats(), renderer: readRendererStats()});
-                        nextSampleAt = timestamp + 1000;
-                    }
-                    previousTick = timestamp;
-                    if (result !== 0 && result !== 1) {
-                        reject(new Error(`step_frame returned ${result} at ${perFrame.length}`));
-                    } else if (result === 1 || timestamp - startedAt >= seconds * 1000) {
-                        finish();
-                    } else {
-                        requestAnimationFrame(tick);
+                    try {
+                        const t0 = perf.now();
+                        const result = Module._azahar_step_frame();
+                        presentToUiCanvas();
+                        perFrame.push(perf.now() - t0);
+                        if (samplePerf && timestamp >= nextSampleAt) {
+                            samples.push({frame: perFrame.length, elapsedMs: timestamp - startedAt,
+                                perf: readPerfStats(), renderer: readRendererStats()});
+                            nextSampleAt = timestamp + 1000;
+                        }
+                        previousTick = timestamp;
+                        if (result !== 0 && result !== 1) {
+                            reject(new Error(`step_frame returned ${result} at ${perFrame.length}`));
+                        } else if (result === 1 || timestamp - startedAt >= seconds * 1000) {
+                            finish();
+                        } else {
+                            requestAnimationFrame(tick);
+                        }
+                    } catch (err) {
+                        reject(new Error(`step_frame threw at frame ${perFrame.length}: ${err.message || err}`));
                     }
                 }
                 requestAnimationFrame(tick);
@@ -327,19 +342,24 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
                     if (event.code === 'F8') start();
                 });
                 const tick = () => {
-                    const result = Module._azahar_step_frame();
-                    presentToUiCanvas();
-                    if (result !== 0 && result !== 1) {
+                    try {
+                        const result = Module._azahar_step_frame();
+                        presentToUiCanvas();
+                        if (result !== 0 && result !== 1) {
+                            control.remove();
+                            reject(new Error(`step_frame returned ${result} before manual start`));
+                        } else if (result === 1) {
+                            control.remove();
+                            reject(new Error('emulation ended before manual start'));
+                        } else if (started) {
+                            control.remove();
+                            resolve();
+                        } else {
+                            requestAnimationFrame(tick);
+                        }
+                    } catch (err) {
                         control.remove();
-                        reject(new Error(`step_frame returned ${result} before manual start`));
-                    } else if (result === 1) {
-                        control.remove();
-                        reject(new Error('emulation ended before manual start'));
-                    } else if (started) {
-                        control.remove();
-                        resolve();
-                    } else {
-                        requestAnimationFrame(tick);
+                        reject(new Error(`step_frame threw before manual start: ${err.message || err}`));
                     }
                 };
                 requestAnimationFrame(tick);
@@ -455,15 +475,21 @@ async function main() {
         // substitute for the actual visible browser. Use --interactive when
         // comparing against user-observed frame rates.
         headless: INTERACTIVE ? false : 'new',
-        executablePath: process.env.CHROME_PATH,
+        executablePath: "/Program Files/Google/Chrome/Application/chrome.exe",
         args: ['--no-sandbox', '--disable-dev-shm-usage'],
         defaultViewport: { width: 1280, height: 900 },
+        // The evaluate() call wraps init + ROM load + warmup + benchmark
+        // inside a single Promise, so the protocol timeout must cover the
+        // full wall-clock duration (25 s + overhead).
+        protocolTimeout: 120000,
     });
 
     const page = await browser.newPage();
     const consoleErrors = [];
     page.on('console', msg => {
-        if (msg.type() === 'error') consoleErrors.push(msg.text());
+        if (msg.type() === 'error' || msg.type() === 'warning') {
+            consoleErrors.push(`[${msg.type()}] ${msg.text()}`);
+        }
     });
 
     const allRuns = [];
@@ -558,6 +584,35 @@ async function main() {
                         + `cpu_vertex_candidates=${rs.cpuVertexCandidateBatches} `
                         + `rejected=${rs.cpuVertexRejectedBatches} `
                         + `bridge_failures=${rs.cpuVertexBridgeFailures}`);
+                    console.log(`   Bridge fail: objects=${rs.cpuVertexBridgeFailObjects} `
+                        + `mem=${rs.cpuVertexBridgeFailMemory} `
+                        + `surf=${rs.cpuVertexBridgeFailSurface} `
+                        + `tex=${rs.cpuVertexBridgeFailTexture} `
+                        + `pre_draw=${rs.cpuVertexBridgeFailPreDraw} `
+                        + `fbo_incomplete=${rs.cpuVertexBridgeFailFbo} `
+                        + `gl=${rs.cpuVertexBridgeFailGlError} `
+                        + `success=${rs.cpuVertexBridgeSuccess} `
+                        + `gl_code=0x${rs.cpuVertexBridgeLastGlError.toString(16)}`
+                        + ` last_vcount=${rs.cpuVertexBridgeLastVertexCount}`);
+                    console.log(`   Reject bits: FB=${rs.cpuVertexFramebufferRejects} `
+                        + `OM=${rs.cpuVertexOutputMergerRejects} `
+                        + `TEX=${rs.cpuVertexTexturingRejects} `
+                        + `RAST=${rs.cpuVertexRasterizerRejects} `
+                        + `PIPE=${rs.cpuVertexPipelineRejects} `
+                        + `mask=0x${rs.cpuVertexRejectionMask.toString(16)}`
+                        + ` modal_mask=0x${rs.cpuVertexModalRejectMask.toString(16)}`
+                        + ` modal_batches=${rs.cpuVertexModalRejectBatches}`);
+                    // Profile feature counters for TEV modes
+                    if (rs.cpuVertexProfileFeatures && rs.cpuVertexProfileFeatures.length >= 32) {
+                        const pf = rs.cpuVertexProfileFeatures;
+                        console.log(`   Profile: FragLightOff=${pf[15]} LightOff=${pf[16]} `
+                            + `FogOff=${pf[17]} PrimTev=${pf[18]} `
+                            + `Tex0Rep=${pf[19]} Tex0Mod=${pf[20]} `
+                            + `BlendOff=${pf[5]} AlphaTestOff=${pf[7]} `
+                            + `DepthOff=${pf[9]} DepthWriteOff=${pf[10]} `
+                            + `ScissorOff=${pf[23]} CullOff=${pf[21]} `
+                            + `Tex0Only=${pf[11]}`);
+                    }
                 }
                 console.log(`   Heap: ${(run.heapAfter / 1024 / 1024).toFixed(0)}MB`);
 
@@ -614,8 +669,8 @@ async function main() {
         console.log(`   Written to: ${OUTPUT_PATH}`);
 
         if (consoleErrors.length) {
-            console.log(`\n   Console errors (${consoleErrors.length}):`);
-            consoleErrors.slice(0, 5).forEach(e => console.log(`     - ${e}`));
+            console.log(`\n   Console messages (${consoleErrors.length}):`);
+            consoleErrors.slice(0, 10).forEach(e => console.log(`     - ${e}`));
         }
     } catch (error) {
         console.error('Benchmark failed:', error.message);

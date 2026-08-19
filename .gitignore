@@ -43,3 +43,5 @@ __pycache__/
 # OS files
 Thumbs.db
 .DS_Store
+/build-web-pica-wasm
+/build-web2

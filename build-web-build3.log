@@ -1,0 +1,262 @@
+[1/373] Building CXX object src/core/CMakeFiles/citra_core.dir/arm/dyncom/arm_dyncom_block.cpp.o
+FAILED: src/core/CMakeFiles/citra_core.dir/arm/dyncom/arm_dyncom_block.cpp.o 
+C:\Users\shubadub\emsdk\upstream\emscripten\em++.exe -DBOOST_ALL_NO_LIB -DBOOST_ASIO_DISABLE_CONCEPTS -DBOOST_DATE_TIME_NO_LIB -DBOOST_ERROR_CODE_HEADER_ONLY -DBOOST_NO_CXX98_FUNCTION_BASE -DBOOST_REGEX_NO_LIB -DBOOST_SYSTEM_NO_LIB -DENABLE_SCRIPTING -DENABLE_SDL2 -DENABLE_SDL2_FRONTEND -DENABLE_SOFTWARE_RENDERER -DENABLE_WEBGL2_RENDERER -DFMT_SHARED -DMICROPROFILE_ENABLED=0 -DNDEBUG -IC:/Users/shubadub/Documents/azahar/azahar/src/. -IC:/Users/shubadub/Documents/azahar/azahar/externals/fmt/include -IC:/Users/shubadub/Documents/azahar/azahar/externals/./library-headers/ffmpeg/include -IC:/Users/shubadub/Documents/azahar/azahar/externals/./microprofile -IC:/Users/shubadub/Documents/azahar/azahar/externals/boost -IC:/Users/shubadub/Documents/azahar/azahar/externals/xxHash/cmake_unofficial/.. -IC:/Users/shubadub/Documents/azahar/azahar/externals/./dds-ktx -IC:/Users/shubadub/Documents/azahar/azahar/externals/./httplib -IC:/Users/shubadub/Documents/azahar/azahar/externals/./libressl/include -IC:/Users/shubadub/Documents/azahar/azahar/externals/cryptopp -IC:/Users/shubadub/Documents/azahar/azahar/externals -IC:/Users/shubadub/Documents/azahar/azahar/externals/lodepng/lodepng -IC:/Users/shubadub/Documents/azahar/azahar/externals/open_source_archives/include -pthread -msimd128 -O3 -DNDEBUG -std=gnu++20 -flto=thin -fvisibility=default -Wno-c++11-narrowing -pthread -Wall -Wno-unused-command-line-argument -w -DCPPHTTPLIB_OPENSSL_SUPPORT -MD -MT src/core/CMakeFiles/citra_core.dir/arm/dyncom/arm_dyncom_block.cpp.o -MF src\core\CMakeFiles\citra_core.dir\arm\dyncom\arm_dyncom_block.cpp.o.d -o src/core/CMakeFiles/citra_core.dir/arm/dyncom/arm_dyncom_block.cpp.o -c C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp
+In file included from C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:16:8: error: redefinition of 'vmla_inst'
+   16 | struct vmla_inst {
+      |        ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/dyncom/arm_dyncom_trans.h:480:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+  480 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+   21 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:16:8: note: unguarded header; consider using #ifdef guards or #pragma once
+   16 | struct vmla_inst {
+      |        ^
+In file included from C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:63:8: error: redefinition of 'vmls_inst'
+   63 | struct vmls_inst {
+      |        ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/dyncom/arm_dyncom_trans.h:480:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+  480 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+   21 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:63:8: note: unguarded header; consider using #ifdef guards or #pragma once
+   63 | struct vmls_inst {
+      |        ^
+In file included from C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:110:8: error: redefinition of 'vnmla_inst'
+  110 | struct vnmla_inst {
+      |        ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/dyncom/arm_dyncom_trans.h:480:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+  480 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+   21 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:110:8: note: unguarded header; consider using #ifdef guards or #pragma once
+  110 | struct vnmla_inst {
+      |        ^
+In file included from C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:158:8: error: redefinition of 'vnmls_inst'
+  158 | struct vnmls_inst {
+      |        ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/dyncom/arm_dyncom_trans.h:480:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+  480 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+   21 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:158:8: note: unguarded header; consider using #ifdef guards or #pragma once
+  158 | struct vnmls_inst {
+      |        ^
+In file included from C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:205:8: error: redefinition of 'vnmul_inst'
+  205 | struct vnmul_inst {
+      |        ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/dyncom/arm_dyncom_trans.h:480:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+  480 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+   21 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:205:8: note: unguarded header; consider using #ifdef guards or #pragma once
+  205 | struct vnmul_inst {
+      |        ^
+In file included from C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:252:8: error: redefinition of 'vmul_inst'
+  252 | struct vmul_inst {
+      |        ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/dyncom/arm_dyncom_trans.h:480:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+  480 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+   21 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:252:8: note: unguarded header; consider using #ifdef guards or #pragma once
+  252 | struct vmul_inst {
+      |        ^
+In file included from C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:299:8: error: redefinition of 'vadd_inst'
+  299 | struct vadd_inst {
+      |        ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/dyncom/arm_dyncom_trans.h:480:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+  480 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+   21 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:299:8: note: unguarded header; consider using #ifdef guards or #pragma once
+  299 | struct vadd_inst {
+      |        ^
+In file included from C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:346:8: error: redefinition of 'vsub_inst'
+  346 | struct vsub_inst {
+      |        ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/dyncom/arm_dyncom_trans.h:480:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+  480 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+   21 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:346:8: note: unguarded header; consider using #ifdef guards or #pragma once
+  346 | struct vsub_inst {
+      |        ^
+In file included from C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:393:8: error: redefinition of 'vdiv_inst'
+  393 | struct vdiv_inst {
+      |        ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/dyncom/arm_dyncom_trans.h:480:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+  480 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+   21 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:393:8: note: unguarded header; consider using #ifdef guards or #pragma once
+  393 | struct vdiv_inst {
+      |        ^
+In file included from C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:441:8: error: redefinition of 'vmovi_inst'
+  441 | struct vmovi_inst {
+      |        ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/dyncom/arm_dyncom_trans.h:480:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+  480 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+   21 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:441:8: note: unguarded header; consider using #ifdef guards or #pragma once
+  441 | struct vmovi_inst {
+      |        ^
+In file included from C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:490:8: error: redefinition of 'vmovr_inst'
+  490 | struct vmovr_inst {
+      |        ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/dyncom/arm_dyncom_trans.h:480:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+  480 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+   21 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:490:8: note: unguarded header; consider using #ifdef guards or #pragma once
+  490 | struct vmovr_inst {
+      |        ^
+In file included from C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:533:16: error: redefinition of '_vabs_inst'
+  533 | typedef struct _vabs_inst {
+      |                ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/dyncom/arm_dyncom_trans.h:480:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+  480 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+   21 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:533:16: note: unguarded header; consider using #ifdef guards or #pragma once
+  533 | typedef struct _vabs_inst {
+      |                ^
+In file included from C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:581:8: error: redefinition of 'vneg_inst'
+  581 | struct vneg_inst {
+      |        ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/dyncom/arm_dyncom_trans.h:480:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+  480 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+   21 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:581:8: note: unguarded header; consider using #ifdef guards or #pragma once
+  581 | struct vneg_inst {
+      |        ^
+In file included from C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:628:8: error: redefinition of 'vsqrt_inst'
+  628 | struct vsqrt_inst {
+      |        ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/dyncom/arm_dyncom_trans.h:480:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+  480 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+   21 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:628:8: note: unguarded header; consider using #ifdef guards or #pragma once
+  628 | struct vsqrt_inst {
+      |        ^
+In file included from C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:675:8: error: redefinition of 'vcmp_inst'
+  675 | struct vcmp_inst {
+      |        ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/dyncom/arm_dyncom_trans.h:480:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+  480 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+   21 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:675:8: note: unguarded header; consider using #ifdef guards or #pragma once
+  675 | struct vcmp_inst {
+      |        ^
+In file included from C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:722:8: error: redefinition of 'vcmp2_inst'
+  722 | struct vcmp2_inst {
+      |        ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/dyncom/arm_dyncom_trans.h:480:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+  480 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+   21 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:722:8: note: unguarded header; consider using #ifdef guards or #pragma once
+  722 | struct vcmp2_inst {
+      |        ^
+In file included from C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:769:8: error: redefinition of 'vcvtbds_inst'
+  769 | struct vcvtbds_inst {
+      |        ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/dyncom/arm_dyncom_trans.h:480:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+  480 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+   21 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:769:8: note: unguarded header; consider using #ifdef guards or #pragma once
+  769 | struct vcvtbds_inst {
+      |        ^
+In file included from C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:816:8: error: redefinition of 'vcvtbff_inst'
+  816 | struct vcvtbff_inst {
+      |        ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/dyncom/arm_dyncom_trans.h:480:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+  480 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+   21 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:816:8: note: unguarded header; consider using #ifdef guards or #pragma once
+  816 | struct vcvtbff_inst {
+      |        ^
+In file included from C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:865:8: error: redefinition of 'vcvtbfi_inst'
+  865 | struct vcvtbfi_inst {
+      |        ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/dyncom/arm_dyncom_trans.h:480:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+  480 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:21:10: note: 'C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp' included multiple times, additional include site here
+   21 | #include "core/arm/skyeye_common/vfp/vfpinstr.cpp"
+      |          ^
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/skyeye_common/vfp/vfpinstr.cpp:865:8: note: unguarded header; consider using #ifdef guards or #pragma once
+  865 | struct vcvtbfi_inst {
+      |        ^
+fatal error: too many errors emitted, stopping now [-ferror-limit=]
+20 errors generated.
+[2/373] Building CXX object src/core/CMakeFiles/citra_core.dir/arm/wasm_jit/wasm_block_compiler.cpp.o
+FAILED: src/core/CMakeFiles/citra_core.dir/arm/wasm_jit/wasm_block_compiler.cpp.o 
+C:\Users\shubadub\emsdk\upstream\emscripten\em++.exe -DBOOST_ALL_NO_LIB -DBOOST_ASIO_DISABLE_CONCEPTS -DBOOST_DATE_TIME_NO_LIB -DBOOST_ERROR_CODE_HEADER_ONLY -DBOOST_NO_CXX98_FUNCTION_BASE -DBOOST_REGEX_NO_LIB -DBOOST_SYSTEM_NO_LIB -DENABLE_SCRIPTING -DENABLE_SDL2 -DENABLE_SDL2_FRONTEND -DENABLE_SOFTWARE_RENDERER -DENABLE_WEBGL2_RENDERER -DFMT_SHARED -DMICROPROFILE_ENABLED=0 -DNDEBUG -IC:/Users/shubadub/Documents/azahar/azahar/src/. -IC:/Users/shubadub/Documents/azahar/azahar/externals/fmt/include -IC:/Users/shubadub/Documents/azahar/azahar/externals/./library-headers/ffmpeg/include -IC:/Users/shubadub/Documents/azahar/azahar/externals/./microprofile -IC:/Users/shubadub/Documents/azahar/azahar/externals/boost -IC:/Users/shubadub/Documents/azahar/azahar/externals/xxHash/cmake_unofficial/.. -IC:/Users/shubadub/Documents/azahar/azahar/externals/./dds-ktx -IC:/Users/shubadub/Documents/azahar/azahar/externals/./httplib -IC:/Users/shubadub/Documents/azahar/azahar/externals/./libressl/include -IC:/Users/shubadub/Documents/azahar/azahar/externals/cryptopp -IC:/Users/shubadub/Documents/azahar/azahar/externals -IC:/Users/shubadub/Documents/azahar/azahar/externals/lodepng/lodepng -IC:/Users/shubadub/Documents/azahar/azahar/externals/open_source_archives/include -pthread -msimd128 -O3 -DNDEBUG -std=gnu++20 -flto=thin -fvisibility=default -Wno-c++11-narrowing -pthread -Wall -Wno-unused-command-line-argument -w -DCPPHTTPLIB_OPENSSL_SUPPORT -MD -MT src/core/CMakeFiles/citra_core.dir/arm/wasm_jit/wasm_block_compiler.cpp.o -MF src\core\CMakeFiles\citra_core.dir\arm\wasm_jit\wasm_block_compiler.cpp.o.d -o src/core/CMakeFiles/citra_core.dir/arm/wasm_jit/wasm_block_compiler.cpp.o -c C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/wasm_jit/wasm_block_compiler.cpp
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/wasm_jit/wasm_block_compiler.cpp:267:7: error: no member named 'EmitLoadFlags' in 'Core::WasmJIT::WasmBytecodeWriter'
+  267 |     w.EmitLoadFlags(w);
+      |     ~ ^
+1 error generated.
+[3/373] Building CXX object src/core/CMakeFiles/citra_core.dir/arm/dyncom/arm_dyncom_trans.cpp.o
+[4/373] Building CXX object src/core/CMakeFiles/citra_core.dir/arm/dyncom/arm_dyncom_interpreter.cpp.o
+ninja: build stopped: subcommand failed.

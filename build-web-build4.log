@@ -1,0 +1,146 @@
+[1/371] Building CXX object src/core/CMakeFiles/citra_core.dir/arm/wasm_jit/wasm_bytecode_writer.cpp.o
+[2/371] Building CXX object src/core/CMakeFiles/citra_core.dir/arm/wasm_jit/wasm_block_compiler.cpp.o
+FAILED: src/core/CMakeFiles/citra_core.dir/arm/wasm_jit/wasm_block_compiler.cpp.o 
+C:\Users\shubadub\emsdk\upstream\emscripten\em++.exe -DBOOST_ALL_NO_LIB -DBOOST_ASIO_DISABLE_CONCEPTS -DBOOST_DATE_TIME_NO_LIB -DBOOST_ERROR_CODE_HEADER_ONLY -DBOOST_NO_CXX98_FUNCTION_BASE -DBOOST_REGEX_NO_LIB -DBOOST_SYSTEM_NO_LIB -DENABLE_SCRIPTING -DENABLE_SDL2 -DENABLE_SDL2_FRONTEND -DENABLE_SOFTWARE_RENDERER -DENABLE_WEBGL2_RENDERER -DFMT_SHARED -DMICROPROFILE_ENABLED=0 -DNDEBUG -IC:/Users/shubadub/Documents/azahar/azahar/src/. -IC:/Users/shubadub/Documents/azahar/azahar/externals/fmt/include -IC:/Users/shubadub/Documents/azahar/azahar/externals/./library-headers/ffmpeg/include -IC:/Users/shubadub/Documents/azahar/azahar/externals/./microprofile -IC:/Users/shubadub/Documents/azahar/azahar/externals/boost -IC:/Users/shubadub/Documents/azahar/azahar/externals/xxHash/cmake_unofficial/.. -IC:/Users/shubadub/Documents/azahar/azahar/externals/./dds-ktx -IC:/Users/shubadub/Documents/azahar/azahar/externals/./httplib -IC:/Users/shubadub/Documents/azahar/azahar/externals/./libressl/include -IC:/Users/shubadub/Documents/azahar/azahar/externals/cryptopp -IC:/Users/shubadub/Documents/azahar/azahar/externals -IC:/Users/shubadub/Documents/azahar/azahar/externals/lodepng/lodepng -IC:/Users/shubadub/Documents/azahar/azahar/externals/open_source_archives/include -pthread -msimd128 -O3 -DNDEBUG -std=gnu++20 -flto=thin -fvisibility=default -Wno-c++11-narrowing -pthread -Wall -Wno-unused-command-line-argument -w -DCPPHTTPLIB_OPENSSL_SUPPORT -MD -MT src/core/CMakeFiles/citra_core.dir/arm/wasm_jit/wasm_block_compiler.cpp.o -MF src\core\CMakeFiles\citra_core.dir\arm\wasm_jit\wasm_block_compiler.cpp.o.d -o src/core/CMakeFiles/citra_core.dir/arm/wasm_jit/wasm_block_compiler.cpp.o -c C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/wasm_jit/wasm_block_compiler.cpp
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/wasm_jit/wasm_block_compiler.cpp:267:7: error: no member named 'EmitLoadFlags' in 'Core::WasmJIT::WasmBytecodeWriter'
+  267 |     w.EmitLoadFlags(w);
+      |     ~ ^
+1 error generated.
+[3/371] Building CXX object src/core/CMakeFiles/citra_core.dir/arm/dyncom/arm_dyncom_block.cpp.o
+FAILED: src/core/CMakeFiles/citra_core.dir/arm/dyncom/arm_dyncom_block.cpp.o 
+C:\Users\shubadub\emsdk\upstream\emscripten\em++.exe -DBOOST_ALL_NO_LIB -DBOOST_ASIO_DISABLE_CONCEPTS -DBOOST_DATE_TIME_NO_LIB -DBOOST_ERROR_CODE_HEADER_ONLY -DBOOST_NO_CXX98_FUNCTION_BASE -DBOOST_REGEX_NO_LIB -DBOOST_SYSTEM_NO_LIB -DENABLE_SCRIPTING -DENABLE_SDL2 -DENABLE_SDL2_FRONTEND -DENABLE_SOFTWARE_RENDERER -DENABLE_WEBGL2_RENDERER -DFMT_SHARED -DMICROPROFILE_ENABLED=0 -DNDEBUG -IC:/Users/shubadub/Documents/azahar/azahar/src/. -IC:/Users/shubadub/Documents/azahar/azahar/externals/fmt/include -IC:/Users/shubadub/Documents/azahar/azahar/externals/./library-headers/ffmpeg/include -IC:/Users/shubadub/Documents/azahar/azahar/externals/./microprofile -IC:/Users/shubadub/Documents/azahar/azahar/externals/boost -IC:/Users/shubadub/Documents/azahar/azahar/externals/xxHash/cmake_unofficial/.. -IC:/Users/shubadub/Documents/azahar/azahar/externals/./dds-ktx -IC:/Users/shubadub/Documents/azahar/azahar/externals/./httplib -IC:/Users/shubadub/Documents/azahar/azahar/externals/./libressl/include -IC:/Users/shubadub/Documents/azahar/azahar/externals/cryptopp -IC:/Users/shubadub/Documents/azahar/azahar/externals -IC:/Users/shubadub/Documents/azahar/azahar/externals/lodepng/lodepng -IC:/Users/shubadub/Documents/azahar/azahar/externals/open_source_archives/include -pthread -msimd128 -O3 -DNDEBUG -std=gnu++20 -flto=thin -fvisibility=default -Wno-c++11-narrowing -pthread -Wall -Wno-unused-command-line-argument -w -DCPPHTTPLIB_OPENSSL_SUPPORT -MD -MT src/core/CMakeFiles/citra_core.dir/arm/dyncom/arm_dyncom_block.cpp.o -MF src\core\CMakeFiles\citra_core.dir\arm\dyncom\arm_dyncom_block.cpp.o.d -o src/core/CMakeFiles/citra_core.dir/arm/dyncom/arm_dyncom_block.cpp.o -c C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:393:25: error: no member named 'Read32' in 'ARMul_State'
+  393 |     cpu->Reg[Rd] = cpu->Read32(addr);
+      |                    ~~~  ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:405:10: error: no member named 'Write32' in 'ARMul_State'
+  405 |     cpu->Write32(addr, cpu->Reg[Rd]);
+      |     ~~~  ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:440:25: error: no member named 'Read8' in 'ARMul_State'
+  440 |     cpu->Reg[Rd] = cpu->Read8(addr);
+      |                    ~~~  ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:452:10: error: no member named 'Write8' in 'ARMul_State'
+  452 |     cpu->Write8(addr, cpu->Reg[Rd] & 0xFF);
+      |     ~~~  ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:464:25: error: no member named 'Read16' in 'ARMul_State'
+  464 |     cpu->Reg[Rd] = cpu->Read16(addr);
+      |                    ~~~  ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/dyncom/arm_dyncom_block.cpp:476:10: error: no member named 'Write16' in 'ARMul_State'
+  476 |     cpu->Write16(addr, cpu->Reg[Rd] & 0xFFFF);
+      |     ~~~  ^
+6 errors generated.
+[4/371] Building CXX object src/core/CMakeFiles/citra_core.dir/arm/wasm_jit/wasm_module_cache.cpp.o
+FAILED: src/core/CMakeFiles/citra_core.dir/arm/wasm_jit/wasm_module_cache.cpp.o 
+C:\Users\shubadub\emsdk\upstream\emscripten\em++.exe -DBOOST_ALL_NO_LIB -DBOOST_ASIO_DISABLE_CONCEPTS -DBOOST_DATE_TIME_NO_LIB -DBOOST_ERROR_CODE_HEADER_ONLY -DBOOST_NO_CXX98_FUNCTION_BASE -DBOOST_REGEX_NO_LIB -DBOOST_SYSTEM_NO_LIB -DENABLE_SCRIPTING -DENABLE_SDL2 -DENABLE_SDL2_FRONTEND -DENABLE_SOFTWARE_RENDERER -DENABLE_WEBGL2_RENDERER -DFMT_SHARED -DMICROPROFILE_ENABLED=0 -DNDEBUG -IC:/Users/shubadub/Documents/azahar/azahar/src/. -IC:/Users/shubadub/Documents/azahar/azahar/externals/fmt/include -IC:/Users/shubadub/Documents/azahar/azahar/externals/./library-headers/ffmpeg/include -IC:/Users/shubadub/Documents/azahar/azahar/externals/./microprofile -IC:/Users/shubadub/Documents/azahar/azahar/externals/boost -IC:/Users/shubadub/Documents/azahar/azahar/externals/xxHash/cmake_unofficial/.. -IC:/Users/shubadub/Documents/azahar/azahar/externals/./dds-ktx -IC:/Users/shubadub/Documents/azahar/azahar/externals/./httplib -IC:/Users/shubadub/Documents/azahar/azahar/externals/./libressl/include -IC:/Users/shubadub/Documents/azahar/azahar/externals/cryptopp -IC:/Users/shubadub/Documents/azahar/azahar/externals -IC:/Users/shubadub/Documents/azahar/azahar/externals/lodepng/lodepng -IC:/Users/shubadub/Documents/azahar/azahar/externals/open_source_archives/include -pthread -msimd128 -O3 -DNDEBUG -std=gnu++20 -flto=thin -fvisibility=default -Wno-c++11-narrowing -pthread -Wall -Wno-unused-command-line-argument -w -DCPPHTTPLIB_OPENSSL_SUPPORT -MD -MT src/core/CMakeFiles/citra_core.dir/arm/wasm_jit/wasm_module_cache.cpp.o -MF src\core\CMakeFiles\citra_core.dir\arm\wasm_jit\wasm_module_cache.cpp.o.d -o src/core/CMakeFiles/citra_core.dir/arm/wasm_jit/wasm_module_cache.cpp.o -c C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/wasm_jit/wasm_module_cache.cpp
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/wasm_jit/wasm_module_cache.cpp:85:17: error: use of undeclared identifier 'run'
+   85 |                 run: instance.exports.run
+      |                 ^~~
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/wasm_jit/wasm_module_cache.cpp:86:14: error: expected ')'
+   86 |             };
+      |              ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/wasm_jit/wasm_module_cache.cpp:36:12: note: to match this '('
+   36 |     return EM_ASM_INT({
+      |            ^
+C:\Users\shubadub\AppData\Local\emscripten_cache\sysroot/include\emscripten\em_asm.h:222:73: note: expanded from macro 'EM_ASM_INT'
+  222 | #define EM_ASM_INT(code, ...) emscripten_asm_const_int(CODE_EXPR(#code) _EM_ASM_PREP_ARGS(__VA_ARGS__))
+      |                                                                         ^
+C:\Users\shubadub\AppData\Local\emscripten_cache\sysroot/include\emscripten\em_asm.h:203:38: note: expanded from macro '_EM_ASM_PREP_ARGS'
+  203 |     , __em_asm_sig_builder<__typeof__(__em_asm_make_type_tuple(__VA_ARGS__))>::buffer, ##__VA_ARGS__
+      |                                      ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/wasm_jit/wasm_module_cache.cpp:86:14: error: expected '>'
+   86 |             };
+      |              ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/wasm_jit/wasm_module_cache.cpp:36:12: note: to match this '<'
+   36 |     return EM_ASM_INT({
+      |            ^
+C:\Users\shubadub\AppData\Local\emscripten_cache\sysroot/include\emscripten\em_asm.h:222:73: note: expanded from macro 'EM_ASM_INT'
+  222 | #define EM_ASM_INT(code, ...) emscripten_asm_const_int(CODE_EXPR(#code) _EM_ASM_PREP_ARGS(__VA_ARGS__))
+      |                                                                         ^
+C:\Users\shubadub\AppData\Local\emscripten_cache\sysroot/include\emscripten\em_asm.h:203:27: note: expanded from macro '_EM_ASM_PREP_ARGS'
+  203 |     , __em_asm_sig_builder<__typeof__(__em_asm_make_type_tuple(__VA_ARGS__))>::buffer, ##__VA_ARGS__
+      |                           ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/wasm_jit/wasm_module_cache.cpp:87:20: error: use of undeclared identifier 'id'; did you mean '__wasi_subscription_clock_t::id'?
+   87 |             return id;
+      |                    ^~
+      |                    __wasi_subscription_clock_t::id
+C:\Users\shubadub\AppData\Local\emscripten_cache\sysroot/include\emscripten\em_asm.h:222:91: note: expanded from macro 'EM_ASM_INT'
+  222 | #define EM_ASM_INT(code, ...) emscripten_asm_const_int(CODE_EXPR(#code) _EM_ASM_PREP_ARGS(__VA_ARGS__))
+      |                                                                                           ^~~~~~~~~~~
+C:\Users\shubadub\AppData\Local\emscripten_cache\sysroot/include\emscripten\em_asm.h:203:64: note: expanded from macro '_EM_ASM_PREP_ARGS'
+  203 |     , __em_asm_sig_builder<__typeof__(__em_asm_make_type_tuple(__VA_ARGS__))>::buffer, ##__VA_ARGS__
+      |                                                                ^~~~~~~~~~~
+C:\Users\shubadub\AppData\Local\emscripten_cache\sysroot/include\wasi/api.h:1247:22: note: '__wasi_subscription_clock_t::id' declared here
+ 1247 |     __wasi_clockid_t id;
+      |                      ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/wasm_jit/wasm_module_cache.cpp:87:20: error: invalid use of non-static data member 'id'
+   87 |             return id;
+      |                    ^~
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/wasm_jit/wasm_module_cache.cpp:88:11: error: expected unqualified-id
+   88 |         } catch (e) {
+      |           ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/wasm_jit/wasm_module_cache.cpp:93:6: error: expected unqualified-id
+   93 |     }, wasm_bytes.data(), wasm_bytes.size());
+      |      ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/wasm_jit/wasm_module_cache.cpp:87:13: error: expected unqualified-id
+   87 |             return id;
+      |             ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/wasm_jit/wasm_module_cache.cpp:88:11: error: expected unqualified-id
+   88 |         } catch (e) {
+      |           ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/wasm_jit/wasm_module_cache.cpp:93:5: error: extraneous closing brace ('}')
+   93 |     }, wasm_bytes.data(), wasm_bytes.size());
+      |     ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/wasm_jit/wasm_module_cache.cpp:93:6: error: expected unqualified-id
+   93 |     }, wasm_bytes.data(), wasm_bytes.size());
+      |      ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/wasm_jit/wasm_module_cache.cpp:98:1: error: extraneous closing brace ('}')
+   98 | }
+      | ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/wasm_jit/wasm_module_cache.cpp:101:21: error: unknown type name 'WasmInstanceId'; did you mean 'Core::WasmJIT::WasmInstanceId'?
+  101 | u32 JsRunModuleImpl(WasmInstanceId id, u32 regs_addr) {
+      |                     ^~~~~~~~~~~~~~
+      |                     Core::WasmJIT::WasmInstanceId
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/wasm_jit/wasm_module_cache.h:23:7: note: 'Core::WasmJIT::WasmInstanceId' declared here
+   23 | using WasmInstanceId = int;
+      |       ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/wasm_jit/wasm_module_cache.cpp:125:23: error: unknown type name 'WasmInstanceId'; did you mean 'Core::WasmJIT::WasmInstanceId'?
+  125 | void JsFreeModuleImpl(WasmInstanceId id) {
+      |                       ^~~~~~~~~~~~~~
+      |                       Core::WasmJIT::WasmInstanceId
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/wasm_jit/wasm_module_cache.h:23:7: note: 'Core::WasmJIT::WasmInstanceId' declared here
+   23 | using WasmInstanceId = int;
+      |       ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/wasm_jit/wasm_module_cache.cpp:138:1: error: extraneous closing brace ('}')
+  138 | } // anonymous namespace
+      | ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/wasm_jit/wasm_module_cache.cpp:142:8: error: unknown type name 'WasmModuleCache'; did you mean 'Core::WasmJIT::WasmModuleCache'?
+  142 | static WasmModuleCache s_wasm_cache;
+      |        ^~~~~~~~~~~~~~~
+      |        Core::WasmJIT::WasmModuleCache
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/wasm_jit/wasm_module_cache.h:35:7: note: 'Core::WasmJIT::WasmModuleCache' declared here
+   35 | class WasmModuleCache {
+      |       ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/wasm_jit/wasm_module_cache.cpp:144:1: error: unknown type name 'WasmModuleCache'; did you mean 'Core::WasmJIT::WasmModuleCache'?
+  144 | WasmModuleCache& GetWasmModuleCache() noexcept {
+      | ^~~~~~~~~~~~~~~
+      | Core::WasmJIT::WasmModuleCache
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/wasm_jit/wasm_module_cache.h:35:7: note: 'Core::WasmJIT::WasmModuleCache' declared here
+   35 | class WasmModuleCache {
+      |       ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/wasm_jit/wasm_module_cache.cpp:152:1: error: unknown type name 'WasmInstanceId'; did you mean 'Core::WasmJIT::WasmInstanceId'?
+  152 | WasmInstanceId WasmModuleCache::Find(u32 pc) const noexcept {
+      | ^~~~~~~~~~~~~~
+      | Core::WasmJIT::WasmInstanceId
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/wasm_jit/wasm_module_cache.h:23:7: note: 'Core::WasmJIT::WasmInstanceId' declared here
+   23 | using WasmInstanceId = int;
+      |       ^
+C:/Users/shubadub/Documents/azahar/azahar/src/core/arm/wasm_jit/wasm_module_cache.cpp:152:16: error: use of undeclared identifier 'WasmModuleCache'; did you mean 'Core::WasmJIT::WasmModuleCache'?
+  152 | WasmInstanceId WasmModuleCache::Find(u32 pc) const noexcept {
+      |                ^~~~~~~~~~~~~~~
+      |                Core::WasmJIT::WasmModuleCache
+C:/Users/shubadub/Documents/azahar/azahar/src/.\core/arm/wasm_jit/wasm_module_cache.h:35:7: note: 'Core::WasmJIT::WasmModuleCache' declared here
+   35 | class WasmModuleCache {
+      |       ^
+fatal error: too many errors emitted, stopping now [-ferror-limit=]
+20 errors generated.
+[5/371] Building CXX object src/core/CMakeFiles/citra_core.dir/arm/exclusive_monitor.cpp.o
+ninja: build stopped: subcommand failed.

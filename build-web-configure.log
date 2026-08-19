@@ -1,0 +1,159 @@
+emcmake: cmake -G Ninja -B build-web -S azahar -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=20 -DENABLE_QT=OFF -DENABLE_SDL2=ON -DENABLE_SDL2_FRONTEND=ON -DENABLE_SOFTWARE_RENDERER=ON -DENABLE_WEBGL2_RENDERER=ON -DENABLE_OPENGL=OFF -DENABLE_VULKAN=OFF -DENABLE_CUBEB=OFF -DENABLE_OPENAL=OFF -DENABLE_ROOM=OFF -DENABLE_ROOM_STANDALONE=OFF -DENABLE_WEB_SERVICE=OFF -DENABLE_LIBUSB=OFF -DENABLE_TESTS=OFF -DCRYPTOPP_DISABLE_ASM=ON -DCITRA_WARNINGS_AS_ERRORS=OFF -DCITRA_USE_PRECOMPILED_HEADERS=OFF '-DCMAKE_C_FLAGS=-pthread -msimd128' '-DCMAKE_CXX_FLAGS=-pthread -msimd128' '-DCMAKE_SHARED_LINKER_FLAGS=-pthread -msimd128' '-DCMAKE_EXE_LINKER_FLAGS=-msimd128 -pthread -s INITIAL_MEMORY=512MB -s STACK_SIZE=2MB -s ALLOW_MEMORY_GROWTH=1 -s USE_SDL=2 -s EXPORTED_RUNTIME_METHODS='"'"'["ccall","cwrap","FS"]'"'"' -s NO_EXIT_RUNTIME=1' -DHAVE_ASPRINTF=0 -DHAVE_REALLOCARRAY=0 -DHAVE_STRCASECMP=0 -DHAVE_STRLCAT=0 -DHAVE_STRLCPY=0 -DHAVE_STRNDUP=0 -DHAVE_STRNLEN=1 -DHAVE_STRSEP=0 -DHAVE_TIMEGM=0 -DHAVE_ARC4RANDOM_BUF=0 -DHAVE_ARC4RANDOM_UNIFORM=0 -DHAVE_EXPLICIT_BZERO=0 -DHAVE_GETAUXVAL=0 -DHAVE_GETENTROPY=0 -DHAVE_GETPAGESIZE=0 -DHAVE_GETPROGNAME=0 -DHAVE_SYSLOG_R=0 -DHAVE_SYSLOG=0 -DHAVE_CLOCK_GETTIME=1 -DHAVE_ENDIAN_H=1 -DHAVE_MACHINE_ENDIAN_H=0 -DHAVE_ERR_H=1 -DHAVE_NETINET_IP_H=0 -DHAVE_TIMESPECSUB=0 -DHAVE_TIMINGSAFE_BCMP=0 -DHAVE_TIMINGSAFE_MEMCMP=0 -DHAVE_MEMMEM=0 -DSIZEOF_TIME_T=8 '-DCMAKE_TOOLCHAIN_FILE=C:\Users\shubadub\emsdk\upstream\emscripten\cmake\Modules\Platform\Emscripten.cmake' '-DCMAKE_CROSSCOMPILING_EMULATOR=C:\Users\shubadub\emsdk\node\24.19.0_64bit\node.exe' in directory C:\Users\shubadub\Documents\azahar
+-- Could NOT find PkgConfig (missing: PKG_CONFIG_EXECUTABLE) 
+-- The ASM compiler identification is unknown
+-- Found assembler: C:/Users/shubadub/emsdk/upstream/emscripten/emcc.exe
+-- Warning: Did not find file Compiler/-ASM
+-- LTO enabled
+-- Target architecture: GENERIC
+-- Including vendored Boost library
+-- Performing Test HAVE_FLAG__ffile_prefix_map_C__Users_shubadub_Documents_azahar_azahar_externals_catch2__
+-- Performing Test HAVE_FLAG__ffile_prefix_map_C__Users_shubadub_Documents_azahar_azahar_externals_catch2__ - Failed
+-- Warning: Did not find file Compiler/-ASM
+=> Project : cryptopp-cmake v8.9.0
+-- Found Git: C:/Program Files/Git/mingw64/bin/git.exe (found version "2.39.1.windows.1")
+-- Crypto++ from user-specified location at: C:/Users/shubadub/Documents/azahar/azahar/externals/cryptopp
+-- Using branch HEAD for tests
+=> Module : cryptopp
+-- [cryptopp] CMake version 3.29.2
+-- [cryptopp] System Emscripten
+-- [cryptopp] Processor x86
+-- [cryptopp] -!!- CRYPTOPP_DISABLE_ASM=ON
+-- [cryptopp] CMAKE_HOST_SYSTEM_PROCESSOR : AMD64
+-- [cryptopp]      CMAKE_SYSTEM_PROCESSOR : x86
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Looking for pthread_create in pthreads
+-- Looking for pthread_create in pthreads - not found
+-- Looking for pthread_create in pthread
+-- Looking for pthread_create in pthread - not found
+-- Check if compiler accepts -pthread
+-- Check if compiler accepts -pthread - no
+-- Could NOT find Threads (missing: Threads_FOUND) 
+-- [cryptopp] Compiler definitions:  CRYPTOPP_DISABLE_ASM=1
+-- [cryptopp] Compiler options: -pthread -msimd128  
+-- [cryptopp] Build type: Release
+-- {fmt} version: 12.0.0
+-- Build type: Release
+-- Performing Test HAS_NULLPTR_WARNING
+-- Performing Test HAS_NULLPTR_WARNING - Failed
+-- Building faad2 version 2.11.1
+-- Looking for getpwuid
+-- Looking for getpwuid - not found
+-- Looking for lrintf
+-- Looking for lrintf - not found
+-- Looking for memcpy
+-- Looking for memcpy - not found
+-- Looking for strchr
+-- Looking for strchr - not found
+-- Looking for include file dlfcn.h
+-- Looking for include file dlfcn.h - not found
+-- Looking for include file errno.h
+-- Looking for include file errno.h - not found
+-- Looking for include file float.h
+-- Looking for include file float.h - not found
+-- Looking for include file inttypes.h
+-- Looking for include file inttypes.h - not found
+-- Looking for include file IOKit/IOKitLib.h
+-- Looking for include file IOKit/IOKitLib.h - not found
+-- Looking for include file limits.h
+-- Looking for include file limits.h - not found
+-- Looking for include file mathf.h
+-- Looking for include file mathf.h - not found
+-- Looking for include file stdint.h
+-- Looking for include file stdint.h - not found
+-- Looking for include file stdio.h
+-- Looking for include file stdio.h - not found
+-- Looking for include file stdlib.h
+-- Looking for include file stdlib.h - not found
+-- Looking for include file strings.h
+-- Looking for include file strings.h - not found
+-- Looking for include file string.h
+-- Looking for include file string.h - not found
+-- Looking for include file sysfs/libsysfs.h
+-- Looking for include file sysfs/libsysfs.h - not found
+-- Looking for include file sys/stat.h
+-- Looking for include file sys/stat.h - not found
+-- Looking for include file sys/time.h
+-- Looking for include file sys/time.h - not found
+-- Looking for include file sys/types.h
+-- Looking for include file sys/types.h - not found
+-- Looking for include file unistd.h
+-- Looking for include file unistd.h - not found
+-- Using bundled ffmpeg headers.
+-- Could NOT find OpenMP_C (missing: OpenMP_C_FLAGS OpenMP_C_LIB_NAMES) 
+-- Could NOT find OpenMP_CXX (missing: OpenMP_CXX_FLAGS OpenMP_CXX_LIB_NAMES) 
+-- Could NOT find OpenMP (missing: OpenMP_C_FOUND OpenMP_CXX_FOUND) 
+-- Warning: Did not find file Compiler/-ASM
+-- ZSTD VERSION: 1.5.7
+-- Performing Test C_FLAG_WALL
+-- Performing Test C_FLAG_WALL - Failed
+-- Performing Test CXX_FLAG_WALL
+-- Performing Test CXX_FLAG_WALL - Failed
+-- Performing Test C_FLAG_WEXTRA
+-- Performing Test C_FLAG_WEXTRA - Failed
+-- Performing Test CXX_FLAG_WEXTRA
+-- Performing Test CXX_FLAG_WEXTRA - Failed
+-- Performing Test C_FLAG_WUNDEF
+-- Performing Test C_FLAG_WUNDEF - Failed
+-- Performing Test CXX_FLAG_WUNDEF
+-- Performing Test CXX_FLAG_WUNDEF - Failed
+-- Performing Test C_FLAG_WSHADOW
+-- Performing Test C_FLAG_WSHADOW - Failed
+-- Performing Test CXX_FLAG_WSHADOW
+-- Performing Test CXX_FLAG_WSHADOW - Failed
+-- Performing Test C_FLAG_WCAST_ALIGN
+-- Performing Test C_FLAG_WCAST_ALIGN - Failed
+-- Performing Test CXX_FLAG_WCAST_ALIGN
+-- Performing Test CXX_FLAG_WCAST_ALIGN - Failed
+-- Performing Test C_FLAG_WCAST_QUAL
+-- Performing Test C_FLAG_WCAST_QUAL - Failed
+-- Performing Test CXX_FLAG_WCAST_QUAL
+-- Performing Test CXX_FLAG_WCAST_QUAL - Failed
+-- Performing Test C_FLAG_WSTRICT_PROTOTYPES
+-- Performing Test C_FLAG_WSTRICT_PROTOTYPES - Failed
+-- Performing Test LD_FLAG_WL_Z_NOEXECSTACK
+-- Performing Test LD_FLAG_WL_Z_NOEXECSTACK - Failed
+-- Performing Test C_FLAG_QUNUSED_ARGUMENTS
+-- Performing Test C_FLAG_QUNUSED_ARGUMENTS - Failed
+-- Performing Test CXX_FLAG_QUNUSED_ARGUMENTS
+-- Performing Test CXX_FLAG_QUNUSED_ARGUMENTS - Failed
+-- Performing Test C_FLAG_WA_NOEXECSTACK
+-- Performing Test C_FLAG_WA_NOEXECSTACK - Failed
+-- Performing Test CXX_FLAG_WA_NOEXECSTACK
+-- Performing Test CXX_FLAG_WA_NOEXECSTACK - Failed
+-- CMAKE_INSTALL_PREFIX: C:/Users/shubadub/AppData/Local/emscripten_cache/sysroot
+-- CMAKE_INSTALL_LIBDIR: lib
+-- ZSTD_LEGACY_SUPPORT not defined!
+-- ZSTD_MULTITHREAD_SUPPORT is enabled
+-- Warning: Did not find file Compiler/-ASM
+-- Looking for fcntl
+-- Looking for fcntl - not found
+-- Looking for poll
+-- Looking for poll - not found
+-- Looking for getaddrinfo
+-- Looking for getaddrinfo - not found
+-- Looking for getnameinfo
+-- Looking for getnameinfo - not found
+-- Looking for gethostbyname_r
+-- Looking for gethostbyname_r - not found
+-- Looking for gethostbyaddr_r
+-- Looking for gethostbyaddr_r - not found
+-- Looking for inet_pton
+-- Looking for inet_pton - not found
+-- Looking for inet_ntop
+-- Looking for inet_ntop - not found
+-- Performing Test HAS_MSGHDR_FLAGS
+-- Performing Test HAS_MSGHDR_FLAGS - Failed
+-- Check size of socklen_t
+-- Check size of socklen_t - failed
+-- Warning: Did not find file Compiler/-ASM
+-- Looking for stddef.h
+-- Looking for stddef.h - not found
+-- Check size of time_t
+-- Check size of time_t - failed
+-- xxHash build type: Release
+-- Architecture: AMD64
+-- Disabling SIMD for xxHash
+-- Configuring done (172.1s)
+-- Generating done (0.6s)
+-- Build files have been written to: C:/Users/shubadub/Documents/azahar/build-web

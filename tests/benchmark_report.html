@@ -1,0 +1,210 @@
+<title>Azahar WASM — Gameplay Benchmark (Save State)</title>
+
+<style>
+  :root {
+    --bg: #0a0e27; --surface: #141b33; --border: #242a42;
+    --text: #e0e0ec; --text-dim: #8888a0;
+    --accent: #e6a817; --accent-bg: #2a2210;
+    --good: #3da560; --good-bg: #0e2a18;
+    --warn: #d48200; --warn-bg: #2a1a06;
+    --bad: #e0554a; --bad-bg: #2a1016;
+    --mono: 'JetBrains Mono', 'Cascadia Code', 'Consolas', monospace;
+    --sans: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #f5f3ee; --surface: #fff; --border: #e0ddd6;
+      --text: #1a1a2e; --text-dim: #6b6870;
+      --accent: #b8860b; --accent-bg: #faf3e0;
+      --good: #1b7a3d; --good-bg: #e8f5e9;
+      --warn: #975d00; --warn-bg: #fff3e0;
+      --bad: #b71c1c; --bad-bg: #ffebee;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0a0e27; --surface: #141b33; --border: #242a42;
+    --text: #e0e0ec; --text-dim: #8888a0;
+    --accent: #e6a817; --accent-bg: #2a2210;
+    --good: #3da560; --good-bg: #0e2a18;
+    --warn: #d48200; --warn-bg: #2a1a06;
+    --bad: #e0554a; --bad-bg: #2a1016;
+  }
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body { background:var(--bg); color:var(--text); font-family:var(--sans);
+    line-height:1.6; padding:32px 24px; max-width:900px; margin:0 auto; }
+  h1,h2,h3{font-family:var(--mono);font-weight:600}
+  h1{font-size:1.4rem;letter-spacing:-0.02em;margin-bottom:6px}
+  h2{font-size:1.05rem;margin:28px 0 14px;padding-bottom:6px;border-bottom:2px solid var(--border)}
+  h3{font-size:0.82rem;margin:18px 0 6px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.06em}
+  .sub{color:var(--text-dim);font-size:0.84rem;margin-bottom:20px}
+  .mono{font-family:var(--mono);font-size:0.8rem}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin-bottom:20px}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:14px 16px}
+  .card .lbl{font-size:0.68rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.06em}
+  .card .val{font-family:var(--mono);font-size:1.5rem;font-weight:600;margin-top:2px}
+  .card .sub{font-family:var(--mono);font-size:0.7rem;color:var(--text-dim);margin-top:1px}
+  table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:0.78rem;margin:12px 0}
+  th,td{padding:7px 10px;text-align:right;border-bottom:1px solid var(--border)}
+  th{color:var(--text-dim);font-weight:500;text-transform:uppercase;font-size:0.66rem;letter-spacing:0.04em}
+  td:first-child,th:first-child{text-align:left}
+  .num{font-variant-numeric:tabular-nums}
+  .badge{display:inline-block;padding:1px 7px;border-radius:3px;font-size:0.7rem;font-weight:600}
+  .badge-g{background:var(--good-bg);color:var(--good)}
+  .badge-w{background:var(--warn-bg);color:var(--warn)}
+  .badge-b{background:var(--bad-bg);color:var(--bad)}
+  .tier{display:flex;align-items:flex-start;gap:10px;margin:8px 0;padding:10px 12px;
+    background:var(--surface);border:1px solid var(--border);border-radius:5px}
+  .tier .ic{flex:0 0 24px;font-size:1.1rem;text-align:center}
+  .tier .bd{flex:1}.tier .nm{font-weight:600;font-family:var(--mono);font-size:0.82rem}
+  .tier .ds{font-size:0.78rem;color:var(--text-dim);margin-top:1px}
+  .tier .mt{font-family:var(--mono);font-size:0.68rem;margin-top:3px}
+  .callout{margin:12px 0;padding:10px 14px;border-radius:5px;font-size:0.82rem}
+  .callout-i{background:var(--accent-bg);border-left:3px solid var(--accent)}
+  .callout-w{background:var(--warn-bg);border-left:3px solid var(--warn)}
+  .callout-e{background:var(--bad-bg);border-left:3px solid var(--bad)}
+  .ft{margin-top:28px;padding-top:10px;border-top:1px solid var(--border);font-size:0.7rem;color:var(--text-dim)}
+  .bar-wrap{margin:6px 0}
+  .bar-l{display:flex;justify-content:space-between;font-family:var(--mono);font-size:0.74rem;margin-bottom:1px}
+  .bar-t{height:6px;background:var(--border);border-radius:3px;overflow:hidden}
+  .bar-f{height:100%;border-radius:3px}
+  @media(max-width:600px){body{padding:12px}.grid{grid-template-columns:1fr 1fr}}
+</style>
+
+<header>
+  <h1>&#x1f3ae; Azahar WASM — Gameplay Performance</h1>
+  <p class="sub">
+    Real gameplay measurement using save state <code>000400000007D500.01.cst</code>
+    (Mario moving, confirmed visible). ROM: Super Mario 3D Land (128&thinsp;MB Kiosk).
+    15&thinsp;s per renderer. Pure interpreter mode (ExecBlock + WASM JIT disabled).
+  </p>
+</header>
+
+<section>
+  <h2>Software Renderer (azahar) — Real Gameplay</h2>
+  <div class="grid">
+    <div class="card">
+      <div class="lbl">Callback FPS</div>
+      <div class="val">22.7</div>
+      <div class="sub">step_frame calls per second</div>
+    </div>
+    <div class="card">
+      <div class="lbl">Avg Frame Time</div>
+      <div class="val">44.1<span style="font-size:0.9rem">ms</span></div>
+      <div class="sub">p50 15ms &middot; p95 197ms &middot; max 217ms</div>
+    </div>
+    <div class="card">
+      <div class="lbl">Emulation Speed</div>
+      <div class="val" style="color:var(--bad)">6.3<span style="font-size:0.9rem">%</span></div>
+      <div class="sub">vs real 3DS (60 FPS target)</div>
+    </div>
+    <div class="card">
+      <div class="lbl">Game FPS</div>
+      <div class="val" style="color:var(--warn)">3.7</div>
+      <div class="sub">system FPS (GSP submissions)</div>
+    </div>
+  </div>
+
+  <div class="callout callout-e">
+    <strong>&#x26a0; The emulator runs at 6.3% of real 3DS speed during gameplay.</strong>
+    At 44ms per frame, it delivers ~22 step_frame calls per second. But each call
+    only advances the emulated system by a fraction of a frame: the GPU dominates at
+    210ms per vblank interval. The result is 3.7 actual game frames per second.
+  </div>
+
+  <table>
+    <thead><tr><th>Metric</th><th>Value</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>Frames sampled</td><td class="num">343</td><td>over 15 seconds</td></tr>
+      <tr><td>Callback FPS</td><td class="num">22.67</td><td>how often step_frame returns</td></tr>
+      <tr><td>Avg frame time</td><td class="num">44.12 ms</td><td>wall clock per step_frame call</td></tr>
+      <tr><td>p50 / p95 / p99</td><td class="num">15 / 197 / 204 ms</td><td>periodic 200ms spike every ~7 frames</td></tr>
+      <tr><td>Min / Max</td><td class="num">4 / 217 ms</td><td>wide variance</td></tr>
+      <tr><td>Emulation speed</td><td class="num" style="color:var(--bad)">6.3%</td><td>walltime / emulated-time</td></tr>
+      <tr><td>System FPS</td><td class="num">3.74</td><td>LCD VBlank events / sec</td></tr>
+      <tr><td>Mean frametime</td><td class="num">261 ms</td><td>internal emulated frame duration</td></tr>
+      <tr><td>GPU time</td><td class="num">210.4 ms</td><td>per vblank — the bottleneck</td></tr>
+      <tr><td>VBlank interval</td><td class="num">267.2 ms</td><td>wall time between vblanks</td></tr>
+      <tr><td>Non-black pixels</td><td class="num">170,859</td><td>&#x2705; visible gameplay confirmed</td></tr>
+      <tr><td>State restore</td><td class="num">505 ms</td><td>one-time cost (decompress + restore)</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>WebGL2 Renderer (azahar_webgl2)</h2>
+  <div class="callout callout-w">
+    <strong>The WebGL2 build is non-functional in headless Chrome.</strong>
+    step_frame returns in &lt;1ms without doing real work (52,380 calls in 15s).
+    perfStats is null, nonblack_pixels is -1. The page likely fell back to the
+    software renderer or the WebGL2 context creation failed silently in headless mode.
+    This needs a visible (non-headless) Chrome to test properly.
+  </div>
+</section>
+
+<section>
+  <h2>Previous (Bogus) Numbers vs Reality</h2>
+  <table>
+    <thead><tr><th>Metric</th><th>Boot-Sequence (Wrong)</th><th>Gameplay (Correct)</th><th>Factor</th></tr></thead>
+    <tbody>
+      <tr><td>Avg frame time</td><td class="num">5.5 ms</td><td class="num">44.1 ms</td><td class="num" style="color:var(--bad)">8&times;</td></tr>
+      <tr><td>Emulation speed</td><td class="num">51%</td><td class="num">6.3%</td><td class="num" style="color:var(--bad)">8&times;</td></tr>
+      <tr><td>System FPS</td><td class="num">30</td><td class="num">3.7</td><td class="num" style="color:var(--bad)">8&times;</td></tr>
+      <tr><td>Non-black pixels</td><td class="num">0</td><td class="num">170,859</td><td class="num" style="color:var(--good)">visible</td></tr>
+      <tr><td>Measurement context</td><td class="num">Boot sequence (no render)</td><td class="num">Mario moving in W1-1</td><td class="num">real work</td></tr>
+    </tbody>
+  </table>
+  <div class="callout callout-i">
+    <strong>The boot-sequence numbers were worthless.</strong> During boot, the
+    3DS firmware loads code into memory, initializes services, and sets up the GPU —
+    all of which the interpreter handles quickly with minimal rendering. Once actual
+    gameplay begins (save state restore), the software renderer's GPU emulation
+    dominates at 210ms per vblank. This is the real bottleneck, not the ARM interpreter.
+  </div>
+</section>
+
+<section>
+  <h2>Where the Time Goes</h2>
+  <div class="bar-wrap">
+    <div class="bar-l"><span>GPU (software rasterizer)</span><span>210.4ms (78.8%)</span></div>
+    <div class="bar-t"><div class="bar-f" style="width:78.8%;background:var(--bad)"></div></div>
+  </div>
+  <div class="bar-wrap">
+    <div class="bar-l"><span>VBlank overhead</span><span>56.8ms (21.3%)</span></div>
+    <div class="bar-t"><div class="bar-f" style="width:21.3%;background:#8877aa"></div></div>
+  </div>
+  <div class="bar-wrap">
+    <div class="bar-l"><span>Swap</span><span>1.0ms (0.4%)</span></div>
+    <div class="bar-t"><div class="bar-f" style="width:0.4%;background:var(--text-dim)"></div></div>
+  </div>
+  <p style="font-size:0.78rem;color:var(--text-dim);margin-top:6px;">
+    The ARM interpreter (which the WASM caching patch targets) accounts for a
+    negligible fraction of the 267ms vblank interval. The software GPU rasterizer
+    is the dominant cost. <strong>Optimizing ARM execution alone cannot fix
+    performance</strong> — the GPU pipeline needs acceleration (WebGL2 hardware
+    rasterization) to make the emulator playable.
+  </p>
+</section>
+
+<section>
+  <h2>WASM Caching Patch: Verdict</h2>
+  <div class="tier">
+    <div class="ic">&#x274c;</div>
+    <div class="bd">
+      <div class="nm">No measurable impact possible with current bottlenecks</div>
+      <div class="ds">Even if ExecBlock and WASM JIT were fully functional, the ARM
+        interpreter is not the bottleneck. The software GPU rasterizer consumes
+        210ms per vblank — over 75% of the frame budget. Making ARM execution 2&times;
+        faster would only reduce the interpreter slice from ~56ms to ~28ms, improving
+        overall speed from 6.3% to maybe 7-8%. The emulator needs GPU hardware
+        acceleration (WebGL2) to reach playable speeds.</div>
+    </div>
+  </div>
+</section>
+
+<footer class="ft">
+  Benchmark: <code>tests/bench_gameplay.cjs</code> &middot;
+  Build: <code>build-web2</code> &middot;
+  Emscripten 6.0.6 &middot;
+  <span id="ts"></span>
+  <script>document.getElementById('ts').textContent = new Date().toISOString()</script>
+</footer>
