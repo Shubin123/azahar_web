@@ -8,7 +8,11 @@ const path = require('node:path');
 
 const root = path.resolve(__dirname, '..');
 const webDir = path.join(root, 'web');
-const buildDir = path.join(root, 'build-web', 'bin', 'Release');
+// build-web2 is the active maintained build output. Keep an explicit override
+// for CI/release jobs that intentionally use another configured build tree.
+const buildRoot = process.env.AZAHAR_BUILD_DIR ||
+    (fs.existsSync(path.join(root, 'build-web2', 'bin', 'Release')) ? 'build-web2' : 'build-web');
+const buildDir = path.join(root, buildRoot, 'bin', 'Release');
 const artifactArgument = process.argv.indexOf('--artifact');
 const artifactKind = artifactArgument >= 0 ? process.argv[artifactArgument + 1] : 'software';
 if (!['software', 'webgl2'].includes(artifactKind)) {

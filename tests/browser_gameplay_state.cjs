@@ -55,9 +55,8 @@ async function captureVisibleFrame(page, destination) {
         const rect = canvas.getBoundingClientRect();
         return {x: rect.x, y: rect.y, width: rect.width, height: rect.height};
     });
-    const screenshotOptions = {encoding: 'base64', clip};
-    if (destination) screenshotOptions.path = destination;
-    const png = await page.screenshot(screenshotOptions);
+    const png = await page.screenshot({encoding: 'base64', clip});
+    if (destination) fs.writeFileSync(destination, Buffer.from(png, 'base64'));
     return page.evaluate(async encoded => {
         const image = new Image();
         image.src = `data:image/png;base64,${encoded}`;
@@ -126,13 +125,35 @@ async function main() {
     });
     const page = await browser.newPage();
     const consoleErrors = [];
-    page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()); });
+    const consoleMessages = [];
+    page.on('console', message => {
+        consoleMessages.push(`${message.type()}: ${message.text()}`);
+        if (message.type() === 'error') consoleErrors.push(message.text());
+    });
     try {
         const port = server.address().port;
         const pageName = artifact === 'webgl2' ? 'index_webgl2.html' : 'index.html';
         await page.goto(`http://127.0.0.1:${port}/${pageName}`, {waitUntil: 'networkidle0', timeout: 120000});
         await page.waitForFunction(() => document.querySelector('#status')?.textContent.includes('Emulator ready'),
             {timeout: 120000});
+        // A WebGL2 page may deliberately navigate to the stable software page
+        // when context creation fails. That is a valid user-facing fallback,
+        // but it cannot satisfy an experimental renderer gate: assert the
+        // requested backend before a compositor pass can be misattributed.
+        if (artifact === 'webgl2') {
+            const webgl2Active = await page.evaluate(() => {
+                const canvas = document.querySelector('#canvas');
+                return window.AzaharWebConfig?.renderer === 'webgl2' &&
+                    canvas?.getContext('webgl2') !== null;
+            });
+            if (!webgl2Active) {
+                const pageState = await page.evaluate(() => ({
+                    renderer: window.AzaharWebConfig?.renderer,
+                    status: document.querySelector('#status')?.textContent,
+                }));
+                throw new Error(`Requested WebGL2 artifact fell back before gameplay gate: ${JSON.stringify({url: page.url(), ...pageState, console: consoleMessages.slice(-20)})}`);
+            }
+        }
         await (await page.$('#rom-file')).uploadFile(romPath);
         await page.waitForFunction(() => !document.querySelector('#btn-load').disabled, {timeout: 30000});
         await page.click('#btn-load');
@@ -157,12 +178,14 @@ async function main() {
         if (restoreResult !== 0) throw new Error(`azahar_load_state rejected slot 1: ${restoreResult}`);
         await sleep(3000);
         const before = await captureVisibleFrame(page, captureDir && path.join(captureDir, 'before-input.png'));
-        const rendererPixels = await page.evaluate(() => Module._azahar_framebuffer_nonblack_pixels());
+        const rendererPixels = artifact === 'webgl2' ? -2 :
+            await page.evaluate(() => Module._azahar_framebuffer_nonblack_pixels());
         // The compositor capture is the compatibility condition. The native
         // count remains diagnostic only: a future GPU-resident WebGL2 surface
         // does not need to mirror every pixel through a CPU staging buffer.
         if (!visibleGameFrame(before)) {
-            throw new Error(`Restored state is not visibly rendered: ${JSON.stringify({rendererPixels, before})}`);
+            throw new Error(`Restored state is not visibly rendered: ${JSON.stringify({rendererPixels,
+                before: {...before, thumbnail: undefined}})}`);
         }
         await page.keyboard.down('ArrowRight');
         await sleep(2500);
@@ -171,7 +194,8 @@ async function main() {
         const after = await captureVisibleFrame(page, captureDir && path.join(captureDir, 'after-input.png'));
         const motion = changedCoverage(before, after);
         if (!visibleGameFrame(after) || motion < 0.002) {
-            throw new Error(`Gameplay input did not change a visible frame: ${JSON.stringify({after, motion})}`);
+            throw new Error(`Gameplay input did not change a visible frame: ${JSON.stringify({after: {...after,
+                thumbnail: undefined}, motion})}`);
         }
         if (consoleErrors.length) throw new Error(`Browser errors: ${JSON.stringify(consoleErrors)}`);
         console.log(JSON.stringify({ok: true, artifact, rendererPixels, before: {...before, thumbnail: undefined},

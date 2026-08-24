@@ -93,6 +93,10 @@
         setStatus(`WebGL2 unavailable (${reason}). Restarting in software...`, 'error');
         const destination = new URL(softwareFallbackUrl, window.location.href);
         destination.searchParams.set('webgl2-fallback', '1');
+        // Preserve the precise preflight/native failure across the required
+        // fresh-document fallback. This makes automated backend gates
+        // diagnostic without weakening the user-facing recovery path.
+        destination.searchParams.set('webgl2-fallback-reason', reason);
         window.setTimeout(() => window.location.replace(destination.toString()), 0);
     }
 
@@ -457,7 +461,12 @@ void main() { frag_color = vec4(1.0); }`);
         if (now < nextBootStatusAt) return;
         nextBootStatusAt = now + 500;
         if (!rendererGraphicsDetected && wasmModule._azahar_framebuffer_nonblack_pixels) {
-            rendererGraphicsDetected = wasmModule._azahar_framebuffer_nonblack_pixels() > 0;
+            const framebufferPixels = wasmModule._azahar_framebuffer_nonblack_pixels();
+            // WebGL2 can keep the framebuffer GPU-resident, so it deliberately
+            // reports -2 rather than exposing an unsynchronized CPU vector.
+            // Continue to the existing compositor readback gate in that case.
+            rendererGraphicsDetected = framebufferPixels > 0 ||
+                (isWebGL2Artifact && framebufferPixels === -2);
         }
         if (rendererGraphicsDetected && !gameGraphicsDetected) {
             // A non-black software framebuffer proves only that emulation and
@@ -483,6 +492,14 @@ void main() { frag_color = vec4(1.0); }`);
             hideProgress();
             setStatus(`Running. Visible game graphics detected after ${((now - runStartedAt) / 1000).toFixed(1)}s`, 'ok');
         } else if (rendererGraphicsDetected) {
+            // A context and shader preflight are not enough: an experimental
+            // backend can still fail to put its drawing buffer on the browser
+            // compositor. Recover into the stable artifact rather than
+            // leaving the user at a black screen.
+            if (isWebGL2Artifact && now - runStartedAt >= 10000) {
+                restartInSoftware('WebGL2 presentation produced no visible frame');
+                return;
+            }
             showProgress(null);
             setStatus(`Renderer graphics ready; waiting for canvas presentation... ${((now - runStartedAt) / 1000).toFixed(1)}s`, 'ok');
         } else {
