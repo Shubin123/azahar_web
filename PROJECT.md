@@ -83,6 +83,9 @@ Artifacts are generated under `build-web/bin/Release/` and automatically synchro
 | 9 | Early depth rejection | Read-only depth buffer compare before texture sampling, lighting, and TEV stages; skips occluded pixels without stencil side effects | GPU cmd 175→158 ms (−10%); callbacks 31.6→34.0 (+7.6%); p95 141→114 ms |
 | 10 | Conditional UV interpolation | Skip texture coordinate interpolation and f24 conversion for disabled texture units; skip tc0_w when not needed for cube/projection mapping | Reduces per-pixel work when only tex unit 0 is active |
 | 11 | Float UV-to-texel conversion | Compute UV-to-texel in native float32 inside TextureColor, avoiding f24 round-trip for width/height scaling | GPU cmd 187->178 ms; game FPS 3.8->4.0 |
+| 12 | Float-native texture sampling | TextureColorFloat bypasses f24 round-trip for UV coords entirely; float32 throughout the texture sampling path | Part of Opts 12-14 batch |
+| 13 | TEV stage early-exit | Pre-compute active TEV stage count per triangle; skip pass-through stages in the inner pixel loop | Part of Opts 12-14 batch |
+| 14 | Pre-computed TextureInfo | Hoist TextureInfo::FromPicaRegister and memory pointer lookups out of per-pixel loop to per-triangle setup; inline alpha test and hoist fog check | Part of Opts 12-14 batch |
 
 ### Benchmark Results (2026-09-01)
 
@@ -104,6 +107,7 @@ ROM: Super Mario 3D Land W1-1 save state, Chrome headless, 5s warmup, 15s measur
 | Renderer | Browser callback rate | Game FPS | Speed | GPU cmd time | p95 |
 |----------|-----------------------|----------|-------|--------------|-----|
 | Software (optimizations 1-11) | 25.7 FPS | 4.0 | 7% | 178 ms | 161 ms |
+| Software (optimizations 1-14) | 28.3 FPS | 4.0 | 7% | 175 ms | 138 ms |
 | WebGL2 (experimental) | crashes — incomplete save-state support | — | — | — | — |
 
 Title-screen figures above are historical baselines, not gameplay claims.
