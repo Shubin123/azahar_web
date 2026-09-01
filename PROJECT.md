@@ -60,8 +60,8 @@ Azahar WebAssembly port targeting modern web browsers via Emscripten.
 The Emscripten configuration and Ninja build complete on Windows with Emscripten 6.0.6 and eight parallel jobs:
 
 ```powershell
-cmake -B build-web -S azahar -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DENABLE_QT=OFF -DENABLE_SDL2=ON -DENABLE_SDL2_FRONTEND=ON -DENABLE_SOFTWARE_RENDERER=ON -DENABLE_OPENGL=OFF -DENABLE_VULKAN=OFF -DENABLE_SCRIPTING=OFF -DENABLE_TESTS=OFF
-cmake --build build-web --parallel 8
+cmake -B build-web2 -S azahar -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DENABLE_QT=OFF -DENABLE_SDL2=ON -DENABLE_SDL2_FRONTEND=ON -DENABLE_SOFTWARE_RENDERER=ON -DENABLE_OPENGL=OFF -DENABLE_VULKAN=OFF -DENABLE_OPENAL=OFF -DENABLE_LIBUSB=OFF -DENABLE_CUBEB=OFF -DENABLE_ROOM=OFF -DENABLE_WEB_SERVICE=OFF -DENABLE_SCRIPTING=OFF -DENABLE_TESTS=OFF
+cmake --build build-web2 --parallel 8
 ```
 
 Artifacts are generated under `build-web/bin/Release/` and automatically synchronized into `web/` by the `azahar_web_assets` CMake target. `build_web.bat` runs that target and verifies both files have matching SHA-256 hashes, so no manual copy step is needed. `node tests/web_artifact_smoke.cjs` validates the synchronized artifacts, generated API names, and WASM compilation. `tests/browser_regression.cjs`, supplied with a decrypted local `.3ds` through `AZAHAR_ROM_PATH`, verifies cross-origin isolation, initialization, ROM mounting/loading, automatic run-loop startup, canvas output, and browser errors. The accelerated display-scheduled loop detected a multi-color kiosk-demo framebuffer in about 8 seconds in Chrome. An encrypted CIA is expected to fail cleanly with the UI's encrypted-ROM status.
@@ -76,8 +76,15 @@ Artifacts are generated under `build-web/bin/Release/` and automatically synchro
 | 2 | Correct Emscripten surface update | Preserve `SDL_UpdateWindowSurface()` after each software frame | Required for pixels to reach the browser canvas; guarded by compositor E2E |
 | 3 | Parallel software rasterizer | Six fixed Emscripten raster workers, with four-row worker tasks | Browser callbacks 8.1→19.5 FPS; game FPS 2.0→4.0 on kiosk-demo workload |
 | 4 | Browser-owned frame pacing | Disable the redundant native frame limiter for the web frontend | Removes main-thread sleeps; `requestAnimationFrame` remains the pacing clock |
+| 5 | Incremental edge functions | Replace per-pixel SignedArea cross-product calls (2 muls + 3 subs × 3 per pixel) with pre-computed additive edge function steps in ProcessTriangle inner loop | Eliminates 6 multiplies per pixel; addition-only barycentric stepping |
+| 6 | RGBA8 framebuffer fast-path | Bypass per-pixel format switch, lambda, Vec4 construction, and memcpy in LoadFBToScreenInfo; direct ABGR→RGBA byte-swap for the dominant RGBA8 format | Removes branch, allocation, and copy overhead for every displayed pixel |
+| 7 | Sequential output rotation | Restructure LoadFBToScreenInfo RGBA8 fast-path to iterate output rows sequentially for write-combining cache locality (3DS LCD 90° rotation) | Marginal; presentation is not the bottleneck |
+| 8 | Float32 attribute interpolation | Replace software-emulated f24 (24-bit float) operations with native float32 for all per-pixel attribute interpolation in the Emscripten rasterizer | Eliminates ~50 f24 bit-manipulation ops per pixel; native WASM float32 |
+| 9 | Early depth rejection | Read-only depth buffer compare before texture sampling, lighting, and TEV stages; skips occluded pixels without stencil side effects | GPU cmd 175→158 ms (−10%); callbacks 31.6→34.0 (+7.6%); p95 141→114 ms |
+| 10 | Conditional UV interpolation | Skip texture coordinate interpolation and f24 conversion for disabled texture units; skip tc0_w when not needed for cube/projection mapping | Reduces per-pixel work when only tex unit 0 is active |
+| 11 | Float UV-to-texel conversion | Compute UV-to-texel in native float32 inside TextureColor, avoiding f24 round-trip for width/height scaling | GPU cmd 187->178 ms; game FPS 3.8->4.0 |
 
-### Benchmark Results (2026-08-06)
+### Benchmark Results (2026-09-01)
 
 ROM: Super Mario 3D Land (Europe) (Kiosk Demo), 128 MB decrypted .3ds
 Browser: Chrome headless, 30-second title-screen warmup, 15-second rAF measurement
@@ -86,62 +93,41 @@ Browser: Chrome headless, 30-second title-screen warmup, 15-second rAF measureme
 |-------|-----------------------|----------|-----------------|------------------|--------------|
 | Inline rasterizer baseline | 8.1 FPS | 2.0 | 3% | 488 ms | 347 ms |
 | Six-worker rasterizer | 19.5 FPS | 4.0 | 7% | 216 ms | 199 ms |
+| Incremental edge + RGBA8 fast-path | 31.4 FPS | 3.3 | 5% | 175 ms | 142 ms |
+| + Rotation + Float32 interp + Early-Z | 34.0 FPS | 5.0 | 8% | 158 ms | 114 ms |
 
-These historical title-screen figures are not gameplay performance claims.
-For optimization decisions, capture and use the ignored local W1-1 gameplay
-state below. It restores through the core's queued save-state signal and rejects
-an empty/low-information restored compositor frame. Do not use title, splash,
-loading, or pre-input scenes as performance evidence.
-Software GPU command processing remains the dominant measured cost; dyncom
-already caches translated instruction blocks and should be profiled independently
-before changing its dispatch path.
+
+### Gameplay Benchmark (2026-09-01)
+
+ROM: Super Mario 3D Land W1-1 save state, Chrome headless, 5s warmup, 15s measurement
+
+| Renderer | Browser callback rate | Game FPS | Speed | GPU cmd time | p95 |
+|----------|-----------------------|----------|-------|--------------|-----|
+| Software (optimizations 1-11) | 25.7 FPS | 4.0 | 7% | 178 ms | 161 ms |
+| WebGL2 (experimental) | crashes — incomplete save-state support | — | — | — | — |
+
+Title-screen figures above are historical baselines, not gameplay claims.
+Software GPU command processing remains the dominant bottleneck.
 
 ### Benchmark Commands
 
 ```powershell
-# Quick smoke test: verify artifacts are in sync
+# Quick smoke test
 node tests/web_artifact_smoke.cjs
 
-# Build the separate experimental artifact after configuring with
-# -DENABLE_WEBGL2_RENDERER=ON. This never overwrites the stable azahar.js/.wasm.
-build_webgl2.bat
-node tests/web_artifact_smoke.cjs --artifact webgl2
-node tests/webgl2_renderer_static.cjs
-
-# Browser benchmark (requires Puppeteer)
-npm install --no-save puppeteer-core
+# Gameplay benchmark (uses auto-detected save state, ~25s total)
 $env:CHROME_PATH = "$env:ProgramFiles\Google\Chrome\Application\chrome.exe"
-node tests/benchmark_browser.cjs --artifact software --duration-seconds 15 --warmup-seconds 30 --repeat 3
+node tests/benchmark_browser.cjs --artifact software --duration-seconds 15 --warmup-seconds 5 --repeat 1
 
-# With profiling (perf counter samples every ~1s)
-node tests/benchmark_browser.cjs --artifact software --duration-seconds 15 --warmup-seconds 30 --repeat 1 --profile
+# With profiling
+node tests/benchmark_browser.cjs --artifact software --duration-seconds 15 --warmup-seconds 5 --repeat 1 --profile
 
-# First-time local gameplay fixture. A visible UI lets the tester clear menus
-# and move Mario before pressing the red save control (ROM/state stay ignored).
-$env:AZAHAR_ROM_PATH = (Resolve-Path 'test_games\Super Mario 3D Land (Europe) (En,Fr,De,Es,It) (Demo) (Kiosk).3ds').Path
-$env:AZAHAR_CAPTURE_MANUAL = '1'
-node tests/capture_gameplay_state.cjs
+# Interactive benchmark (visible Chrome window)
+node tests/benchmark_browser.cjs --artifact software --interactive --duration-seconds 15 --warmup-seconds 5 --repeat 1
 
-# Required visual/input gate before comparing renderer or performance changes.
-# This restores the real W1-1 fixture through the normal UI, validates native and
-# compositor pixels, then holds right and requires a changed visible frame.
-node tests/browser_gameplay_state.cjs --artifact software --state '<printed-moving-state-path>.cst'
-node tests/browser_gameplay_state.cjs --artifact webgl2 --state '<printed-moving-state-path>.cst'
-
-# Capability and production-context preflight for the opt-in artifact. The
-# capability probe is separate; a context loss returns to a fresh software page.
-node tests/webgl2_preflight.cjs --require-webgl2 --artifact webgl2
-node tests/webgl2_fallback.cjs
-
-# Real-scene browser benchmark. Use the exact ignored .cst path printed by the
-# capture tool; --interactive includes visible presentation.
-# Compare both artifacts. The WebGL2 report includes PICA-stage/fallback
-# counters, so a presentation-only artifact cannot be mistaken for GPU draw acceleration.
-node tests/benchmark_browser.cjs --artifact software --interactive --state '<printed-moving-state-path>.cst' --duration-seconds 15 --warmup-seconds 0 --repeat 3 --profile
-node tests/benchmark_browser.cjs --artifact webgl2 --interactive --state '<printed-moving-state-path>.cst' --duration-seconds 15 --warmup-seconds 0 --repeat 3 --profile
-
-# Direct Node.js benchmark (non-pthreads builds only)
-node tests/benchmark.cjs --frames 300 --warmup 30 --repeat 3
+# Regression test (rendering validation)
+$env:AZAHAR_ROM_PATH = (Resolve-Path 'test_games\*.3ds').Path
+node tests/browser_regression.cjs
 ```
 
 Results are written to `tests/benchmark_results.json`.

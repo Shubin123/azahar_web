@@ -1,35 +1,30 @@
-# The outer repository tracks the web proof-of-concept, tests, build scripts,
-# and documentation. The full emulator source is the upstream Git checkout
-# in azahar/ and must not be vendored into this repository.
-/azahar/
-# Keep the overlay's source/build files, but never vendor its copied upstream
-# dependencies or generated output.
-/azahar-webgpu/externals/
-/azahar-webgpu/build-*/
-/azahar-webgpu/src/fmt/
+# Azahar Web Emulator - .gitignore
 
-# Generated build trees and temporary CMake probes
-/build-web/
-/build-integration/
-/_test_cmake/
+# Upstream emulator source (Git submodule checkout)
+/azahar/
+
+# Build directories
+/build-*/
+
+# Temporary/test directories
 /tmp_test/
+/_test_cmake/
+/_to_delete/
 
 # Local ROM/test data (large and license-sensitive)
 /test_games/
 
-# Generated WebAssembly deployment artifacts; keep web/index.html and
-# web/azahar_ui.js under version control and regenerate these files locally.
-/web/azahar.html
-/web/azahar.js
-/web/azahar.wasm
-/web/azahar_webgl2.html
-/web/azahar_webgl2.js
-/web/azahar_webgl2.wasm
-
-# Generated test reports and local traces
+# Generated test reports and benchmarks
+/tests/benchmark_results.json
 /tests/e2e/test_results.json
 /tests/e2e/latest_run.tap
-/trace.log
+
+# Logs and temp output
+*.log
+bench_*.txt
+build_*.txt
+configure_*.txt
+regression_*.txt
 
 # Agent/editor/local environment state
 /.agents/
@@ -39,9 +34,8 @@
 *.swp
 *.pyc
 __pycache__/
+node_modules/
 
 # OS files
 Thumbs.db
 .DS_Store
-/build-web-pica-wasm
-/build-web2

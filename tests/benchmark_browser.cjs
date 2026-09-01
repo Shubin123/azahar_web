@@ -30,6 +30,7 @@ const path = require('path');
 const http = require('http');
 const puppeteer = require(process.env.AZAHAR_PUPPETEER_MODULE || 'puppeteer-core');
 const { createWebServer } = require('../web/server.cjs');
+const cfg = require('./config.cjs');
 
 // ── CLI argument parsing ──────────────────────────────────────────
 const argv = require('process').argv.slice(2);
@@ -45,7 +46,7 @@ function argFlag(flag) { return argv.includes(flag); }
 const BENCH_SECONDS = Number(argVal('--duration-seconds', '15'));
 const WARMUP_SECONDS = Number(argVal('--warmup-seconds', '30'));
 const ROM_ARG = argVal('--rom', null);
-const STATE_ARG = argVal('--state', null);
+const STATE_ARG = argVal('--state', cfg.statePath);
 const ARTIFACT = argVal('--artifact', 'software');
 const OUTPUT_PATH = argVal('--output', path.join(__dirname, 'benchmark_results.json'));
 const REPEAT = Number(argVal('--repeat', '3'));
@@ -528,7 +529,7 @@ async function main() {
         // substitute for the actual visible browser. Use --interactive when
         // comparing against user-observed frame rates.
         headless: INTERACTIVE ? false : 'new',
-        executablePath: "/Program Files/Google/Chrome/Application/chrome.exe",
+        executablePath: process.env.CHROME_PATH || cfg.chromePath || "chrome",
         args: ['--no-sandbox', '--disable-dev-shm-usage'],
         defaultViewport: { width: 1280, height: 900 },
         // The evaluate() call wraps init + ROM load + warmup + benchmark

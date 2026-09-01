@@ -84,7 +84,7 @@ async function main() {
         `http://127.0.0.1:${address.port}/index.html`;
     const browser = await puppeteer.launch({
         headless: 'new',
-        executablePath: process.env.CHROME_PATH,
+        executablePath: process.env.CHROME_PATH || cfg.chromePath || "chrome",
         args: ['--no-sandbox', '--disable-dev-shm-usage'],
         defaultViewport: {width: 1280, height: 900},
     });
