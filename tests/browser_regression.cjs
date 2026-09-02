@@ -1,6 +1,7 @@
 const path = require('path');
 const puppeteer = require(process.env.AZAHAR_PUPPETEER_MODULE || 'puppeteer-core');
 const {listen: listenWeb} = require('../web/server.cjs');
+const cfg = require('./config.cjs');
 
 const root = path.resolve(__dirname, '..');
 const romPath = process.env.AZAHAR_ROM_PATH ||

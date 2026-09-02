@@ -1,0 +1,2 @@
+software web artifact smoke test passed (1893 WASM exports inspected).
+SMOKE_DONE  

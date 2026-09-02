@@ -89,7 +89,7 @@ if (useState && cfg.statePath) {
 // ── 1. Smoke test ───────────────────────────────────────────────────
 if (runSmoke) {
   run('WASM Artifact Smoke Test',
-    path.join(TESTS_DIR, 'web_artifact_smoke.cjs'), []);
+    path.join(TESTS_DIR, 'web_artifact_smoke.cjs'), ['--artifact', artifact]);
 }
 
 // ── 2. Benchmark ────────────────────────────────────────────────────

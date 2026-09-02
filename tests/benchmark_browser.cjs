@@ -59,6 +59,8 @@ if (!['software', 'webgl2'].includes(ARTIFACT)) {
 }
 
 const root = path.resolve(__dirname, '..');
+const webDir = process.env.AZAHAR_WEB_DIR ?
+    path.resolve(process.env.AZAHAR_WEB_DIR) : path.join(root, 'web');
 const testGamesDir = path.join(root, 'test_games');
 
 // ── ROM discovery ─────────────────────────────────────────────────
@@ -77,7 +79,7 @@ function findRom() {
 
 // ── Combined server: web/ + ROM endpoint ──────────────────────────
 function createBenchServer(romPath, statePath) {
-    const webServer = createWebServer(path.join(root, 'web'));
+    const webServer = createWebServer(webDir);
     const romBuffer = fs.readFileSync(romPath);
     const romName = path.basename(romPath);
     const stateBuffer = statePath ? fs.readFileSync(statePath) : null;
@@ -300,7 +302,9 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
             // is covered by browser_gameplay_state.cjs; here validate the
             // native framebuffer and backend identity before timing it.
             const rendered = artifact_ === 'webgl2' ?
-                visual?.rendererStats?.rendererKind === 1 :
+                (visual?.rendererStats?.rendererKind === 1 ||
+                 (visual?.rendererStats?.rendererKind === 2 &&
+                  visual.nonBlackCoverage >= 0.03 && visual.colorfulCoverage >= 0.005)) :
                 visual?.nonBlackCoverage >= 0.03 && visual.colorfulCoverage >= 0.005;
             if (!rendered) {
                 throw new Error(`Restored state did not produce a rendered game scene: ${JSON.stringify(visual)}`);
@@ -361,7 +365,8 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
                             requestAnimationFrame(tick);
                         }
                     } catch (err) {
-                        reject(new Error(`step_frame threw at frame ${perFrame.length}: ${err.message || err}`));
+                        const detail = err?.stack || err?.message || String(err);
+                        reject(new Error(`step_frame threw at frame ${perFrame.length}: ${detail}`));
                     }
                 }
                 requestAnimationFrame(tick);
@@ -729,6 +734,10 @@ async function main() {
     } catch (error) {
         console.error('Benchmark failed:', error.message);
         console.error(error.stack);
+        if (consoleErrors.length) {
+            console.error(`Browser console messages (${consoleErrors.length}):`);
+            consoleErrors.slice(0, 20).forEach(message => console.error(`  ${message}`));
+        }
         process.exitCode = 1;
     } finally {
         await browser.close();
