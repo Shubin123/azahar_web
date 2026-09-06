@@ -13,6 +13,7 @@
  *   --warmup-seconds N   Warmup duration before measuring (default: 30)
  *   --rom PATH    ROM file path (default: first .3ds/.3dsx/.cia in test_games/)
  *   --state PATH  Local .cst fixture to restore after ROM load; measures real gameplay rather than boot/title
+ *   --no-state    Skip the configured state fixture and benchmark boot/title rendering
  *   --artifact KIND  Test the stable software or experimental WebGL2 artifact (default: software)
  *   --output PATH JSON output path (default: tests/benchmark_results.json)
  *   --repeat N    Repeat the benchmark N times (default: 3)
@@ -46,13 +47,15 @@ function argFlag(flag) { return argv.includes(flag); }
 const BENCH_SECONDS = Number(argVal('--duration-seconds', '15'));
 const WARMUP_SECONDS = Number(argVal('--warmup-seconds', '30'));
 const ROM_ARG = argVal('--rom', null);
-const STATE_ARG = argVal('--state', cfg.statePath);
+const STATE_ARG = argFlag('--no-state') ? null : argVal('--state', cfg.statePath);
 const ARTIFACT = argVal('--artifact', 'software');
 const OUTPUT_PATH = argVal('--output', path.join(__dirname, 'benchmark_results.json'));
 const REPEAT = Number(argVal('--repeat', '3'));
 const PROFILE = argFlag('--profile');
 const INTERACTIVE = argFlag('--interactive');
 const MANUAL_START = argFlag('--manual-start');
+const DEBUG_CONSOLE = process.env.AZAHAR_DEBUG_CONSOLE === '1';
+const EXTRA_CHROME_ARGS = (process.env.AZAHAR_CHROME_ARGS || '').split(/\s+/).filter(Boolean);
 
 if (!['software', 'webgl2'].includes(ARTIFACT)) {
     throw new Error('Usage: --artifact software|webgl2');
@@ -366,7 +369,9 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
                         }
                     } catch (err) {
                         const detail = err?.stack || err?.message || String(err);
-                        reject(new Error(`step_frame threw at frame ${perFrame.length}: ${detail}`));
+                        const heapBytes = Module.HEAPU8?.buffer?.byteLength ?? 0;
+                        reject(new Error(`step_frame threw at frame ${perFrame.length} ` +
+                            `(WASM heap ${heapBytes} bytes): ${detail}`));
                     }
                 }
                 requestAnimationFrame(tick);
@@ -535,7 +540,7 @@ async function main() {
         // comparing against user-observed frame rates.
         headless: INTERACTIVE ? false : 'new',
         executablePath: process.env.CHROME_PATH || cfg.chromePath || "chrome",
-        args: ['--no-sandbox', '--disable-dev-shm-usage'],
+        args: ['--no-sandbox', '--disable-dev-shm-usage', ...EXTRA_CHROME_ARGS],
         defaultViewport: { width: 1280, height: 900 },
         // The evaluate() call wraps init + ROM load + warmup + benchmark
         // inside a single Promise, so the protocol timeout must cover the
@@ -545,11 +550,152 @@ async function main() {
 
     const page = await browser.newPage();
     const consoleErrors = [];
+    const debugMessageCounts = new Map();
     page.on('console', msg => {
+        if (DEBUG_CONSOLE) {
+            const text = msg.text();
+            const count = debugMessageCounts.get(text) || 0;
+            debugMessageCounts.set(text, count + 1);
+            // ANGLE reports a failed draw on every attempt. Preserve enough
+            // repetitions to establish that it is persistent without burying
+            // the shader/input snapshot emitted by the diagnostic wrapper.
+            if (count < 3) {
+                console.log(`   [browser ${msg.type()}] ${text}`);
+            } else if (count === 3) {
+                console.log(`   [browser ${msg.type()}] (further identical messages suppressed)`);
+            }
+        }
         if (msg.type() === 'error' || msg.type() === 'warning') {
             consoleErrors.push(`[${msg.type()}] ${msg.text()}`);
         }
     });
+    if (DEBUG_CONSOLE) {
+        await page.evaluateOnNewDocument(() => {
+            const installDiagnostics = prototype => {
+                if (!prototype || prototype.__azaharDiagnosticsInstalled) return;
+                prototype.__azaharDiagnosticsInstalled = true;
+                const linkedShaderSources = new WeakMap();
+                let shaderFailures = 0;
+                const compileShader = prototype.compileShader;
+                prototype.compileShader = function(shader) {
+                    compileShader.call(this, shader);
+                    if (!this.getShaderParameter(shader, this.COMPILE_STATUS)) {
+                        console.error(`[WebGL shader compile] ${this.getShaderInfoLog(shader)}`);
+                        if (shaderFailures++ < 4) {
+                            console.error(`[WebGL shader source]\n${this.getShaderSource(shader).slice(0, 2000)}`);
+                        }
+                    }
+                };
+                const linkProgram = prototype.linkProgram;
+                prototype.linkProgram = function(program) {
+                    const debugShaders = this.getExtension('WEBGL_debug_shaders');
+                    linkedShaderSources.set(program, this.getAttachedShaders(program).map(shader => ({
+                        type: `0x${this.getShaderParameter(shader, this.SHADER_TYPE).toString(16)}`,
+                        source: this.getShaderSource(shader),
+                        translated: debugShaders?.getTranslatedShaderSource(shader) || '',
+                    })));
+                    linkProgram.call(this, program);
+                    if (!this.getProgramParameter(program, this.LINK_STATUS)) {
+                        console.error(`[WebGL program link] ${this.getProgramInfoLog(program)}`);
+                    }
+                };
+
+                let drawFailureCaptured = false;
+                const captureDrawFailure = function(kind, args) {
+                    if (drawFailureCaptured) return;
+                    const error = this.getError();
+                    if (error === this.NO_ERROR) return;
+                    drawFailureCaptured = true;
+                    const program = this.getParameter(this.CURRENT_PROGRAM);
+                    const vao = this.getParameter(this.VERTEX_ARRAY_BINDING);
+                    const attributes = [];
+                    if (program) {
+                        const count = this.getProgramParameter(program, this.ACTIVE_ATTRIBUTES);
+                        for (let i = 0; i < count; ++i) {
+                            const info = this.getActiveAttrib(program, i);
+                            const location = this.getAttribLocation(program, info.name);
+                            attributes.push({
+                                name: info.name,
+                                type: `0x${info.type.toString(16)}`,
+                                size: info.size,
+                                location,
+                                enabled: this.getVertexAttrib(location, this.VERTEX_ATTRIB_ARRAY_ENABLED),
+                                arraySize: this.getVertexAttrib(location, this.VERTEX_ATTRIB_ARRAY_SIZE),
+                                arrayType: `0x${this.getVertexAttrib(location, this.VERTEX_ATTRIB_ARRAY_TYPE).toString(16)}`,
+                                stride: this.getVertexAttrib(location, this.VERTEX_ATTRIB_ARRAY_STRIDE),
+                                integer: this.getVertexAttrib(location, this.VERTEX_ATTRIB_ARRAY_INTEGER),
+                                divisor: this.getVertexAttrib(location, this.VERTEX_ATTRIB_ARRAY_DIVISOR),
+                                buffer: Boolean(this.getVertexAttrib(location, this.VERTEX_ATTRIB_ARRAY_BUFFER_BINDING)),
+                                current: Array.from(this.getVertexAttrib(location, this.CURRENT_VERTEX_ATTRIB)),
+                            });
+                        }
+                    }
+                    const shaders = program ? linkedShaderSources.get(program) || [] : [];
+                    const shaderDiagnostics = shaders.map(shader => {
+                        const translatedLines = shader.translated.split('\n');
+                        const begin = Math.max(0, 767 - 6);
+                        const end = Math.min(translatedLines.length, 767 + 5);
+                        return {
+                            type: shader.type,
+                            sourceLength: shader.source.length,
+                            translatedLength: shader.translated.length,
+                            translatedAroundError: translatedLines.slice(begin, end)
+                                .map((line, index) => `${begin + index + 1}: ${line}`),
+                        };
+                    });
+                    const previousUniformBuffer = this.getParameter(this.UNIFORM_BUFFER_BINDING);
+                    const uniformBlocks = [];
+                    for (let binding = 0; binding < 3; ++binding) {
+                        const buffer = this.getIndexedParameter(this.UNIFORM_BUFFER_BINDING, binding);
+                        const start = Number(this.getIndexedParameter(this.UNIFORM_BUFFER_START, binding));
+                        const size = Number(this.getIndexedParameter(this.UNIFORM_BUFFER_SIZE, binding));
+                        if (!buffer || !size) continue;
+                        this.bindBuffer(this.UNIFORM_BUFFER, buffer);
+                        const bytes = new Uint8Array(Math.min(size, 2048));
+                        this.getBufferSubData(this.UNIFORM_BUFFER, start, bytes);
+                        uniformBlocks.push({
+                            binding,
+                            start,
+                            size,
+                            uints: Array.from(new Uint32Array(bytes.buffer)),
+                        });
+                    }
+                    this.bindBuffer(this.UNIFORM_BUFFER, previousUniformBuffer);
+                    globalThis.__azaharWebGLDrawFailure = {
+                        programLog: program ? this.getProgramInfoLog(program) : '',
+                        shaders,
+                    };
+                    console.error(`[WebGL draw failure] ${JSON.stringify({
+                        kind,
+                        args,
+                        error: `0x${error.toString(16)}`,
+                        vao: Boolean(vao),
+                        programLog: program ? this.getProgramInfoLog(program) : '',
+                        attributes,
+                        uniformBlocks,
+                        shaders: shaderDiagnostics,
+                    })}`);
+                };
+                for (const kind of ['drawArrays', 'drawElements']) {
+                    const draw = prototype[kind];
+                    prototype[kind] = function(...args) {
+                        draw.apply(this, args);
+                        captureDrawFailure.call(this, kind, args);
+                    };
+                }
+            };
+            installDiagnostics(globalThis.WebGL2RenderingContext?.prototype);
+        });
+        page.on('response', response => {
+            if (response.status() >= 400) {
+                console.log(`   [browser http ${response.status()}] ${response.url()}`);
+            }
+        });
+        page.on('pageerror', error =>
+            console.log(`   [browser pageerror] ${error?.stack || error}`));
+        page.on('requestfailed', request =>
+            console.log(`   [browser requestfailed] ${request.url()}: ${request.failure()?.errorText}`));
+    }
 
     const allRuns = [];
 
@@ -716,6 +862,11 @@ async function main() {
             runs: allRuns,
         };
 
+        if (DEBUG_CONSOLE) {
+            results.webglDrawFailure = await page.evaluate(
+                () => globalThis.__azaharWebGLDrawFailure || null);
+        }
+
         if (consoleErrors.length) results.consoleErrors = consoleErrors;
 
         fs.writeFileSync(OUTPUT_PATH, JSON.stringify(results, null, 2), 'utf-8');
@@ -734,6 +885,19 @@ async function main() {
     } catch (error) {
         console.error('Benchmark failed:', error.message);
         console.error(error.stack);
+        if (DEBUG_CONSOLE) {
+            const webglDrawFailure = await page.evaluate(
+                () => globalThis.__azaharWebGLDrawFailure || null).catch(() => null);
+            if (webglDrawFailure) {
+                fs.writeFileSync(OUTPUT_PATH, JSON.stringify({
+                    benchmarkVersion: 4,
+                    runner: 'browser',
+                    timestamp: new Date().toISOString(),
+                    error: error.message,
+                    webglDrawFailure,
+                }, null, 2), 'utf-8');
+            }
+        }
         if (consoleErrors.length) {
             console.error(`Browser console messages (${consoleErrors.length}):`);
             consoleErrors.slice(0, 20).forEach(message => console.error(`  ${message}`));
