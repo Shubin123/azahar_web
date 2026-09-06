@@ -1,4 +1,5 @@
 const path = require('path');
+const fs = require('fs');
 const puppeteer = require(process.env.AZAHAR_PUPPETEER_MODULE || 'puppeteer-core');
 const {listen: listenWeb} = require('../web/server.cjs');
 const cfg = require('./config.cjs');
@@ -11,6 +12,9 @@ const romPath = process.env.AZAHAR_ROM_PATH ||
 const realRomBootMs = process.env.AZAHAR_REAL_ROM_BOOT_MS === undefined ? 35000 :
     Number.parseInt(process.env.AZAHAR_REAL_ROM_BOOT_MS, 10);
 const capturePath = process.env.AZAHAR_CAPTURE_PATH;
+const statePath = process.env.AZAHAR_STATE_PATH || cfg.statePath;
+const extraChromeArgs = (process.env.AZAHAR_CHROME_ARGS || '')
+    .split(/\s+/).filter(Boolean);
 
 async function waitForStatus(page, predicate, timeout = 120000) {
     await page.waitForFunction(predicate, {timeout});
@@ -79,14 +83,22 @@ function hasVisibleGameFrame(stats) {
 async function main() {
     // Use the project server by default: it supplies the COOP/COEP headers
     // required for Emscripten pthreads and makes this regression self-contained.
-    const server = process.env.AZAHAR_WEB_URL ? null : await listenWeb(0);
+    const localStatePath = !process.env.AZAHAR_WEB_URL && statePath && fs.existsSync(statePath) ?
+        statePath : null;
+    const virtualFiles = localStatePath ?
+        {'/__azahar_test_state.cst': fs.readFileSync(localStatePath)} : {};
+    const server = process.env.AZAHAR_WEB_URL ? null :
+        await listenWeb(0, '127.0.0.1', {virtualFiles});
     const address = server?.address();
+    // Keep the generic cold-boot regression deterministic on the software
+    // compatibility artifact. Accelerated saved-state rendering and timing
+    // are covered by benchmark_browser.cjs --artifact webgl2.
     const webUrl = process.env.AZAHAR_WEB_URL ||
-        `http://127.0.0.1:${address.port}/index.html`;
+        `http://127.0.0.1:${address.port}/index.html?renderer=software&autostart=0`;
     const browser = await puppeteer.launch({
         headless: 'new',
         executablePath: process.env.CHROME_PATH || cfg.chromePath || "chrome",
-        args: ['--no-sandbox', '--disable-dev-shm-usage'],
+        args: ['--no-sandbox', '--disable-dev-shm-usage', ...extraChromeArgs],
         defaultViewport: {width: 1280, height: 900},
     });
     const page = await browser.newPage();
@@ -98,14 +110,16 @@ async function main() {
         consoleMessages.push(`[${message.type()}] ${message.text()}`);
         if (message.type() === 'error') consoleErrors.push(message.text());
     });
-    page.on('pageerror', error => pageErrors.push(String(error)));
+    page.on('pageerror', error => pageErrors.push(error.stack || String(error)));
     page.on('requestfailed', request => failedRequests.push(`${request.url()}: ${request.failure()?.errorText}`));
 
     try {
+        console.log(`phase: navigate ${webUrl}`);
         await page.goto(webUrl, {
             waitUntil: 'networkidle0',
             timeout: 120000,
         });
+        console.log('phase: wait for emulator initialization');
         await waitForStatus(page, () => document.querySelector('#status').textContent.includes('Emulator ready'));
         const crossOriginIsolated = await page.evaluate(() => crossOriginIsolated);
         if (!crossOriginIsolated) {
@@ -113,22 +127,45 @@ async function main() {
         }
         const wasmReadyStatus = await page.$eval('#status', element => element.textContent);
 
+        console.log('phase: upload ROM');
         await (await page.$('#rom-file')).uploadFile(romPath);
         await waitForStatus(page, () => !document.querySelector('#btn-load').disabled, 30000);
         const selectedStatus = await page.$eval('#status', element => element.textContent);
 
+        console.log('phase: load ROM');
         await page.click('#btn-load');
+        console.log('phase: load click dispatched');
         await waitForStatus(page, () => {
             const status = document.querySelector('#status').textContent;
-            return document.querySelector('#btn-stop').disabled === false ||
+            return document.querySelector('#btn-run').disabled === false ||
                 status.startsWith('ROM load failed') ||
                 status.startsWith('ROM is encrypted') || status.startsWith('Load error');
         });
         const loadStatus = await page.$eval('#status', element => element.textContent);
-        const runningAfterLoad = await page.$eval('#btn-stop', element => !element.disabled);
-        if (!runningAfterLoad) {
+        const readyAfterLoad = await page.$eval('#btn-run', element => !element.disabled);
+        if (!readyAfterLoad) {
             throw new Error(`ROM load failed in browser: ${loadStatus}`);
         }
+
+        if (localStatePath) {
+            console.log('phase: install and queue playable save state');
+            const stateName = path.basename(localStatePath);
+            const stateResult = await page.evaluate(async name => {
+                const response = await fetch('/__azahar_test_state.cst');
+                if (!response.ok) return -10;
+                const bytes = new Uint8Array(await response.arrayBuffer());
+                const stateDir = '/home/web_user/.local/share/azahar-emu/states';
+                Module.FS.mkdirTree(stateDir);
+                Module.FS.writeFile(`${stateDir}/${name}`, bytes, {canOwn: false});
+                return Module._azahar_load_state(1);
+            }, stateName);
+            if (stateResult !== 0) {
+                throw new Error(`Save-state setup failed: ${stateResult}`);
+            }
+        }
+
+        await page.click('#btn-run');
+        console.log('phase: continuous emulation started');
         const emulationStartMs = await page.evaluate(() => performance.now());
 
         // The default UI path starts the display-scheduled loop as soon as
@@ -146,6 +183,7 @@ async function main() {
         // misses a broken SDL-to-browser presentation path.
         let visibleFrame = null;
         if (realRomBootMs > 0) {
+            console.log(`phase: wait up to ${realRomBootMs} ms for visible game frame`);
             const visualDeadline = Date.now() + realRomBootMs;
             do {
                 const rendererNonblackPixels = await page.evaluate(() =>
@@ -157,17 +195,26 @@ async function main() {
                     rendererNonblackPixels,
                     ...(await readVisibleCanvasStats(page)),
                 };
-                if (rendererNonblackPixels > 0 && hasVisibleGameFrame(visibleFrame)) break;
+                const gpuResidentFramebuffer = await page.evaluate(() =>
+                    window.AzaharWebConfig?.renderer === 'webgl2');
+                const rendererReady = rendererNonblackPixels > 0 ||
+                    (gpuResidentFramebuffer && rendererNonblackPixels === -2);
+                if (rendererReady && hasVisibleGameFrame(visibleFrame)) break;
                 await new Promise(resolve => setTimeout(resolve, 500));
             } while (Date.now() < visualDeadline);
 
-            if (visibleFrame.rendererNonblackPixels <= 0 || !hasVisibleGameFrame(visibleFrame)) {
+            const gpuResidentFramebuffer = await page.evaluate(() =>
+                window.AzaharWebConfig?.renderer === 'webgl2');
+            const rendererReady = visibleFrame.rendererNonblackPixels > 0 ||
+                (gpuResidentFramebuffer && visibleFrame.rendererNonblackPixels === -2);
+            if (!rendererReady || !hasVisibleGameFrame(visibleFrame)) {
                 throw new Error(`No visible game framebuffer after ${realRomBootMs} ms: ` +
                     JSON.stringify(visibleFrame));
             }
             if (capturePath) await page.screenshot({path: capturePath, fullPage: true});
         }
 
+        console.log('phase: stop emulation');
         await page.click('#btn-stop');
         await waitForStatus(page, () => /^Stopped at step \d+$/.test(document.querySelector('#status').textContent));
         const finalStatus = await page.$eval('#status', element => element.textContent);

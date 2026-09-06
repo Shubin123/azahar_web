@@ -24,6 +24,8 @@
  * Environment:
  *   CHROME_PATH   Path to Chrome/Chromium executable
  *   AZAHAR_PUPPETEER_MODULE  Puppeteer module to require (default: puppeteer-core)
+ *   AZAHAR_CPU_PROFILE  Optional path for a Chrome .cpuprofile capture
+ *   AZAHAR_PAGE_QUERY   Optional query string appended to the benchmark page URL
  */
 
 const fs = require('fs');
@@ -55,6 +57,7 @@ const PROFILE = argFlag('--profile');
 const INTERACTIVE = argFlag('--interactive');
 const MANUAL_START = argFlag('--manual-start');
 const DEBUG_CONSOLE = process.env.AZAHAR_DEBUG_CONSOLE === '1';
+const CPU_PROFILE_PATH = process.env.AZAHAR_CPU_PROFILE || '';
 const EXTRA_CHROME_ARGS = (process.env.AZAHAR_CHROME_ARGS || '').split(/\s+/).filter(Boolean);
 
 if (!['software', 'webgl2'].includes(ARTIFACT)) {
@@ -297,7 +300,10 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
             if (request !== 0) throw new Error(`azahar_load_state rejected slot 1: ${request}`);
             // SendSignal is consumed by the emulation loop.  Give the restored
             // scene a short, unmeasured settle window before collecting samples.
-            const settle = await runForDuration(3, false);
+            // Shader compilation can block the first restored callback for longer than the
+            // nominal settle window (notably ANGLE/D3D). Require several completed emulation
+            // callbacks so a single compile-heavy frame cannot be mistaken for a black restore.
+            const settle = await runForDuration(3, false, 8);
             Module._azahar_reset_renderer_stats?.();
             const visual = await readCanvasSceneStats();
             // The WebGL2 drawing buffer is not reliably readable from this
@@ -318,7 +324,7 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
         // Execute through the same browser refresh loop and canvas-copy path
         // as the UI. A synchronous WASM loop measures neither real browser
         // pacing nor the presentation work users experience.
-        function runForDuration(seconds, samplePerf) {
+        function runForDuration(seconds, samplePerf, minimumFrames = 1) {
             return new Promise((resolve, reject) => {
                 const perFrame = [];
                 const samples = [];
@@ -362,7 +368,9 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
                         previousTick = timestamp;
                         if (result !== 0 && result !== 1) {
                             reject(new Error(`step_frame returned ${result} at ${perFrame.length}`));
-                        } else if (result === 1 || timestamp - startedAt >= seconds * 1000) {
+                        } else if (result === 1 ||
+                                   (timestamp - startedAt >= seconds * 1000 &&
+                                    perFrame.length >= minimumFrames)) {
                             finish();
                         } else {
                             requestAnimationFrame(tick);
@@ -529,8 +537,12 @@ async function main() {
         });
     });
     const addr = server.address();
-    const pageName = ARTIFACT === 'webgl2' ? 'index_webgl2.html' : 'index.html';
-    const webUrl = `http://127.0.0.1:${addr.port}/${pageName}`;
+    const pageName = ARTIFACT === 'webgl2' ? 'index_webgl2.html' :
+        'index.html?renderer=software';
+    const pageQuery = process.env.AZAHAR_PAGE_QUERY || '';
+    const queryJoin = pageName.includes('?') && pageQuery.startsWith('?') ? '&' : '';
+    const normalizedPageQuery = queryJoin ? pageQuery.slice(1) : pageQuery;
+    const webUrl = `http://127.0.0.1:${addr.port}/${pageName}${queryJoin}${normalizedPageQuery}`;
     console.log(`   Server: ${webUrl}`);
 
     // Launch browser
@@ -549,6 +561,20 @@ async function main() {
     });
 
     const page = await browser.newPage();
+    const profiler = CPU_PROFILE_PATH ? await page.createCDPSession() : null;
+    if (profiler) {
+        await profiler.send('Profiler.enable');
+        await profiler.send('Profiler.setSamplingInterval', {interval: 100});
+        await profiler.send('Profiler.start');
+    }
+    let profilerRunning = Boolean(profiler);
+    const stopProfiler = async () => {
+        if (!profilerRunning) return;
+        profilerRunning = false;
+        const {profile} = await profiler.send('Profiler.stop');
+        fs.writeFileSync(CPU_PROFILE_PATH, JSON.stringify(profile), 'utf-8');
+        await profiler.send('Profiler.disable');
+    };
     const consoleErrors = [];
     const debugMessageCounts = new Map();
     page.on('console', msg => {
@@ -589,11 +615,14 @@ async function main() {
                 const linkProgram = prototype.linkProgram;
                 prototype.linkProgram = function(program) {
                     const debugShaders = this.getExtension('WEBGL_debug_shaders');
-                    linkedShaderSources.set(program, this.getAttachedShaders(program).map(shader => ({
+                    const shaderSources = this.getAttachedShaders(program).map(shader => ({
                         type: `0x${this.getShaderParameter(shader, this.SHADER_TYPE).toString(16)}`,
                         source: this.getShaderSource(shader),
                         translated: debugShaders?.getTranslatedShaderSource(shader) || '',
-                    })));
+                    }));
+                    linkedShaderSources.set(program, shaderSources);
+                    const programs = globalThis.__azaharWebGLPrograms ||= [];
+                    if (programs.length < 32) programs.push(shaderSources);
                     linkProgram.call(this, program);
                     if (!this.getProgramParameter(program, this.LINK_STATUS)) {
                         console.error(`[WebGL program link] ${this.getProgramInfoLog(program)}`);
@@ -869,6 +898,8 @@ async function main() {
 
         if (consoleErrors.length) results.consoleErrors = consoleErrors;
 
+        await stopProfiler();
+
         fs.writeFileSync(OUTPUT_PATH, JSON.stringify(results, null, 2), 'utf-8');
 
         console.log('');
@@ -883,18 +914,22 @@ async function main() {
             consoleErrors.slice(0, 10).forEach(e => console.log(`     - ${e}`));
         }
     } catch (error) {
+        await stopProfiler().catch(() => {});
         console.error('Benchmark failed:', error.message);
         console.error(error.stack);
         if (DEBUG_CONSOLE) {
             const webglDrawFailure = await page.evaluate(
                 () => globalThis.__azaharWebGLDrawFailure || null).catch(() => null);
-            if (webglDrawFailure) {
+            const webglPrograms = await page.evaluate(
+                () => globalThis.__azaharWebGLPrograms || []).catch(() => []);
+            if (webglDrawFailure || webglPrograms.length) {
                 fs.writeFileSync(OUTPUT_PATH, JSON.stringify({
                     benchmarkVersion: 4,
                     runner: 'browser',
                     timestamp: new Date().toISOString(),
                     error: error.message,
                     webglDrawFailure,
+                    webglPrograms,
                 }, null, 2), 'utf-8');
             }
         }

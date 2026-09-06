@@ -27,8 +27,8 @@ The `web/` folder is self-contained. Enable GitHub Pages pointed at the repo roo
 
 ```
 web/                    # Ready-to-serve web application
-  index.html            # Main page (software renderer)
-  index_webgl2.html     # Experimental WebGL2 renderer page
+  index.html            # Main page (accelerated WebGL2 first)
+  index_webgl2.html     # Direct accelerated renderer page
   azahar_ui.js          # UI controller (ROM loading, run loop, FPS display)
   coi-serviceworker.js  # COOP/COEP header injection for static hosts
   server.cjs            # Local dev server with isolation headers
@@ -68,7 +68,8 @@ emcmake cmake -B build-web2 -S azahar -G Ninja \
   -DENABLE_SDL2=ON \
   -DENABLE_SDL2_FRONTEND=ON \
   -DENABLE_SOFTWARE_RENDERER=ON \
-  -DENABLE_OPENGL=OFF \
+  -DENABLE_OPENGL=ON \
+  -DENABLE_WEBGL2_RENDERER=ON \
   -DENABLE_VULKAN=OFF \
   -DENABLE_OPENAL=OFF \
   -DENABLE_LIBUSB=OFF \
@@ -78,8 +79,8 @@ emcmake cmake -B build-web2 -S azahar -G Ninja \
   -DENABLE_SCRIPTING=OFF \
   -DENABLE_TESTS=OFF
 
-# Build
-cmake --build build-web2 --parallel 8
+# Build both the fallback and accelerated artifacts
+cmake --build build-web2 --parallel 8 --target azahar_web_assets azahar_webgl2_assets
 ```
 
 The build copies artifacts into `web/` automatically via the `azahar_web_assets` CMake target.
@@ -91,7 +92,7 @@ The build copies artifacts into `web/` automatically via the `azahar_web_assets`
 node tests/web_artifact_smoke.cjs
 
 # Performance benchmark (requires Chrome)
-node tests/benchmark_browser.cjs --artifact software --duration-seconds 15 --warmup-seconds 5
+AZAHAR_CHROME_ARGS=--use-angle=vulkan node tests/benchmark_browser.cjs --artifact webgl2 --duration-seconds 15 --warmup-seconds 5
 
 # Rendering regression test (requires a decrypted ROM)
 AZAHAR_ROM_PATH=test_games/your_rom.3ds node tests/browser_regression.cjs
@@ -99,8 +100,8 @@ AZAHAR_ROM_PATH=test_games/your_rom.3ds node tests/browser_regression.cjs
 
 ## Architecture
 
-- **CPU**: Portable `dyncom` ARM11 interpreter (JIT disabled for WASM compatibility)
-- **Graphics**: Software rasterizer with 6 Emscripten pthread workers + experimental WebGL2 backend
+- **CPU**: Pretranslated, direct-threaded `dyncom` ARM11 execution optimized by the browser's WebAssembly JIT; the incomplete per-block JavaScript JIT remains disabled
+- **Graphics**: Accelerated OpenGL-on-WebGL2 by default, with an explicit software fallback (`?renderer=software`) and hardware-vertex compatibility switch (`?hwShader=0`)
 - **Frontend**: SDL2 → HTML5 Canvas with `requestAnimationFrame` pacing
 - **Threading**: SharedArrayBuffer-based pthreads (requires COOP/COEP isolation)
 - **Memory**: 512 MB initial, growable to 4 GB
@@ -113,8 +114,17 @@ Tested with Super Mario 3D Land (demo), Chrome headless:
 
 | Renderer | Browser FPS | Game FPS | Speed | GPU cmd time |
 |----------|-------------|----------|-------|--------------|
-| Software (optimized) | 25.7 | 4.0 | 7% | 178 ms |
-| WebGL2 (experimental) | — | — | — | crashes with save states |
+| Software compatibility | 31.3 | 12.6 | 21% | 66.88 ms |
+| WebGL2 + Vulkan ANGLE | 111.9 | 69.0 | 116% | 4.51 ms |
+
+The accelerated renderer is attempted first. Vulkan/native-GL ANGLE paths are
+currently the fastest and pass the saved-state visual benchmark. Some D3D11
+ANGLE drivers still fail generated hardware vertex presentation; the UI's
+visible-frame watchdog then offers the software recovery path.
+
+Audio currently uses the null sink in web builds because restoring SDL's
+deprecated ScriptProcessor device produces invalid zero-sized callbacks. An
+AudioWorklet-backed frontend sink is the remaining audio integration task.
 
 ## License
 

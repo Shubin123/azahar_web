@@ -19,7 +19,7 @@ const MIME_TYPES = {
     '.svg': 'image/svg+xml',
 };
 
-function createWebServer(root = WEB_ROOT) {
+function createWebServer(root = WEB_ROOT, virtualFiles = {}) {
     const resolvedRoot = path.resolve(root);
     return http.createServer((request, response) => {
         if (request.method !== 'GET' && request.method !== 'HEAD') {
@@ -41,6 +41,19 @@ function createWebServer(root = WEB_ROOT) {
         // /web/index.html URL when this script is launched from the workspace.
         if (pathname === '/web' || pathname.startsWith('/web/')) {
             pathname = pathname.slice('/web'.length) || '/index_webgl2.html';
+        }
+
+        const virtualFile = virtualFiles[pathname];
+        if (virtualFile) {
+            response.writeHead(200, {
+                'Content-Type': 'application/octet-stream',
+                'Cross-Origin-Opener-Policy': 'same-origin',
+                'Cross-Origin-Embedder-Policy': 'require-corp',
+                'Cross-Origin-Resource-Policy': 'same-origin',
+                'Cache-Control': 'no-store',
+            });
+            response.end(request.method === 'HEAD' ? undefined : virtualFile);
+            return;
         }
 
         const file = path.resolve(resolvedRoot, `.${pathname}`);
@@ -72,8 +85,8 @@ function createWebServer(root = WEB_ROOT) {
     });
 }
 
-function listen(port = 8765, host = '127.0.0.1') {
-    const server = createWebServer();
+function listen(port = 8765, host = '127.0.0.1', options = {}) {
+    const server = createWebServer(options.root || WEB_ROOT, options.virtualFiles || {});
     return new Promise((resolve, reject) => {
         server.once('error', reject);
         server.listen(port, host, () => {

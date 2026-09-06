@@ -11,6 +11,7 @@
     const isWebGL2Artifact = webConfig.renderer === 'webgl2';
     const artifactName = webConfig.artifact || (isWebGL2Artifact ? 'azahar_webgl2' : 'azahar');
     const softwareFallbackUrl = webConfig.softwareFallbackUrl || 'index.html';
+    const autoStart = new URLSearchParams(location.search).get('autostart') !== '0';
     const canvas = document.getElementById('canvas');
     // The startup presentation guard reads pixels until the first visible
     // game frame arrives.  Request a readback-oriented 2D context once,
@@ -380,8 +381,14 @@ void main() { frag_color = vec4(1.0); }`);
                 romLoaded = true;
                 log('ROM loaded successfully!');
                 hideProgress();
-                btnStep.disabled = true;
-                startRunning();
+                if (autoStart) {
+                    btnStep.disabled = true;
+                    startRunning();
+                } else {
+                    btnStep.disabled = false;
+                    btnRun.disabled = false;
+                    setStatus('ROM loaded successfully. Ready to run.', 'ok');
+                }
             } else if (isWebGL2Artifact && result === -7) {
                 hideProgress();
                 restartInSoftware('native GLSL ES 3.00 setup failed');

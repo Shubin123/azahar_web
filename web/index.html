@@ -173,9 +173,13 @@
     </div>
 
     <script>
-        // Stable, known-good software artifact. Keep this page's 2D canvas
-        // ownership separate from the experimental WebGL2 bootstrap.
-        window.AzaharWebConfig = {renderer: 'software', artifact: 'azahar'};
+        // Start with the fastest renderer. A fresh-document software mode is
+        // retained for automatic recovery and explicit compatibility use.
+        const softwareMode = new URLSearchParams(location.search).get('renderer') === 'software';
+        window.AzaharWebConfig = softwareMode ?
+            {renderer: 'software', artifact: 'azahar'} :
+            {renderer: 'webgl2', artifact: 'azahar_webgl2',
+             softwareFallbackUrl: 'index.html?renderer=software'};
     </script>
     <script src="azahar_ui.js"></script>
 </body>
