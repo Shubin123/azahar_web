@@ -55,7 +55,7 @@ function run(label, scriptPath, args, opts = {}) {
       cwd: cfg.ROOT,
       stdio: 'inherit',
       timeout: opts.timeout || 180000,
-      env: { ...process.env, CHROME_PATH: cfg.chromePath || '' },
+      env: { ...process.env, CHROME_PATH: cfg.chromePath || '', ...(opts.env || {}) },
     });
     if (result.status === 0) {
       console.log(`\n  ✓ ${label} PASSED`);
@@ -122,6 +122,11 @@ if (runRegression) {
   } else {
     run('Rendering Regression',
       path.join(TESTS_DIR, 'browser_regression.cjs'), [], { timeout: 120000 });
+    run('Static-host Deployment Regression',
+      path.join(TESTS_DIR, 'browser_regression.cjs'), [], {
+        timeout: 120000,
+        env: { AZAHAR_STATIC_HOST: '1' },
+      });
   }
 }
 

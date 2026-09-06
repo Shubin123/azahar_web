@@ -12,6 +12,7 @@
     const artifactName = webConfig.artifact || (isWebGL2Artifact ? 'azahar_webgl2' : 'azahar');
     const softwareFallbackUrl = webConfig.softwareFallbackUrl || 'index.html';
     const autoStart = new URLSearchParams(location.search).get('autostart') !== '0';
+    const explicitWebGL2 = new URLSearchParams(location.search).get('renderer') === 'webgl2';
     const canvas = document.getElementById('canvas');
     // The startup presentation guard reads pixels until the first visible
     // game frame arrives.  Request a readback-oriented 2D context once,
@@ -33,6 +34,8 @@
     const progressEl = document.getElementById('progress');
     const fpsEl = document.getElementById('fps');
     const logEl = document.getElementById('log');
+    const rendererMode = document.getElementById('renderer-mode');
+    const rendererModeHelp = document.getElementById('renderer-mode-help');
 
     // ── State ─────────────────────────────────────────────────────
     let wasmModule = null;
@@ -54,6 +57,26 @@
     let lastFrameCount = 0;
     let displayFps = 0;
     let emulationSpeed = 0;
+
+    // Renderer changes require a fresh document because a browser canvas may
+    // own either a 2D or WebGL context, never both. Keep both builds behind a
+    // single deployment page and make that required reload explicit.
+    if (rendererMode) {
+        const query = new URLSearchParams(location.search);
+        rendererMode.value = query.get('renderer') || 'auto';
+        if (!rendererMode.options[rendererMode.selectedIndex]) rendererMode.value = 'auto';
+        rendererModeHelp.textContent = isWebGL2Artifact ?
+            'Active: accelerated WebGL2. Auto falls back if this GPU path is incompatible.' :
+            `Active: compatibility renderer${query.has('webgl2-fallback') ? ' (automatic fallback)' : ''}.`;
+        rendererMode.addEventListener('change', () => {
+            const destination = new URL('index.html', location.href);
+            if (rendererMode.value !== 'auto') {
+                destination.searchParams.set('renderer', rendererMode.value);
+            }
+            if (!autoStart) destination.searchParams.set('autostart', '0');
+            location.assign(destination.toString());
+        });
+    }
 
     // ── Logging ───────────────────────────────────────────────────
     function log(msg) {
@@ -93,6 +116,15 @@
         log(`WebGL2 fallback: ${reason}`);
         setStatus(`WebGL2 unavailable (${reason}). Restarting in software...`, 'error');
         const destination = new URL(softwareFallbackUrl, window.location.href);
+        const currentUrl = new URL(window.location.href);
+        // Preserve harness/user-flow controls across the fresh-document
+        // renderer switch. In particular, losing autostart=0 would begin
+        // execution while an uploaded save state is still being installed.
+        for (const name of ['autostart']) {
+            if (currentUrl.searchParams.has(name)) {
+                destination.searchParams.set(name, currentUrl.searchParams.get(name));
+            }
+        }
         destination.searchParams.set('webgl2-fallback', '1');
         // Preserve the precise preflight/native failure across the required
         // fresh-document fallback. This makes automated backend gates
@@ -123,6 +155,26 @@
         if (!gl) {
             restartInSoftware('WebGL2 context creation failed');
             return false;
+        }
+        const debugRenderer = gl.getExtension('WEBGL_debug_renderer_info');
+        const renderer = debugRenderer ?
+            gl.getParameter(debugRenderer.UNMASKED_RENDERER_WEBGL) : '';
+        log(`WebGL2 adapter: ${renderer || 'masked/unknown'}`);
+        // ANGLE/D3D11 can spend about a minute synchronously translating the
+        // generated PICA vertex shaders. Keep the WebGL2 rasterizer and select
+        // its CPU-vertex path instead; this reaches gameplay in a few seconds
+        // and is faster than the full software renderer. Vulkan/native GL keep
+        // hardware vertices. `?hwShader=1` remains a diagnostic override.
+        const requestedMode = new URLSearchParams(location.search);
+        if (requestedMode.get('hwShader') !== '1' && /(?:direct3d|d3d11)/i.test(renderer)) {
+            const compatibleUrl = new URL(location.href);
+            compatibleUrl.searchParams.set('hwShader', '0');
+            history.replaceState(null, '', compatibleUrl);
+            log('ANGLE/D3D11 detected: using WebGL2 with CPU vertex translation.');
+            if (rendererModeHelp) {
+                rendererModeHelp.textContent =
+                    'Active: WebGL2 with the D3D11-compatible CPU vertex path.';
+            }
         }
         const vertex = compileWebGL2Probe(gl, gl.VERTEX_SHADER, `#version 300 es
 precision highp float;
@@ -503,7 +555,8 @@ void main() { frag_color = vec4(1.0); }`);
             // backend can still fail to put its drawing buffer on the browser
             // compositor. Recover into the stable artifact rather than
             // leaving the user at a black screen.
-            if (isWebGL2Artifact && now - runStartedAt >= 10000) {
+            const presentationTimeout = explicitWebGL2 ? 90000 : 10000;
+            if (isWebGL2Artifact && now - runStartedAt >= presentationTimeout) {
                 restartInSoftware('WebGL2 presentation produced no visible frame');
                 return;
             }

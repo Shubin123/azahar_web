@@ -43,6 +43,9 @@
             border-radius: 4px;
             background: #000;
             width: 100%;
+            /* Preserve the native 3DS pixels when the 400x480 dual-screen
+               image is enlarged. This matches the known-good gameplay capture
+               and avoids browser filtering that blurs HUD and control text. */
             image-rendering: pixelated;
         }
         .controls-panel {
@@ -99,6 +102,17 @@
         }
         .file-label:hover { border-color: #e94560; }
 
+        .renderer-select {
+            width: 100%;
+            margin-bottom: 6px;
+            padding: 8px;
+            border: 1px solid #0f3460;
+            border-radius: 4px;
+            background: #0a0a1a;
+            color: #e0e0e0;
+        }
+        .mode-help { font-size: 0.72rem; color: #888; line-height: 1.35; }
+
         #status {
             font-size: 0.8rem;
             color: #aaa;
@@ -146,6 +160,15 @@
         </div>
 
         <div class="controls-panel">
+            <div class="card">
+                <h2>Renderer</h2>
+                <select id="renderer-mode" class="renderer-select" aria-label="Renderer mode">
+                    <option value="auto">Auto (best working mode)</option>
+                    <option value="webgl2">Accelerated WebGL2</option>
+                    <option value="software">Compatibility</option>
+                </select>
+                <div id="renderer-mode-help" class="mode-help"></div>
+            </div>
             <div class="card">
                 <h2>📂 ROM File</h2>
                 <input type="file" id="rom-file" accept=".3ds,.3dsx,.cia,.elf,.cxi,.app,.cci">

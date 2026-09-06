@@ -21,14 +21,14 @@ Open `http://localhost:8765` in Chrome, then load a **decrypted** `.3ds` ROM fil
 
 ### Deploy to GitHub Pages
 
-The `web/` folder is self-contained. Enable GitHub Pages pointed at the repo root or the `web/` directory. The included `coi-serviceworker.js` handles the required cross-origin isolation headers automatically on static hosts.
+The `web/` folder is self-contained. Enable GitHub Pages pointed at the repo root or the `web/` directory. The included `coi-serviceworker.js` handles the required cross-origin isolation headers automatically on static hosts. The single `index.html` page provides Auto, accelerated WebGL2, and compatibility renderer modes; switching modes performs the fresh-page reload required by browser canvas contexts.
 
 ## What's Included
 
 ```
 web/                    # Ready-to-serve web application
   index.html            # Main page (accelerated WebGL2 first)
-  index_webgl2.html     # Direct accelerated renderer page
+  index_webgl2.html     # Legacy redirect into index.html renderer selection
   azahar_ui.js          # UI controller (ROM loading, run loop, FPS display)
   coi-serviceworker.js  # COOP/COEP header injection for static hosts
   server.cjs            # Local dev server with isolation headers

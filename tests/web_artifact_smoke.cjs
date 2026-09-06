@@ -5,21 +5,18 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const cfg = require('./config.cjs');
 
 const root = path.resolve(__dirname, '..');
 const webDir = path.join(root, 'web');
-// build-web2 is the active maintained build output. Keep an explicit override
-// for CI/release jobs that intentionally use another configured build tree.
-const buildRoot = process.env.AZAHAR_BUILD_DIR ||
-    (fs.existsSync(path.join(root, 'build-web2', 'bin', 'Release')) ? 'build-web2' : 'build-web');
-const buildDir = path.join(root, buildRoot, 'bin', 'Release');
+const buildDir = path.join(cfg.buildDir, 'bin', 'Release');
 const artifactArgument = process.argv.indexOf('--artifact');
 const artifactKind = artifactArgument >= 0 ? process.argv[artifactArgument + 1] : 'software';
 if (!['software', 'webgl2'].includes(artifactKind)) {
     throw new Error('Usage: node tests/web_artifact_smoke.cjs [--artifact software|webgl2]');
 }
 const artifactName = artifactKind === 'webgl2' ? 'azahar_webgl2' : 'azahar';
-const pageName = artifactKind === 'webgl2' ? 'index_webgl2.html' : 'index.html';
+const pageName = 'index.html';
 const expectedExports = [
     'azahar_init',
     'azahar_load_state',
@@ -64,6 +61,7 @@ const glue = read(path.join(webDir, `${artifactName}.js`)).toString('utf8');
 
 assert.match(html, /<canvas\s+id=["']canvas["']/i);
 assert.match(html, /azahar_ui\.js/);
+assert.match(html, /id=["']renderer-mode["']/i);
 assert.match(ui, /script\.src\s*=\s*`\$\{artifactName\}\.js`/);
 if (artifactKind === 'webgl2') {
     assert.match(html, /renderer:\s*['"]webgl2['"]/);

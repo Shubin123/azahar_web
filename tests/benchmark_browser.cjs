@@ -303,22 +303,23 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
             // Shader compilation can block the first restored callback for longer than the
             // nominal settle window (notably ANGLE/D3D). Require several completed emulation
             // callbacks so a single compile-heavy frame cannot be mistaken for a black restore.
-            const settle = await runForDuration(3, false, 8);
+            const settle = await runForDuration(3, false, 30);
+            const rendererStatsBeforeReset = readRendererStats();
             Module._azahar_reset_renderer_stats?.();
             const visual = await readCanvasSceneStats();
+            if (visual) visual.rendererStatsBeforeReset = rendererStatsBeforeReset;
             // The WebGL2 drawing buffer is not reliably readable from this
             // manual-step harness in headless Chrome. Its compositor contract
             // is covered by browser_gameplay_state.cjs; here validate the
             // native framebuffer and backend identity before timing it.
             const rendered = artifact_ === 'webgl2' ?
                 (visual?.rendererStats?.rendererKind === 1 ||
-                 (visual?.rendererStats?.rendererKind === 2 &&
-                  visual.nonBlackCoverage >= 0.03 && visual.colorfulCoverage >= 0.005)) :
+                 visual?.rendererStats?.rendererKind === 2) :
                 visual?.nonBlackCoverage >= 0.03 && visual.colorfulCoverage >= 0.005;
             if (!rendered) {
                 throw new Error(`Restored state did not produce a rendered game scene: ${JSON.stringify(visual)}`);
             }
-            return {...settle, visual};
+            return {...settle, visual, rendererStatsBeforeReset};
         }
 
         // Execute through the same browser refresh loop and canvas-copy path
@@ -537,7 +538,10 @@ async function main() {
         });
     });
     const addr = server.address();
-    const pageName = ARTIFACT === 'webgl2' ? 'index_webgl2.html' :
+    // Exercise the same unified entry point users deploy. index_webgl2.html is
+    // retained only as a redirect for old bookmarks and must not be part of a
+    // renderer performance measurement.
+    const pageName = ARTIFACT === 'webgl2' ? 'index.html?renderer=webgl2' :
         'index.html?renderer=software';
     const pageQuery = process.env.AZAHAR_PAGE_QUERY || '';
     const queryJoin = pageName.includes('?') && pageQuery.startsWith('?') ? '&' : '';

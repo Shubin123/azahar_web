@@ -71,10 +71,18 @@ for (const dir of STATE_CANDIDATES) {
   } catch {}
 }
 
-// --- Build directory auto-detection (prefer build-web2) ---
-const buildDir = fs.existsSync(path.join(ROOT, 'build-web2'))
-  ? path.join(ROOT, 'build-web2')
-  : path.join(ROOT, 'build-web');
+// --- Build directory auto-detection ---
+// Respect the build used to produce the served artifacts. The accelerated
+// OpenGL/WebGL2 directory takes precedence over older experimental builds so
+// smoke tests do not compare web/ against an unrelated stale linker output.
+const requestedBuildDir = process.env.AZAHAR_BUILD_DIR
+  ? path.resolve(ROOT, process.env.AZAHAR_BUILD_DIR)
+  : null;
+const buildDir = requestedBuildDir || [
+  path.join(ROOT, 'build-webgl2-opengl'),
+  path.join(ROOT, 'build-web2'),
+  path.join(ROOT, 'build-web'),
+].find(candidate => fs.existsSync(candidate));
 
 const webDir = path.join(ROOT, 'web');
 

@@ -15,6 +15,9 @@ const capturePath = process.env.AZAHAR_CAPTURE_PATH;
 const statePath = process.env.AZAHAR_STATE_PATH || cfg.statePath;
 const extraChromeArgs = (process.env.AZAHAR_CHROME_ARGS || '')
     .split(/\s+/).filter(Boolean);
+const staticHostMode = process.env.AZAHAR_STATIC_HOST === '1';
+const headless = process.env.AZAHAR_HEADLESS === '0' ? false : 'new';
+const sustainMs = Number.parseInt(process.env.AZAHAR_SUSTAIN_MS || '1000', 10);
 
 async function waitForStatus(page, predicate, timeout = 120000) {
     await page.waitForFunction(predicate, {timeout});
@@ -88,15 +91,20 @@ async function main() {
     const virtualFiles = localStatePath ?
         {'/__azahar_test_state.cst': fs.readFileSync(localStatePath)} : {};
     const server = process.env.AZAHAR_WEB_URL ? null :
-        await listenWeb(0, '127.0.0.1', {virtualFiles});
+        await listenWeb(0, '127.0.0.1', {
+            virtualFiles,
+            // Exercise the same service-worker isolation bootstrap required
+            // by GitHub Pages, which cannot provide COOP/COEP response headers.
+            crossOriginIsolation: !staticHostMode,
+        });
     const address = server?.address();
-    // Keep the generic cold-boot regression deterministic on the software
-    // compatibility artifact. Accelerated saved-state rendering and timing
-    // are covered by benchmark_browser.cjs --artifact webgl2.
+    // Enter through the actual deployment URL. Adapter preflight may keep the
+    // accelerated artifact or navigate to compatibility mode; both outcomes
+    // must produce playable, composited output in the browser under test.
     const webUrl = process.env.AZAHAR_WEB_URL ||
-        `http://127.0.0.1:${address.port}/index.html?renderer=software&autostart=0`;
+        `http://127.0.0.1:${address.port}/index.html?autostart=0`;
     const browser = await puppeteer.launch({
-        headless: 'new',
+        headless,
         executablePath: process.env.CHROME_PATH || cfg.chromePath || "chrome",
         args: ['--no-sandbox', '--disable-dev-shm-usage', ...extraChromeArgs],
         defaultViewport: {width: 1280, height: 900},
@@ -111,6 +119,7 @@ async function main() {
         if (message.type() === 'error') consoleErrors.push(message.text());
     });
     page.on('pageerror', error => pageErrors.push(error.stack || String(error)));
+    page.on('error', error => pageErrors.push(`Renderer process error: ${error.stack || error}`));
     page.on('requestfailed', request => failedRequests.push(`${request.url()}: ${request.failure()?.errorText}`));
 
     try {
@@ -126,6 +135,13 @@ async function main() {
             throw new Error('Web page is not cross-origin isolated; COOP/COEP headers are required for pthreads');
         }
         const wasmReadyStatus = await page.$eval('#status', element => element.textContent);
+        const selectedRenderer = await page.evaluate(() => window.AzaharWebConfig?.renderer);
+        const heapBytes = await page.evaluate(() => Module.HEAPU8.byteLength);
+        const rendererModes = await page.$$eval('#renderer-mode option', options =>
+            options.map(option => option.value));
+        if (rendererModes.join(',') !== 'auto,webgl2,software') {
+            throw new Error(`Unified renderer toggle is missing or stale: ${JSON.stringify(rendererModes)}`);
+        }
 
         console.log('phase: upload ROM');
         await (await page.$('#rom-file')).uploadFile(romPath);
@@ -214,6 +230,26 @@ async function main() {
             if (capturePath) await page.screenshot({path: capturePath, fullPage: true});
         }
 
+        // Keep the real rAF-driven UI alive after the first valid frame. This
+        // catches renderer-process exits, runaway heap growth, and event-loop
+        // starvation that a one-frame screenshot check cannot observe.
+        console.log(`phase: sustain responsive gameplay for ${sustainMs} ms`);
+        const sustainedSamples = [];
+        const sustainDeadline = Date.now() + sustainMs;
+        while (Date.now() < sustainDeadline) {
+            await new Promise(resolve => setTimeout(resolve, Math.min(1000,
+                Math.max(1, sustainDeadline - Date.now()))));
+            sustainedSamples.push(await page.evaluate(() => ({
+                now: performance.now(),
+                heapBytes: Module.HEAPU8.byteLength,
+                status: document.querySelector('#status').textContent,
+                stopEnabled: !document.querySelector('#btn-stop').disabled,
+            })));
+            if (!sustainedSamples.at(-1).stopEnabled) {
+                throw new Error(`Emulation stopped during sustained run: ${JSON.stringify(sustainedSamples.at(-1))}`);
+            }
+        }
+
         console.log('phase: stop emulation');
         await page.click('#btn-stop');
         await waitForStatus(page, () => /^Stopped at step \d+$/.test(document.querySelector('#status').textContent));
@@ -224,16 +260,37 @@ async function main() {
         }
 
         const canvasStats = await readVisibleCanvasStats(page);
+        const canvasDimensions = await page.$eval('#canvas', canvas => ({
+            backingWidth: canvas.width,
+            backingHeight: canvas.height,
+            clientWidth: canvas.clientWidth,
+            clientHeight: canvas.clientHeight,
+        }));
+        const backingAspectError = Math.abs(
+            canvasDimensions.backingWidth / canvasDimensions.backingHeight - 5 / 6);
+        const clientAspectError = Math.abs(
+            canvasDimensions.clientWidth / canvasDimensions.clientHeight - 5 / 6);
+        if (backingAspectError > 0.01 || clientAspectError > 0.01) {
+            throw new Error(`Dual-screen canvas aspect ratio regressed: ${JSON.stringify(canvasDimensions)}`);
+        }
         if (consoleErrors.length || pageErrors.length) {
             throw new Error(`Browser errors: ${JSON.stringify({consoleErrors, pageErrors})}`);
         }
 
         console.log(JSON.stringify({
             ok: true,
+            staticHostMode,
+            selectedRenderer,
+            rendererModes,
+            heapBytes,
+            sustainMs,
+            sustainedSamples: sustainedSamples.length,
+            finalHeapBytes: sustainedSamples.at(-1)?.heapBytes || heapBytes,
             wasmReadyStatus,
             selectedStatus,
             loadStatus,
             finalStatus,
+            canvasDimensions,
             canvasStats,
             visibleFrame,
         }));
