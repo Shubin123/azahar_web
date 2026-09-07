@@ -69,6 +69,8 @@ assert.match(html, /<canvas\s+id=["']canvas["']/i);
 assert.match(html, /azahar_ui\.js/);
 assert.match(html, /azahar_savestates\.js/);
 requireFile(webDir, 'azahar_savestates.js');
+assert.match(html, /azahar_scheduler\.js/);
+requireFile(webDir, 'azahar_scheduler.js');
 assert.match(html, /id=["']renderer-mode["']/i);
 assert.match(ui, /script\.src\s*=\s*`\$\{artifactName\}\.js`/);
 if (artifactKind === 'webgl2') {

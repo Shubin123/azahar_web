@@ -1,0 +1,125 @@
+diff --git a/src/video_core/pica/pica_core.cpp b/src/video_core/pica/pica_core.cpp
+index 9f19e9572..16c253f6f 100644
+--- a/src/video_core/pica/pica_core.cpp
++++ b/src/video_core/pica/pica_core.cpp
+@@ -14,6 +14,9 @@
+ #include "video_core/pica/vertex_loader.h"
+ #include "video_core/rasterizer_interface.h"
+ #include "video_core/shader/shader.h"
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ 
+ namespace Pica {
+ 
+@@ -568,6 +571,38 @@ void PicaCore::DrawArrays(bool is_indexed) {
+ }
+ 
+ void PicaCore::LoadVertices(bool is_indexed) {
++#ifdef __EMSCRIPTEN__
++    static const bool trace_vertices = EM_ASM_INT({
++        return new URLSearchParams(location.search).get('picaTrace') === '1';
++    });
++    const double trace_start = trace_vertices ? emscripten_get_now() : 0;
++    u32 trace_hits = 0;
++    u32 trace_misses = 0;
++    u32 trace_collisions = 0;
++    SCOPE_EXIT({
++        if (trace_vertices) {
++            EM_ASM({
++                const s = globalThis.azaharPicaTrace ||= ({
++                    batches: 0, vertices: 0, hits: 0, misses: 0, collisions: 0, vertexMs: 0
++                });
++                s.batches++; s.vertices += $0; s.hits += $1;
++                s.misses += $2; s.collisions += $3; s.vertexMs += $4;
++            }, regs.internal.pipeline.num_vertices, trace_hits, trace_misses,
++               trace_collisions, emscripten_get_now() - trace_start);
++        }
++    });
++    static u32 reported_paths = 0;
++    const u32 path = (Settings::values.use_hw_shader ? 1u : 0u) |
++        (regs.internal.pipeline.use_gs == PipelineRegs::UseGS::Yes ? 2u : 0u) |
++        (primitive_assembler.IsEmpty() ? 4u : 0u);
++    if (!(reported_paths & (1u << path))) {
++        reported_paths |= 1u << path;
++        EM_ASM({ console.info('[Azahar PICA] CPU vertex path: hardware=' + $0 +
++            ' geometry=' + $1 + ' assemblerEmpty=' + $2 + ' vertices=' + $3); },
++            path & 1, (path >> 1) & 1, (path >> 2) & 1,
++            regs.internal.pipeline.num_vertices);
++    }
++#endif
+     // Read and validate vertex information from the loaders
+     const auto& pipeline = regs.internal.pipeline;
+     const PAddr base_address = pipeline.vertex_attributes.GetPhysicalBaseAddress();
+@@ -580,16 +615,19 @@ void PicaCore::LoadVertices(bool is_indexed) {
+     const u16* index_address_16 = reinterpret_cast<const u16*>(index_address_8);
+     const bool index_u16 = index_info.format != 0;
+ 
+-    // Simple circular-replacement vertex cache
+-    const std::size_t VERTEX_CACHE_SIZE = 64;
++    // Vertex shader results are an internal optimization and are not visible
++    // to the guest. Use a direct-mapped power-of-two cache here: the previous
++    // fully-associative linear scan compared up to 64 IDs for every index,
++    // which is particularly costly in WebAssembly. A 256-entry table keeps
++    // collision misses low without reintroducing a search loop.
++    constexpr std::size_t VERTEX_CACHE_SIZE = 256;
+     std::array<bool, VERTEX_CACHE_SIZE> vertex_cache_valid{};
+     std::array<u16, VERTEX_CACHE_SIZE> vertex_cache_ids;
+     std::array<AttributeBuffer, VERTEX_CACHE_SIZE> vertex_cache;
+-    u32 vertex_cache_pos = 0;
+ 
+     // Compile the vertex shader for this batch.
+     ShaderUnit shader_unit;
+-    AttributeBuffer vs_output;
++    AttributeBuffer vs_output{};
+     shader_engine->SetupBatch(vs_setup, regs.internal.vs.main_offset);
+ 
+     // Setup geometry pipeline in case we are using a geometry shader.
+@@ -610,18 +648,25 @@ void PicaCore::LoadVertices(bool is_indexed) {
+                 continue;
+             }
+ 
+-            for (u32 i = 0; i < VERTEX_CACHE_SIZE; ++i) {
+-                if (vertex_cache_valid[i] && vertex == vertex_cache_ids[i]) {
+-                    vs_output = vertex_cache[i];
+-                    vertex_cache_hit = true;
+-                    break;
+-                }
++            const std::size_t cache_slot = vertex & (VERTEX_CACHE_SIZE - 1);
++            if (vertex_cache_valid[cache_slot] && vertex == vertex_cache_ids[cache_slot]) {
++                vs_output = vertex_cache[cache_slot];
++                vertex_cache_hit = true;
++            }
++#ifdef __EMSCRIPTEN__
++            if (trace_vertices) {
++                trace_hits += vertex_cache_hit;
++                trace_collisions += !vertex_cache_hit && vertex_cache_valid[cache_slot];
+             }
++#endif
+         }
+ 
+         if (!vertex_cache_hit) {
++#ifdef __EMSCRIPTEN__
++            trace_misses += trace_vertices;
++#endif
+             // Initialize data for the current vertex
+-            AttributeBuffer input;
++            AttributeBuffer input{};
+             loader.LoadVertex(base_address, index, vertex, input, input_default_attributes);
+ 
+             // Record vertex processing to the debugger.
+@@ -637,10 +682,10 @@ void PicaCore::LoadVertices(bool is_indexed) {
+ 
+             // Cache the vertex when doing indexed rendering.
+             if (is_indexed) {
+-                vertex_cache[vertex_cache_pos] = vs_output;
+-                vertex_cache_valid[vertex_cache_pos] = true;
+-                vertex_cache_ids[vertex_cache_pos] = vertex;
+-                vertex_cache_pos = (vertex_cache_pos + 1) % VERTEX_CACHE_SIZE;
++                const std::size_t cache_slot = vertex & (VERTEX_CACHE_SIZE - 1);
++                vertex_cache[cache_slot] = vs_output;
++                vertex_cache_valid[cache_slot] = true;
++                vertex_cache_ids[cache_slot] = vertex;
+             }
+         }
+ 

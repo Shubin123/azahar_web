@@ -1032,7 +1032,7 @@ void main() { frag_color = vec4(1.0); }`);
                                 (emulationSpeed > 0 ? ' | ' + emulationSpeed.toFixed(0) + '% speed' : '');
                         }
                     }
-                    runAnimationFrame = requestAnimationFrame(tick);
+                    runAnimationFrame = AzaharScheduler.request(tick);
                 } else if (result === 1) {
                     log('Emulation ended.');
                     setStatus('Emulation ended.', '');
@@ -1053,7 +1053,7 @@ void main() { frag_color = vec4(1.0); }`);
             }
         }
 
-        requestAnimationFrame(tick);
+        runAnimationFrame = AzaharScheduler.request(tick);
     }
 
     btnRun.addEventListener('click', startRunning);
@@ -1065,7 +1065,7 @@ void main() { frag_color = vec4(1.0); }`);
     function stopRunning() {
         running = false;
         if (runAnimationFrame !== null) {
-            cancelAnimationFrame(runAnimationFrame);
+            AzaharScheduler.cancel(runAnimationFrame);
             runAnimationFrame = null;
         }
         hideProgress();

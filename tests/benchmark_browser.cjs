@@ -43,7 +43,7 @@ function argVal(flag, fallback) {
 }
 function argFlag(flag) { return argv.includes(flag); }
 
-// rAF is intentionally used for both phases. Durations, rather than frame
+// The UI scheduler is used for both phases. Durations, rather than frame
 // counts, are essential here: at 3 FPS a 1,800-frame warmup would take ten
 // minutes and measure a different workload from a 30-second title-screen run.
 const BENCH_SECONDS = Number(argVal('--duration-seconds', '15'));
@@ -129,7 +129,7 @@ function createBenchServer(romPath, statePath) {
 async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableProfile, manualStart,
     stateName, artifact) {
     // Disable the 30s default evaluate timeout — ROM load + warmup + benchmark
-    // may run in a single rAF-driven loop that spans tens of seconds.
+    // may run in a single scheduled loop that spans tens of seconds.
     page.setDefaultTimeout(0);
     return await page.evaluate(async ({
         romExt_, benchSeconds_, warmupSeconds_, enableProfile_, manualStart_, stateName_, artifact_
@@ -323,7 +323,7 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
             return {...settle, visual, rendererStatsBeforeReset};
         }
 
-        // Execute through the same browser refresh loop and canvas-copy path
+        // Execute through the same browser scheduler and canvas-copy path
         // as the UI. A synchronous WASM loop measures neither real browser
         // pacing nor the presentation work users experience.
         function runForDuration(seconds, samplePerf, minimumFrames = 1) {
@@ -375,7 +375,7 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
                                     perFrame.length >= minimumFrames)) {
                             finish();
                         } else {
-                            requestAnimationFrame(tick);
+                            AzaharScheduler.request(tick);
                         }
                     } catch (err) {
                         const detail = err?.stack || err?.message || String(err);
@@ -384,7 +384,7 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
                             `(WASM heap ${heapBytes} bytes): ${detail}`));
                     }
                 }
-                requestAnimationFrame(tick);
+                AzaharScheduler.request(tick);
             });
         }
 
@@ -423,14 +423,14 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
                             control.remove();
                             resolve();
                         } else {
-                            requestAnimationFrame(tick);
+                            AzaharScheduler.request(tick);
                         }
                     } catch (err) {
                         control.remove();
                         reject(new Error(`step_frame threw before manual start: ${err.message || err}`));
                     }
                 };
-                requestAnimationFrame(tick);
+                AzaharScheduler.request(tick);
             });
         }
 
@@ -476,15 +476,29 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
             }
 
             // Benchmark the sustained post-warmup browser path.
-            const bench = await runForDuration(benchSeconds_, enableProfile_);
+            const picaBefore = { ...globalThis.azaharPicaTrace };
+            await window.azaharProfileStart?.();
+            const guestStartUs = readPerfStats()?.guestTimeUs;
+            let bench;
+            try {
+                bench = await runForDuration(benchSeconds_, enableProfile_);
+            } finally {
+                await window.azaharProfileStop?.();
+            }
             const perfStats = readPerfStats();
             const rendererStats = readRendererStats();
+            const picaTrace = globalThis.azaharPicaTrace ? Object.fromEntries(
+                Object.entries(globalThis.azaharPicaTrace).map(([key, value]) =>
+                    [key, value - (picaBefore[key] || 0)])) : null;
             const heapAfter = Module.HEAPU8 ? Module.HEAPU8.length : 0;
 
             Module._azahar_shutdown();
 
             runs.push({
                 run: rep + 1,
+                scheduler: AzaharScheduler.mode,
+                measuredGuestSpeed: Number.isFinite(guestStartUs) && perfStats ?
+                    (perfStats.guestTimeUs - guestStartUs) / (bench.elapsedMs * 1000) : null,
                 initMs, loadMs,
                 restoredState: stateName_ || null,
                 restore: restoreStats ? { avg: restoreStats.avg, fps: restoreStats.fps,
@@ -500,6 +514,7 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
                 },
                 perfStats,
                 rendererStats,
+                picaTrace,
                 profileSamples: bench.samples,
             });
         }
@@ -577,16 +592,27 @@ async function main() {
     if (profiler) {
         await profiler.send('Profiler.enable');
         await profiler.send('Profiler.setSamplingInterval', {interval: 100});
-        await profiler.send('Profiler.start');
     }
-    let profilerRunning = Boolean(profiler);
+    let profilerRunning = false;
+    let profileNumber = 0;
     const stopProfiler = async () => {
         if (!profilerRunning) return;
         profilerRunning = false;
         const {profile} = await profiler.send('Profiler.stop');
-        fs.writeFileSync(CPU_PROFILE_PATH, JSON.stringify(profile), 'utf-8');
-        await profiler.send('Profiler.disable');
+        const output = profileNumber === 1 ? CPU_PROFILE_PATH :
+            CPU_PROFILE_PATH.replace(/(\.cpuprofile)?$/, `.run${profileNumber}.cpuprofile`);
+        fs.writeFileSync(output, JSON.stringify(profile), 'utf-8');
+        console.log(`   Measured gameplay CPU profile: ${output}`);
     };
+    if (profiler) {
+        await page.exposeFunction('azaharProfileStart', async () => {
+            if (profilerRunning) throw new Error('CPU profiler already running');
+            await profiler.send('Profiler.start');
+            profilerRunning = true;
+            profileNumber++;
+        });
+        await page.exposeFunction('azaharProfileStop', stopProfiler);
+    }
     const consoleErrors = [];
     const debugMessageCounts = new Map();
     page.on('console', msg => {
@@ -809,7 +835,7 @@ async function main() {
                         + `colorful ${(run.restore.visual.colorfulCoverage * 100).toFixed(1)}% `
                         + `renderer=${run.restore.visual.rendererNonblackPixels}`);
                 }
-                console.log(`   Browser rAF: avg ${b.avg.toFixed(2)}ms/callback, `
+                console.log(`   Browser ${run.scheduler}: avg ${b.avg.toFixed(2)}ms/callback, `
                     + `${b.fps.toFixed(1)} callbacks/s`);
                 console.log(`   Stats: p50=${b.p50.toFixed(2)}ms p95=${b.p95.toFixed(2)}ms `
                     + `p99=${b.p99.toFixed(2)}ms σ=${b.stddev.toFixed(2)}ms `
@@ -861,6 +887,9 @@ async function main() {
                     }
                 }
                 console.log(`   Heap: ${(run.heapAfter / 1024 / 1024).toFixed(0)}MB`);
+                if (run.measuredGuestSpeed !== null) {
+                    console.log(`   Whole-window guest speed: ${(run.measuredGuestSpeed * 100).toFixed(1)}%`);
+                }
 
                 allRuns.push({
                     run: allRuns.length + 1,

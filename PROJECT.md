@@ -155,6 +155,11 @@ Fast-forward no longer changes the emulated CPU clock. It requests up to 4x gues
 
 ### Next FPS Work
 
+See `tests/PERFORMANCE.md` for the 2026-09-07 gameplay-only CPU trace, rejected
+4096-entry vertex-cache experiment, and new cross-title state inventory.
+PICA execution accounts for 44.4% of the measured Mario main-thread trace;
+decode/setup is only 0.5%. The larger cache did not improve FPS and was reverted.
+
 1. Use the new persistent save UI to capture repeatable, player-controllable states for Zelda, NSMB2, and The Sims 3. Gate every optimization on the same scenes; boot screens are too light to predict gameplay cost.
 2. Add production OpenGL counters around CPU PICA vertex translation, draw submission, display transfer, cache upload/download, and shader compilation. The existing detailed renderer counters describe the experimental backend and are zero on the default OpenGL path, leaving the current 43 ms Mario GPU-command cost insufficiently attributed.
 3. Fix the generated PICA vertex-shader path on ANGLE/D3D11. It is fast at native resolution but currently produces empty scaled framebuffers, forcing the reliable CPU-vertex path for 2x-4x. A correct generated path removes the largest avoidable CPU graphics stage without reducing visuals.

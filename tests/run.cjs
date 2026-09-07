@@ -126,11 +126,13 @@ if (runRegression) {
     header('Regression'); console.log('  ⊘ Skipped: No ROM found.'); skipped++;
   } else {
     run('Rendering Regression',
-      path.join(TESTS_DIR, 'browser_regression.cjs'), [], { timeout: 120000 });
+      path.join(TESTS_DIR, 'browser_regression.cjs'), [], {
+        timeout: 120000, env: { AZAHAR_RENDERER: artifact },
+      });
     run('Static-host Deployment Regression',
       path.join(TESTS_DIR, 'browser_regression.cjs'), [], {
         timeout: 120000,
-        env: { AZAHAR_STATIC_HOST: '1' },
+        env: { AZAHAR_STATIC_HOST: '1', AZAHAR_RENDERER: artifact },
       });
   }
 }
