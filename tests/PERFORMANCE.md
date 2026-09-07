@@ -48,6 +48,24 @@ Further decode caching and larger index caches do not address the measured cost.
 Even eliminating the measured 44% shader cost alone would not establish 60 FPS
 from this baseline; CPU dispatch and the remaining graphics work also matter.
 
+### Native-clock and WASM SIMD follow-up
+
+The WebGL2 artifact now defaults to a 100% ARM11 clock; the old 25% default
+underclocked the guest and cannot improve real-time emulation. On the Mario W1-1
+fixture, short direct samples improved from 16.80 game FPS / 26.9% whole-window
+guest speed at `?cpuClock=25` to 17.85 FPS / 30.0% at `?cpuClock=100`. The query
+parameter remains available for diagnostics (`10` through `400`), but native
+timing is the production default.
+
+The production WASM builds also use `-msimd128`, verified by disassembly to emit
+SIMD instructions. It passed both renderer artifacts' direct and static-host
+Chrome regressions. Mario's two 10-second clean-reload samples did **not** show a
+repeatable additional guest-speed gain (28.6% then 24.1%, compared with the
+preceding 27.7% and 26.6% samples). Treat SIMD as a browser-native codegen
+baseline that may benefit other codepaths, not as evidence of a Mario PICA
+speedup. Likewise, removing unused unary-instruction operand zeroing preserved
+visual output but was inside the measurement noise band.
+
 ### Scheduler experiment
 
 UI and benchmark now share `web/azahar_scheduler.js`. The default remains RAF;

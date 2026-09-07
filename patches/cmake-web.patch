@@ -1,0 +1,43 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 490963487..669586fd6 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -28,7 +28,12 @@ if (EMSCRIPTEN)
+     # the final link, including bundled libraries such as boost_iostreams.
+     # Emscripten's current spelling is -pthread; its USE_PTHREADS setting is
+     # retained on azahar_web for the installed Unity toolchain.
+-    add_compile_options(-Wno-c++11-narrowing -pthread)
++    # Keep the web artifacts on the browser's native SIMD path.  The PICA
++    # interpreter and software fallback operate on short float/vector arrays
++    # in their hottest loops; without this feature Clang must lower those
++    # operations to scalar WASM even on browsers that support SIMD.
++    add_compile_options(-Wno-c++11-narrowing -pthread -msimd128)
++    add_link_options(-msimd128)
+ endif()
+ 
+ if (CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
+@@ -125,6 +130,24 @@ CMAKE_DEPENDENT_OPTION(ENABLE_LIBUSB "Enable libusb for GameCube Adapter support
+ CMAKE_DEPENDENT_OPTION(ENABLE_SOFTWARE_RENDERER "Enables the software renderer" ON "NOT ANDROID" OFF)
+ CMAKE_DEPENDENT_OPTION(ENABLE_OPENGL "Enables the OpenGL renderer" ${DEFAULT_ENABLE_OPENGL} "NOT APPLE" OFF)
+ option(ENABLE_VULKAN "Enables the Vulkan renderer" ON)
++# WebGL2 is a distinct GLES 3.0 backend.  It intentionally does not reuse the
++# desktop OpenGL renderer: that renderer needs APIs which browsers do not
++# expose.  Keep it opt-in so the proven software web artifact remains the
++# default deployment.
++CMAKE_DEPENDENT_OPTION(ENABLE_WEBGL2_RENDERER "Enables the experimental WebGL2 renderer" OFF
++                       "EMSCRIPTEN;ENABLE_SOFTWARE_RENDERER" OFF)
++# The first PICA slice is intentionally a second opt-in gate. It profiles a
++# small CPU-vertex/GLSL-fragment bridge but does not alter the presentation-only
++# WebGL2 artifact unless a dedicated differential build enables execution.
++CMAKE_DEPENDENT_OPTION(ENABLE_WEBGL2_CPU_VERTEX_SLICE
++                       "Enables the experimental WebGL2 CPU-vertex PICA slice" OFF
++                       "ENABLE_WEBGL2_RENDERER" OFF)
++# Execution remains a separate gate from slice compilation/profiling. The
++# CPU-vertex bridge must not reorder the software fallback until its batch
++# handoff has passed a title differential.
++CMAKE_DEPENDENT_OPTION(ENABLE_WEBGL2_CPU_VERTEX_EXECUTION
++                       "Executes the experimental WebGL2 CPU-vertex PICA slice" OFF
++                       "ENABLE_WEBGL2_RENDERER;ENABLE_WEBGL2_CPU_VERTEX_SLICE" OFF)
+ 
+ option(USE_DISCORD_PRESENCE "Enables Discord Rich Presence" OFF)
+ 

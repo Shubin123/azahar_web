@@ -1,0 +1,764 @@
+diff --git a/src/video_core/shader/shader_interpreter.cpp b/src/video_core/shader/shader_interpreter.cpp
+index cb06a62bc..3cf118324 100644
+--- a/src/video_core/shader/shader_interpreter.cpp
++++ b/src/video_core/shader/shader_interpreter.cpp
+@@ -3,10 +3,9 @@
+ // Refer to the license.txt file included.
+ 
+ #include <algorithm>
++#include <array>
+ #include <cmath>
+-#include <numeric>
+-#include <boost/circular_buffer.hpp>
+-#include <boost/container/static_vector.hpp>
++#include <unordered_map>
+ #include <nihstro/shader_bytecode.h>
+ #include "common/assert.h"
+ #include "common/common_types.h"
+@@ -20,8 +19,6 @@
+ 
+ using nihstro::Instruction;
+ using nihstro::OpCode;
+-using nihstro::RegisterType;
+-using nihstro::SourceRegister;
+ using nihstro::SwizzlePattern;
+ 
+ namespace Pica::Shader {
+@@ -44,42 +41,105 @@ struct LoopStackElement {
+     u8 previous_aL;
+ };
+ 
++struct DecodedInstruction {
++    Instruction instruction{};
++    OpCode::Type type{OpCode::Type::Unknown};
++    OpCode::Id effective_opcode{};
++    std::array<std::array<u8, 4>, 3> selectors{};
++    std::array<u8, 3> sources{};
++    std::array<u8, 3> address_registers{};
++    u8 dest{};
++    u8 dest_mask{};
++    u8 negate_mask{};
++    bool has_second_source{};
++
++    bool DestComponentEnabled(int component) const {
++        return (dest_mask & (0x8u >> component)) != 0;
++    }
++};
++
++struct InterpreterCache {
++    std::array<DecodedInstruction, MAX_PROGRAM_CODE_LENGTH> instructions{};
++    u64 program_hash{};
++    u64 swizzle_hash{};
++    bool valid{};
++};
++
++static thread_local std::unordered_map<const ShaderSetup*, InterpreterCache> interpreter_caches;
++
++static inline f24 Multiply(f24 lhs, f24 rhs) {
++#ifdef __EMSCRIPTEN__
++    // The web wrapper runs with shaders_accurate_mul disabled. Avoid the
++    // float24 helper's two isnan checks for every vertex-shader multiply; the
++    // checks only affect the PICA-specific infinity-times-zero edge case.
++    return f24::FromFloat32(lhs.ToFloat32() * rhs.ToFloat32());
++#else
++    return lhs * rhs;
++#endif
++}
++
++template <typename Operation>
++static inline void WriteMasked(f24* dest, u8 mask, Operation&& operation) {
++    // xyzw is by far the most common PICA destination mask. Keep that path
++    // branch-free and only pay per-component mask tests for partial writes.
++    if (mask == 0xF) {
++        dest[0] = operation(0);
++        dest[1] = operation(1);
++        dest[2] = operation(2);
++        dest[3] = operation(3);
++        return;
++    }
++    for (int component = 0; component < 4; ++component) {
++        if (mask & (0x8u >> component)) {
++            dest[component] = operation(component);
++        }
++    }
++}
++
+ template <bool Debug>
+ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                            DebugData<Debug>& debug_data, unsigned entry_point) {
+-    boost::circular_buffer<IfStackElement> if_stack(8);
+-    boost::circular_buffer<CallStackElement> call_stack(4);
+-    boost::circular_buffer<LoopStackElement> loop_stack(4);
++    // PICA fixes the maximum nesting depths, so stack storage and cursors can
++    // remain entirely in this vertex invocation's stack frame.
++    std::array<IfStackElement, 8> if_stack;
++    std::array<CallStackElement, 4> call_stack;
++    std::array<LoopStackElement, 4> loop_stack;
++    u32 if_stack_size = 0;
++    u32 call_stack_size = 0;
++    u32 loop_stack_size = 0;
+     u32 program_counter = entry_point;
+ 
+     const auto do_if = [&](Instruction instr, bool condition) {
+         if (condition) {
+-            if_stack.push_back({
++            ASSERT(if_stack_size < if_stack.size());
++            if_stack[if_stack_size++] = {
+                 .else_address = instr.flow_control.dest_offset,
+                 .end_address = instr.flow_control.dest_offset + instr.flow_control.num_instructions,
+-            });
++            };
+         } else {
+             program_counter = instr.flow_control.dest_offset - 1;
+         }
+     };
+ 
+     const auto do_call = [&](Instruction instr) {
+-        call_stack.push_back({
++        ASSERT(call_stack_size < call_stack.size());
++        call_stack[call_stack_size++] = {
+             .end_address = instr.flow_control.dest_offset + instr.flow_control.num_instructions,
+             .return_address = program_counter + 1,
+-        });
++        };
+         program_counter = instr.flow_control.dest_offset - 1;
+     };
+ 
+     const auto do_loop = [&](Instruction instr, const Common::Vec4<u8>& loop_param) {
+         const u8 previous_aL = static_cast<u8>(state.address_registers[2]);
+-        loop_stack.push_back({
++        ASSERT(loop_stack_size < loop_stack.size());
++        loop_stack[loop_stack_size++] = {
+             .entry_address = program_counter + 1,
+             .end_address = instr.flow_control.dest_offset + 1,
+             .loop_downcounter = loop_param.x,
+             .address_increment = loop_param.z,
+             .previous_aL = previous_aL,
+-        });
++        };
+         state.address_registers[2] = loop_param.y;
+     };
+ 
+@@ -105,8 +165,8 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+     };
+ 
+     const auto& uniforms = setup.uniforms;
+-    const auto& swizzle_data = setup.GetSwizzleData();
+-    const auto& program_code = setup.GetProgramCode();
++    const auto* cache = static_cast<const InterpreterCache*>(setup.cached_shader);
++    ASSERT(cache && cache->valid);
+ 
+     // Constants for handling invalid inputs
+     static f24 dummy_vec4_float24_zeros[4] = {f24::Zero(), f24::Zero(), f24::Zero(), f24::Zero()};
+@@ -126,32 +186,37 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+         // TODO(PabloMK7): Find how real HW reacts to this, most likely the
+         // program counter wraps around after reaching the last instruction,
+         // but more testing is needed.
+-        Instruction instr{};
++        DecodedInstruction end_instruction{};
++        const DecodedInstruction* decoded;
+         if (program_counter < MAX_PROGRAM_CODE_LENGTH - 1) {
+-            instr.hex = program_code[program_counter];
++            decoded = &cache->instructions[program_counter];
+         } else {
+-            instr.opcode.Assign(OpCode::Id::END);
++            end_instruction.instruction.opcode.Assign(OpCode::Id::END);
++            end_instruction.type = OpCode::Type::Trivial;
++            end_instruction.effective_opcode = OpCode::Id::END;
++            decoded = &end_instruction;
+         }
+ 
+-        const SwizzlePattern swizzle = {swizzle_data[instr.common.operand_desc_id]};
++        const Instruction instr = decoded->instruction;
+ 
+         Record<DebugDataRecord::CUR_INSTR>(debug_data, iteration, program_counter);
+         if (iteration > 0)
+             Record<DebugDataRecord::NEXT_INSTR>(debug_data, iteration - 1, program_counter);
+ 
+-        debug_data.max_offset = std::max<u32>(debug_data.max_offset, 1 + program_counter);
+-
+-        auto LookupSourceRegister = [&](const SourceRegister& source_reg,
+-                                        int address_register_index) -> const f24* {
+-            int index = source_reg.GetIndex();
+-            switch (source_reg.GetRegisterType()) {
+-            case RegisterType::Input:
+-                return &state.input[index].x;
++        if constexpr (Debug) {
++            debug_data.max_offset = std::max<u32>(debug_data.max_offset, 1 + program_counter);
++        }
+ 
+-            case RegisterType::Temporary:
+-                return &state.temporary[index].x;
++        auto LookupSourceRegister = [&](u8 source_reg, u8 address_register_index) -> const f24* {
++            if (source_reg < 0x10) {
++                return &state.input[source_reg].x;
++            }
++            if (source_reg < 0x20) {
++                return &state.temporary[source_reg - 0x10].x;
++            }
+ 
+-            case RegisterType::FloatUniform:
++            int index = source_reg - 0x20;
++            {
+                 if (address_register_index != 0) {
+                     int offset = state.address_registers[address_register_index - 1];
+                     if (offset < std::numeric_limits<s8>::min() ||
+@@ -165,32 +230,26 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                     }
+                 }
+                 return &uniforms.f[index].x;
+-
+-            default:
+-                return dummy_vec4_float24_zeros;
+             }
+         };
+ 
+-        switch (instr.opcode.Value().GetInfo().type) {
++        switch (decoded->type) {
+         case OpCode::Type::Arithmetic: {
+-            const bool is_inverted =
+-                (0 != (instr.opcode.Value().GetInfo().subtype & OpCode::Info::SrcInversed));
+-
+             const f24* src1_ =
+-                LookupSourceRegister(instr.common.GetSrc1(is_inverted),
+-                                     !is_inverted * instr.common.address_register_index);
+-            const f24* src2_ =
+-                LookupSourceRegister(instr.common.GetSrc2(is_inverted),
+-                                     is_inverted * instr.common.address_register_index);
++                LookupSourceRegister(decoded->sources[0], decoded->address_registers[0]);
++            const f24* src2_ = decoded->has_second_source
++                                   ? LookupSourceRegister(decoded->sources[1],
++                                                          decoded->address_registers[1])
++                                   : dummy_vec4_float24_zeros;
+ 
+-            const bool negate_src1 = swizzle.negate_src1.Value() != 0;
+-            const bool negate_src2 = swizzle.negate_src2.Value() != 0;
++            const bool negate_src1 = (decoded->negate_mask & 1) != 0;
++            const bool negate_src2 = (decoded->negate_mask & 2) != 0;
+ 
+             f24 src1[4] = {
+-                src1_[(int)swizzle.src1_selector_0.Value()],
+-                src1_[(int)swizzle.src1_selector_1.Value()],
+-                src1_[(int)swizzle.src1_selector_2.Value()],
+-                src1_[(int)swizzle.src1_selector_3.Value()],
++                src1_[decoded->selectors[0][0]],
++                src1_[decoded->selectors[0][1]],
++                src1_[decoded->selectors[0][2]],
++                src1_[decoded->selectors[0][3]],
+             };
+             if (negate_src1) {
+                 src1[0] = -src1[0];
+@@ -198,39 +257,42 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                 src1[2] = -src1[2];
+                 src1[3] = -src1[3];
+             }
+-            f24 src2[4] = {
+-                src2_[(int)swizzle.src2_selector_0.Value()],
+-                src2_[(int)swizzle.src2_selector_1.Value()],
+-                src2_[(int)swizzle.src2_selector_2.Value()],
+-                src2_[(int)swizzle.src2_selector_3.Value()],
+-            };
+-            if (negate_src2) {
+-                src2[0] = -src2[0];
+-                src2[1] = -src2[1];
+-                src2[2] = -src2[2];
+-                src2[3] = -src2[3];
++            // Unary instructions do not consume src2. Do not zero four f24
++            // values for each vertex invocation merely to satisfy a common
++            // arithmetic staging shape; every opcode that reads src2 has
++            // has_second_source set and initializes all four lanes below.
++            f24 src2[4];
++            if (decoded->has_second_source) {
++                src2[0] = src2_[decoded->selectors[1][0]];
++                src2[1] = src2_[decoded->selectors[1][1]];
++                src2[2] = src2_[decoded->selectors[1][2]];
++                src2[3] = src2_[decoded->selectors[1][3]];
++                if (negate_src2) {
++                    src2[0] = -src2[0];
++                    src2[1] = -src2[1];
++                    src2[2] = -src2[2];
++                    src2[3] = -src2[3];
++                }
+             }
+ 
+-            f24* dest = (instr.common.dest.Value() < 0x10)
+-                            ? &state.output[instr.common.dest.Value().GetIndex()][0]
+-                        : (instr.common.dest.Value() < 0x20)
+-                            ? &state.temporary[instr.common.dest.Value().GetIndex()][0]
++            f24* dest = (decoded->dest < 0x10)
++                            ? &state.output[decoded->dest][0]
++                        : (decoded->dest < 0x20)
++                            ? &state.temporary[decoded->dest - 0x10][0]
+                             : dummy_vec4_float24_zeros;
+ 
+-            debug_data.max_opdesc_id =
+-                std::max<u32>(debug_data.max_opdesc_id, 1 + instr.common.operand_desc_id);
++            if constexpr (Debug) {
++                debug_data.max_opdesc_id =
++                    std::max<u32>(debug_data.max_opdesc_id, 1 + instr.common.operand_desc_id);
++            }
+ 
+-            switch (instr.opcode.Value().EffectiveOpCode()) {
++            switch (decoded->effective_opcode) {
+             case OpCode::Id::ADD: {
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::SRC2>(debug_data, iteration, src2);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
+-                    dest[i] = src1[i] + src2[i];
+-                }
++                WriteMasked(dest, decoded->dest_mask,
++                            [&](int i) { return src1[i] + src2[i]; });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+             }
+@@ -239,12 +301,8 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::SRC2>(debug_data, iteration, src2);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
+-                    dest[i] = src1[i] * src2[i];
+-                }
++                WriteMasked(dest, decoded->dest_mask,
++                            [&](int i) { return Multiply(src1[i], src2[i]); });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+             }
+@@ -252,12 +310,9 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+             case OpCode::Id::FLR:
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
+-                    dest[i] = f24::FromFloat32(std::floor(src1[i].ToFloat32()));
+-                }
++                WriteMasked(dest, decoded->dest_mask, [&](int i) {
++                    return f24::FromFloat32(std::floor(src1[i].ToFloat32()));
++                });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+ 
+@@ -265,15 +320,12 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::SRC2>(debug_data, iteration, src2);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
++                WriteMasked(dest, decoded->dest_mask, [&](int i) {
+                     // NOTE: Exact form required to match NaN semantics to hardware:
+                     //   max(0, NaN) -> NaN
+                     //   max(NaN, 0) -> 0
+-                    dest[i] = (src1[i] > src2[i]) ? src1[i] : src2[i];
+-                }
++                    return (src1[i] > src2[i]) ? src1[i] : src2[i];
++                });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+ 
+@@ -281,15 +333,12 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::SRC2>(debug_data, iteration, src2);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
++                WriteMasked(dest, decoded->dest_mask, [&](int i) {
+                     // NOTE: Exact form required to match NaN semantics to hardware:
+                     //   min(0, NaN) -> NaN
+                     //   min(NaN, 0) -> 0
+-                    dest[i] = (src1[i] < src2[i]) ? src1[i] : src2[i];
+-                }
++                    return (src1[i] < src2[i]) ? src1[i] : src2[i];
++                });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+ 
+@@ -301,19 +350,17 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                 Record<DebugDataRecord::SRC2>(debug_data, iteration, src2);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+ 
+-                OpCode::Id opcode = instr.opcode.Value().EffectiveOpCode();
++                const OpCode::Id opcode = decoded->effective_opcode;
+                 if (opcode == OpCode::Id::DPH || opcode == OpCode::Id::DPHI)
+                     src1[3] = f24::One();
+ 
+                 int num_components = (opcode == OpCode::Id::DP3) ? 3 : 4;
+-                f24 dot = std::inner_product(src1, src1 + num_components, src2, f24::Zero());
+-
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
+-                    dest[i] = dot;
++                f24 dot = f24::Zero();
++                for (int i = 0; i < num_components; ++i) {
++                    dot += Multiply(src1[i], src2[i]);
+                 }
++
++                WriteMasked(dest, decoded->dest_mask, [&](int) { return dot; });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+             }
+@@ -323,12 +370,7 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+                 f24 rcp_res = f24::FromFloat32(1.0f / src1[0].ToFloat32());
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
+-                    dest[i] = rcp_res;
+-                }
++                WriteMasked(dest, decoded->dest_mask, [&](int) { return rcp_res; });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+             }
+@@ -338,12 +380,7 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+                 f24 rsq_res = f24::FromFloat32(1.0f / std::sqrt(src1[0].ToFloat32()));
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
+-                    dest[i] = rsq_res;
+-                }
++                WriteMasked(dest, decoded->dest_mask, [&](int) { return rsq_res; });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+             }
+@@ -351,7 +388,7 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+             case OpCode::Id::MOVA: {
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 for (int i = 0; i < 2; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
++                    if (!decoded->DestComponentEnabled(i))
+                         continue;
+ 
+                     // TODO: Figure out how the rounding is done on hardware
+@@ -365,12 +402,7 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+             case OpCode::Id::MOV: {
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
+-                    dest[i] = src1[i];
+-                }
++                WriteMasked(dest, decoded->dest_mask, [&](int i) { return src1[i]; });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+             }
+@@ -380,12 +412,9 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::SRC2>(debug_data, iteration, src2);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
+-                    dest[i] = (src1[i] >= src2[i]) ? f24::One() : f24::Zero();
+-                }
++                WriteMasked(dest, decoded->dest_mask, [&](int i) {
++                    return (src1[i] >= src2[i]) ? f24::One() : f24::Zero();
++                });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+ 
+@@ -394,12 +423,9 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::SRC2>(debug_data, iteration, src2);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
+-                    dest[i] = (src1[i] < src2[i]) ? f24::One() : f24::Zero();
+-                }
++                WriteMasked(dest, decoded->dest_mask, [&](int i) {
++                    return (src1[i] < src2[i]) ? f24::One() : f24::Zero();
++                });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+ 
+@@ -451,12 +477,7 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+ 
+                 // EX2 only takes first component exp2 and writes it to all dest components
+                 f24 ex2_res = f24::FromFloat32(std::exp2(src1[0].ToFloat32()));
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
+-                    dest[i] = ex2_res;
+-                }
++                WriteMasked(dest, decoded->dest_mask, [&](int) { return ex2_res; });
+ 
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+@@ -468,12 +489,7 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+ 
+                 // LG2 only takes the first component log2 and writes it to all dest components
+                 f24 lg2_res = f24::FromFloat32(std::log2(src1[0].ToFloat32()));
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
+-                    dest[i] = lg2_res;
+-                }
++                WriteMasked(dest, decoded->dest_mask, [&](int) { return lg2_res; });
+ 
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+@@ -491,29 +507,24 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+         }
+ 
+         case OpCode::Type::MultiplyAdd: {
+-            if ((instr.opcode.Value().EffectiveOpCode() == OpCode::Id::MAD) ||
+-                (instr.opcode.Value().EffectiveOpCode() == OpCode::Id::MADI)) {
+-                const SwizzlePattern& mad_swizzle = *reinterpret_cast<const SwizzlePattern*>(
+-                    &swizzle_data[instr.mad.operand_desc_id]);
+-
+-                bool is_inverted = (instr.opcode.Value().EffectiveOpCode() == OpCode::Id::MADI);
+-
+-                const f24* src1_ = LookupSourceRegister(instr.mad.GetSrc1(is_inverted), 0);
++            if ((decoded->effective_opcode == OpCode::Id::MAD) ||
++                (decoded->effective_opcode == OpCode::Id::MADI)) {
++                const f24* src1_ =
++                    LookupSourceRegister(decoded->sources[0], decoded->address_registers[0]);
+                 const f24* src2_ =
+-                    LookupSourceRegister(instr.mad.GetSrc2(is_inverted),
+-                                         !is_inverted * instr.mad.address_register_index);
+-                const f24* src3_ = LookupSourceRegister(
+-                    instr.mad.GetSrc3(is_inverted), is_inverted * instr.mad.address_register_index);
++                    LookupSourceRegister(decoded->sources[1], decoded->address_registers[1]);
++                const f24* src3_ =
++                    LookupSourceRegister(decoded->sources[2], decoded->address_registers[2]);
+ 
+-                const bool negate_src1 = mad_swizzle.negate_src1.Value() != 0;
+-                const bool negate_src2 = mad_swizzle.negate_src2.Value() != 0;
+-                const bool negate_src3 = mad_swizzle.negate_src3.Value() != 0;
++                const bool negate_src1 = (decoded->negate_mask & 1) != 0;
++                const bool negate_src2 = (decoded->negate_mask & 2) != 0;
++                const bool negate_src3 = (decoded->negate_mask & 4) != 0;
+ 
+                 f24 src1[4] = {
+-                    src1_[(int)mad_swizzle.src1_selector_0.Value()],
+-                    src1_[(int)mad_swizzle.src1_selector_1.Value()],
+-                    src1_[(int)mad_swizzle.src1_selector_2.Value()],
+-                    src1_[(int)mad_swizzle.src1_selector_3.Value()],
++                    src1_[decoded->selectors[0][0]],
++                    src1_[decoded->selectors[0][1]],
++                    src1_[decoded->selectors[0][2]],
++                    src1_[decoded->selectors[0][3]],
+                 };
+                 if (negate_src1) {
+                     src1[0] = -src1[0];
+@@ -522,10 +533,10 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                     src1[3] = -src1[3];
+                 }
+                 f24 src2[4] = {
+-                    src2_[(int)mad_swizzle.src2_selector_0.Value()],
+-                    src2_[(int)mad_swizzle.src2_selector_1.Value()],
+-                    src2_[(int)mad_swizzle.src2_selector_2.Value()],
+-                    src2_[(int)mad_swizzle.src2_selector_3.Value()],
++                    src2_[decoded->selectors[1][0]],
++                    src2_[decoded->selectors[1][1]],
++                    src2_[decoded->selectors[1][2]],
++                    src2_[decoded->selectors[1][3]],
+                 };
+                 if (negate_src2) {
+                     src2[0] = -src2[0];
+@@ -534,10 +545,10 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                     src2[3] = -src2[3];
+                 }
+                 f24 src3[4] = {
+-                    src3_[(int)mad_swizzle.src3_selector_0.Value()],
+-                    src3_[(int)mad_swizzle.src3_selector_1.Value()],
+-                    src3_[(int)mad_swizzle.src3_selector_2.Value()],
+-                    src3_[(int)mad_swizzle.src3_selector_3.Value()],
++                    src3_[decoded->selectors[2][0]],
++                    src3_[decoded->selectors[2][1]],
++                    src3_[decoded->selectors[2][2]],
++                    src3_[decoded->selectors[2][3]],
+                 };
+                 if (negate_src3) {
+                     src3[0] = -src3[0];
+@@ -546,22 +557,19 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                     src3[3] = -src3[3];
+                 }
+ 
+-                f24* dest = (instr.mad.dest.Value() < 0x10)
+-                                ? &state.output[instr.mad.dest.Value().GetIndex()][0]
+-                            : (instr.mad.dest.Value() < 0x20)
+-                                ? &state.temporary[instr.mad.dest.Value().GetIndex()][0]
++                f24* dest = (decoded->dest < 0x10)
++                                ? &state.output[decoded->dest][0]
++                            : (decoded->dest < 0x20)
++                                ? &state.temporary[decoded->dest - 0x10][0]
+                                 : dummy_vec4_float24_zeros;
+ 
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::SRC2>(debug_data, iteration, src2);
+                 Record<DebugDataRecord::SRC3>(debug_data, iteration, src3);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!mad_swizzle.DestComponentEnabled(i))
+-                        continue;
+-
+-                    dest[i] = src1[i] * src2[i] + src3[i];
+-                }
++                WriteMasked(dest, decoded->dest_mask, [&](int i) {
++                    return Multiply(src1[i], src2[i]) + src3[i];
++                });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+             } else {
+                 LOG_ERROR(HW_GPU, "Unhandled multiply-add instruction: 0x{:02x} ({}): 0x{:08x}",
+@@ -697,38 +705,40 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+         // old_program_counter + 1 here.
+         u32 next_program_counter = old_program_counter + 1;
+         for (u32 i = 0; i < 4; i++) {
+-            if (call_stack.empty() || call_stack.back().end_address != next_program_counter)
++            if (call_stack_size == 0 ||
++                call_stack[call_stack_size - 1].end_address != next_program_counter)
+                 break;
+             // Hardware bug: when popping four CALL scopes at once, the last
+             // one doesn't update the program counter
+             if (i < 3) {
+-                program_counter = call_stack.back().return_address;
++                program_counter = call_stack[call_stack_size - 1].return_address;
+                 next_program_counter = program_counter;
+             }
+-            call_stack.pop_back();
++            --call_stack_size;
+         }
+ 
+         // The other two stacks can only pop one entry per instruction. They
+         // are checked against the original program counter before any CALL
+         // scopes were closed and they overwrite any previous program counter
+         // updates.
+-        if (!if_stack.empty() && if_stack.back().else_address == old_program_counter + 1) {
+-            program_counter = if_stack.back().end_address;
+-            if_stack.pop_back();
++        if (if_stack_size != 0 &&
++            if_stack[if_stack_size - 1].else_address == old_program_counter + 1) {
++            program_counter = if_stack[if_stack_size - 1].end_address;
++            --if_stack_size;
+         }
+ 
+-        if (!loop_stack.empty() &&
+-            (loop_stack.back().end_address == old_program_counter + 1 || is_break)) {
+-            auto& loop = loop_stack.back();
++        if (loop_stack_size != 0 &&
++            (loop_stack[loop_stack_size - 1].end_address == old_program_counter + 1 || is_break)) {
++            auto& loop = loop_stack[loop_stack_size - 1];
+             state.address_registers[2] += loop.address_increment;
+             if (!is_break && loop.loop_downcounter--) {
+                 program_counter = loop.entry_address;
+             } else {
+                 program_counter = loop.end_address;
+                 // Only restore previous value if there is a surrounding LOOP scope.
+-                if (loop_stack.size() > 1)
++                if (loop_stack_size > 1)
+                     state.address_registers[2] = loop.previous_aL;
+-                loop_stack.pop_back();
++                --loop_stack_size;
+             }
+         }
+     }
+@@ -738,6 +748,84 @@ void InterpreterEngine::SetupBatch(ShaderSetup& setup, unsigned int entry_point)
+     ASSERT(entry_point < MAX_PROGRAM_CODE_LENGTH);
+     setup.DoProgramCodeFixup();
+     setup.entry_point = entry_point;
++
++    const u64 program_hash = setup.GetProgramCodeHash();
++    const u64 swizzle_hash = setup.GetSwizzleDataHash();
++    auto& cache = interpreter_caches[&setup];
++    if (!cache.valid || cache.program_hash != program_hash || cache.swizzle_hash != swizzle_hash) {
++        const auto& program_code = setup.GetProgramCode();
++        const auto& swizzle_data = setup.GetSwizzleData();
++        for (u32 offset = 0; offset < MAX_PROGRAM_CODE_LENGTH; ++offset) {
++            auto& decoded = cache.instructions[offset];
++            decoded.instruction.hex = program_code[offset];
++            const OpCode opcode = decoded.instruction.opcode.Value();
++            const auto& info = opcode.GetInfo();
++            decoded.type = info.type;
++            decoded.effective_opcode = opcode.EffectiveOpCode();
++            decoded.sources.fill(0);
++            decoded.address_registers.fill(0);
++            decoded.dest = 0;
++            decoded.dest_mask = 0;
++            decoded.negate_mask = 0;
++            decoded.has_second_source = false;
++
++            SwizzlePattern swizzle{};
++            if (info.type == OpCode::Type::Arithmetic) {
++                swizzle.hex = swizzle_data[decoded.instruction.common.operand_desc_id];
++                const bool inverted = (info.subtype & OpCode::Info::SrcInversed) != 0;
++                decoded.sources[0] =
++                    static_cast<u8>(decoded.instruction.common.GetSrc1(inverted));
++                decoded.sources[1] =
++                    static_cast<u8>(decoded.instruction.common.GetSrc2(inverted));
++                const u8 address_register = decoded.instruction.common.address_register_index;
++                decoded.address_registers[0] = inverted ? 0 : address_register;
++                decoded.address_registers[1] = inverted ? address_register : 0;
++                decoded.dest = static_cast<u8>(decoded.instruction.common.dest.Value());
++                decoded.has_second_source = (info.subtype & OpCode::Info::Src2) != 0;
++            } else if (info.type == OpCode::Type::MultiplyAdd) {
++                swizzle.hex = swizzle_data[decoded.instruction.mad.operand_desc_id];
++                const bool inverted = decoded.effective_opcode == OpCode::Id::MADI;
++                decoded.sources[0] = static_cast<u8>(decoded.instruction.mad.GetSrc1(inverted));
++                decoded.sources[1] = static_cast<u8>(decoded.instruction.mad.GetSrc2(inverted));
++                decoded.sources[2] = static_cast<u8>(decoded.instruction.mad.GetSrc3(inverted));
++                const u8 address_register = decoded.instruction.mad.address_register_index;
++                decoded.address_registers[1] = inverted ? 0 : address_register;
++                decoded.address_registers[2] = inverted ? address_register : 0;
++                decoded.dest = static_cast<u8>(decoded.instruction.mad.dest.Value());
++                decoded.has_second_source = true;
++            }
++
++            if (info.type == OpCode::Type::Arithmetic ||
++                info.type == OpCode::Type::MultiplyAdd) {
++                decoded.dest_mask = static_cast<u8>(swizzle.dest_mask.Value());
++                decoded.negate_mask = static_cast<u8>(swizzle.negate_src1.Value()) |
++                                      (static_cast<u8>(swizzle.negate_src2.Value()) << 1) |
++                                      (static_cast<u8>(swizzle.negate_src3.Value()) << 2);
++                decoded.selectors[0] = {
++                    static_cast<u8>(swizzle.src1_selector_0.Value()),
++                    static_cast<u8>(swizzle.src1_selector_1.Value()),
++                    static_cast<u8>(swizzle.src1_selector_2.Value()),
++                    static_cast<u8>(swizzle.src1_selector_3.Value()),
++                };
++                decoded.selectors[1] = {
++                    static_cast<u8>(swizzle.src2_selector_0.Value()),
++                    static_cast<u8>(swizzle.src2_selector_1.Value()),
++                    static_cast<u8>(swizzle.src2_selector_2.Value()),
++                    static_cast<u8>(swizzle.src2_selector_3.Value()),
++                };
++                decoded.selectors[2] = {
++                    static_cast<u8>(swizzle.src3_selector_0.Value()),
++                    static_cast<u8>(swizzle.src3_selector_1.Value()),
++                    static_cast<u8>(swizzle.src3_selector_2.Value()),
++                    static_cast<u8>(swizzle.src3_selector_3.Value()),
++                };
++            }
++        }
++        cache.program_hash = program_hash;
++        cache.swizzle_hash = swizzle_hash;
++        cache.valid = true;
++    }
++    setup.cached_shader = &cache;
+ }
+ 
+ MICROPROFILE_DEFINE(GPU_Shader, "GPU", "Shader", MP_RGB(50, 50, 240));

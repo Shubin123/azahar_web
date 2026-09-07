@@ -1,0 +1,649 @@
+diff --git a/src/citra_sdl/emscripten_main.cpp b/src/citra_sdl/emscripten_main.cpp
+index a1f2bea39..3e470551e 100644
+--- a/src/citra_sdl/emscripten_main.cpp
++++ b/src/citra_sdl/emscripten_main.cpp
+@@ -2,7 +2,9 @@
+ // Licensed under GPLv2 or any later version
+ // Emscripten/WebAssembly entry point — replaces citra_sdl.cpp main for web builds.
+ 
++#include <algorithm>
+ #include <cstring>
++#include <iterator>
+ #include <memory>
+ 
+ #ifdef __EMSCRIPTEN__
+@@ -15,6 +17,12 @@
+ #ifdef ENABLE_SOFTWARE_RENDERER
+ #include "citra_sdl/emu_window/emu_window_sdl2_sw.h"
+ #endif
++#ifdef ENABLE_WEBGL2_RENDERER
++#include "citra_sdl/emu_window/emu_window_sdl2_webgl2.h"
++#endif
++#ifdef ENABLE_OPENGL
++#include "citra_sdl/emu_window/emu_window_sdl2_gles.h"
++#endif
+ #include "common/file_util.h"
+ #include "common/logging/backend.h"
+ #include "common/logging/log.h"
+@@ -23,11 +31,15 @@
+ #include "core/core.h"
+ #include "core/frontend/applets/default_applets.h"
+ #include "core/hle/service/service.h"
++#include "core/loader/loader.h"
+ #include "video_core/gpu.h"
+ #include "video_core/renderer_base.h"
+ #ifdef ENABLE_SOFTWARE_RENDERER
+ #include "video_core/renderer_software/renderer_software.h"
+ #endif
++#ifdef ENABLE_WEBGL2_RENDERER
++#include "video_core/renderer_webgl2/renderer_webgl2.h"
++#endif
+ 
+ namespace {
+ 
+@@ -35,11 +47,51 @@ Core::System* g_system = nullptr;
+ std::unique_ptr<EmuWindow_SDL2> g_emu_window;
+ bool g_initialized = false;
+ bool g_rom_loaded = false;
++int g_fast_forward_multiplier = 1;
++#if defined(AZAHAR_WEBGL2_OPENGL) && defined(ENABLE_OPENGL)
++bool g_native_resolution_hw_shader = false;
++#endif
++#ifdef __EMSCRIPTEN__
++bool g_startup_boost = false;
++double g_rom_loaded_at_ms = 0.0;
++double g_speed_last_wall_ms = 0.0;
++double g_speed_target_us = 0.0;
++double g_speed_last_guest_us = 0.0;
++#endif
++
++#if defined(__EMSCRIPTEN__) && defined(AZAHAR_WEBGL2_OPENGL) && defined(ENABLE_OPENGL)
++bool BrowserAllowsHardwareShaders() {
++    return EM_ASM_INT({
++        const canvas = Module.canvas || document.querySelector('#canvas');
++        const gl = canvas?.getContext('webgl2');
++        if (!gl) return 0;
++        const override = new URLSearchParams(location.search).get('hwShader');
++        if (override === '1') return 1;
++        if (override === '0') return 0;
++        const ext = gl.getExtension('WEBGL_debug_renderer_info');
++        const renderer = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : '';
++        console.info('[Azahar] WebGL renderer: ' + (renderer || 'masked/unknown'));
++        // Acceleration is the web default. Some ANGLE/D3D drivers currently
++        // accept the generated PICA shader but fail to produce vertex output;
++        // the UI's visible-frame watchdog then restarts in the software
++        // artifact. `?hwShader=0` remains an explicit compatibility escape.
++        return 1;
++    });
++}
++
++int BrowserCpuClockPercent() {
++    return EM_ASM_INT({
++        const requested = Number.parseInt(new URLSearchParams(location.search).get('cpuClock'), 10);
++        return Number.isInteger(requested) && requested >= 10 && requested <= 400 ? requested : 100;
++    });
++}
++#endif
+ 
+ } // anonymous namespace
+ 
+ /// One-time initialization of the emulator core and software renderer window.
+-/// Returns 0 on success, non-zero on failure.
++/// Returns 0 on success. Loader failures use distinct negative codes so the
++/// browser does not describe a missing file as encrypted (-8 is encryption).
+ extern "C" int azahar_init() {
+     if (g_initialized) {
+         LOG_WARNING(Frontend, "azahar_init called but already initialized");
+@@ -61,10 +113,46 @@ extern "C" int azahar_init() {
+     // MEMFS for this browser session.
+     SdlConfig web_config;
+ 
+-    // Override desktop-only defaults after loading the configuration.
++    // Override desktop-only defaults after loading the configuration. The
++    // stable artifact remains software-only; the separately named WebGL2
++    // artifact selects its own backend before a title can claim the canvas.
++#if defined(AZAHAR_WEBGL2_OPENGL) && defined(ENABLE_OPENGL)
++    Settings::values.graphics_api.SetValue(Settings::GraphicsAPI::OpenGL);
++    // Select hardware vertex execution after SDL has created a WebGL context.
++    // Acceleration is attempted first; the browser UI owns fallback policy.
++    Settings::values.use_hw_shader.SetValue(false);
++    // The normal multiply path is the mobile default and avoids unnecessary
++    // NaN-sanitization work if a title selects a generated helper shader.
++    Settings::values.shaders_accurate_mul.SetValue(false);
++    // Avoid compiling heavyweight optional upscalers in ANGLE and preserve
++    // the game's native texture detail. Presentation uses the inexpensive
++    // linear screen sampler below rather than a post-processing shader.
++    Settings::values.texture_filter.SetValue(Settings::TextureFilter::NoFilter);
++    Settings::values.pp_shader_name.SetValue("None (builtin)");
++    Settings::values.filter_mode.SetValue(true);
++    // Preserve the native ARM11 timing. The browser work budget governs when
++    // control returns to the compositor; underclocking the guest merely slows
++    // games and was measurably worse on the Mario gameplay fixture.
++    Settings::values.cpu_clock_percentage.SetValue(BrowserCpuClockPercent());
++#elif defined(AZAHAR_WEBGL2_EXPERIMENTAL) && defined(ENABLE_WEBGL2_RENDERER)
++    Settings::values.graphics_api.SetValue(Settings::GraphicsAPI::WebGL2);
++#if defined(ENABLE_WEBGL2_CPU_VERTEX_EXECUTION)
++    // PicaCore only offers CPU vertex output to an accelerated rasterizer when
++    // this setting is enabled. Keep it scoped to the explicitly experimental
++    // artifact and execution gate; the presentation-only WebGL2 build and the
++    // stable software artifact must retain their existing dispatch behavior.
++    Settings::values.use_hw_shader.SetValue(true);
++#endif
++#else
+     Settings::values.graphics_api.SetValue(Settings::GraphicsAPI::Software);
++#endif
+     Settings::values.use_cpu_jit.SetValue(false);
+ #ifdef __EMSCRIPTEN__
++    // State restoration recreates SDL's deprecated ScriptProcessor device
++    // with a zero-sized expected buffer, after which every 512-sample browser
++    // callback raises an asynchronous error. Keep both web renderers silent
++    // until the frontend supplies an AudioWorklet-backed sink.
++    Settings::values.output_type.SetValue(AudioCore::SinkType::Null);
+     // The browser's requestAnimationFrame loop is the presentation clock.
+     // Keeping the native 100% frame limiter enabled makes RunLoop sleep on
+     // the browser main thread as well, wasting its bounded frame budget and
+@@ -87,10 +175,34 @@ extern "C" int azahar_init() {
+     // GPU and emulated services for the selected title.
+     g_system->ApplySettings();
+ 
+-#ifdef ENABLE_SOFTWARE_RENDERER
+     Frontend::RegisterDefaultApplets(*g_system);
+     EmuWindow_SDL2::InitializeSDL2();
+ 
++    // Each artifact claims the production canvas exactly once. In particular,
++    // the WebGL2 path must not construct the SDL software window first: a 2D
++    // canvas cannot later become a WebGL2 canvas.
++#if defined(AZAHAR_WEBGL2_OPENGL) && defined(ENABLE_OPENGL)
++    g_emu_window = std::make_unique<EmuWindow_SDL2_GLES>(*g_system, false, false);
++    if (!g_emu_window->IsOpen()) {
++        LOG_ERROR(Frontend, "WebGL2 GLES context setup failed");
++        g_emu_window.reset();
++        return -7;
++    }
++    g_native_resolution_hw_shader = BrowserAllowsHardwareShaders();
++    Settings::values.use_hw_shader.SetValue(g_native_resolution_hw_shader);
++#elif defined(AZAHAR_WEBGL2_EXPERIMENTAL) && defined(ENABLE_WEBGL2_RENDERER)
++    g_emu_window = std::make_unique<EmuWindow_SDL2_WebGL2>(*g_system, false, false);
++    if (!static_cast<EmuWindow_SDL2_WebGL2*>(g_emu_window.get())->IsReady()) {
++        LOG_ERROR(Frontend, "WebGL2 context setup failed; restart with the software artifact");
++        g_emu_window.reset();
++        return -7;
++    }
++    if (!WebGL2::PreflightContext()) {
++        LOG_ERROR(Frontend, "WebGL2 GLSL preflight failed; restart with the software artifact");
++        g_emu_window.reset();
++        return -7;
++    }
++#elif defined(ENABLE_SOFTWARE_RENDERER)
+     // Create the software-rendered window (no fullscreen on web, not secondary)
+     g_emu_window = std::make_unique<EmuWindow_SDL2_SW>(*g_system, false, false);
+ #else
+@@ -136,12 +248,25 @@ extern "C" int azahar_load_rom(const char* path) {
+ 
+     const auto scope = g_emu_window->Acquire();
+ 
+-    const Core::System::ResultStatus load_result{
+-        g_system->Load(*g_emu_window, std::string(path))};
++    const Core::System::ResultStatus load_result{g_system->Load(*g_emu_window, std::string(path))};
+ 
+     switch (load_result) {
+     case Core::System::ResultStatus::Success:
++#if defined(AZAHAR_WEBGL2_EXPERIMENTAL) && defined(ENABLE_WEBGL2_RENDERER) && !defined(AZAHAR_WEBGL2_OPENGL)
++        // Renderer construction happens as part of System::Load. A baseline
++        // GLSL ES 3.00 failure must be reported before any emulation frame or
++        // title presentation; the bootstrap then starts a fresh software
++        // session rather than swapping canvas backends in place.
++        if (!static_cast<const WebGL2::RendererWebGL2&>(g_system->GPU().Renderer()).IsUsable()) {
++            LOG_ERROR(Frontend, "WebGL2 renderer initialization failed before title start");
++            return -7;
++        }
++#endif
+         g_rom_loaded = true;
++#ifdef __EMSCRIPTEN__
++        g_startup_boost = true;
++        g_rom_loaded_at_ms = emscripten_get_now();
++#endif
+         LOG_INFO(Frontend, "azahar_load_rom OK");
+         return 0;
+     case Core::System::ResultStatus::ErrorGetLoader:
+@@ -152,7 +277,7 @@ extern "C" int azahar_load_rom(const char* path) {
+         return -3;
+     case Core::System::ResultStatus::ErrorLoader_ErrorEncrypted:
+         LOG_CRITICAL(Frontend, "ROM is encrypted and must be decrypted first.");
+-        return -4;
++        return -8;
+     case Core::System::ResultStatus::ErrorLoader_ErrorInvalidFormat:
+         LOG_CRITICAL(Frontend, "ROM format is not supported.");
+         return -3;
+@@ -173,8 +298,21 @@ extern "C" int azahar_step_frame() {
+         return -2;
+     }
+ 
+-    // Poll SDL events (required for Emscripten SDL event pump)
++    // Poll SDL events (required for Emscripten SDL event pump).  The web
++    // window is always one of the concrete SDL2 implementations below.  Use
++    // a qualified call here instead of dispatching through the virtual table:
++    // with LTO/Emscripten, the table entry can be stripped when the renderer
++    // is built in a separately named artifact, yielding an intermittent
++    // `null function` trap immediately after loading a save state.
++#if defined(AZAHAR_WEBGL2_OPENGL) && defined(ENABLE_OPENGL)
++    static_cast<EmuWindow_SDL2*>(g_emu_window.get())->EmuWindow_SDL2::PollEvents();
++#elif defined(AZAHAR_WEBGL2_EXPERIMENTAL) && defined(ENABLE_WEBGL2_RENDERER)
++    static_cast<EmuWindow_SDL2*>(g_emu_window.get())->EmuWindow_SDL2::PollEvents();
++#elif defined(ENABLE_SOFTWARE_RENDERER)
++    static_cast<EmuWindow_SDL2*>(g_emu_window.get())->EmuWindow_SDL2::PollEvents();
++#else
+     g_emu_window->PollEvents();
++#endif
+ 
+     if (!g_emu_window->IsOpen()) {
+         return 1; // shutdown requested
+@@ -193,14 +331,48 @@ extern "C" int azahar_step_frame() {
+     // slices lets the dyncom interpreter make meaningful progress during
+     // each ~16.7 ms display callback while the deadline keeps the tab
+     // responsive for input and painting.
+-    constexpr int max_slices_per_tick = 20;
+-    const double deadline_ms = emscripten_get_now() + 14.0;
++    const double now_ms = emscripten_get_now();
++    // Cold interpreter boot benefits from a short burst that may span a
++    // display interval. Save-state gameplay uses the lower steady-state
++    // budget, and the boost expires so a title can never retain it
++    // indefinitely.
++    const bool use_startup_boost =
++        g_startup_boost && now_ms - g_rom_loaded_at_ms < 40'000.0;
++    // Cold boot has not populated translated CPU blocks yet. Keep its first
++    // callbacks short enough for the browser to service input and paint. A
++    // restored state disables startup_boost and gets full throughput at once.
++    const bool cold_translation_warmup =
++        use_startup_boost && now_ms - g_rom_loaded_at_ms < 2'000.0;
++    const double guest_us = g_system->CoreTiming().GetGlobalTimeUs().count();
++    const double wall_delta = now_ms - g_speed_last_wall_ms;
++    if (g_speed_last_wall_ms == 0.0 || wall_delta > 250.0 ||
++        guest_us < g_speed_last_guest_us || guest_us > g_speed_target_us + 250'000.0) {
++        g_speed_target_us = guest_us;
++    }
++    // A non-blocking guest-time limiter: 1x targets real time, 4x targets
++    // four guest seconds per wall second. Never underclock the guest CPU or
++    // extend main-thread batches when the machine cannot meet that target.
++    const double target_increment_us = std::clamp(wall_delta, 0.0, 100.0) * 1000.0 *
++                                       g_fast_forward_multiplier;
++    // Never accumulate missed guest time as debt. A slow gameplay scene may
++    // be unable to reach its target, but entering a lighter scene afterwards
++    // must resume at the selected speed rather than consume old backlog.
++    const double max_target_lead_us = 100'000.0 * g_fast_forward_multiplier;
++    g_speed_target_us = std::min(std::max(g_speed_target_us, guest_us) + target_increment_us,
++                                 guest_us + max_target_lead_us);
++    g_speed_last_wall_ms = now_ms;
++    const int max_slices_per_tick = cold_translation_warmup ? 8 : 256;
++    const double deadline_ms = now_ms + (use_startup_boost ? 18.0 : 14.0);
+     for (int slice = 0; slice < max_slices_per_tick && emscripten_get_now() < deadline_ms;
+          ++slice) {
+         result = g_system->RunLoop();
+         if (result != Core::System::ResultStatus::Success) {
+             break;
+         }
++        g_speed_last_guest_us = g_system->CoreTiming().GetGlobalTimeUs().count();
++        if (g_speed_last_guest_us >= g_speed_target_us) {
++            break;
++        }
+     }
+ #else
+     result = g_system->RunLoop();
+@@ -217,23 +389,42 @@ extern "C" int azahar_step_frame() {
+         return -3;
+     }
+ 
+-    // Present single frame (non-blocking for Emscripten)
++    // Present single frame (non-blocking for Emscripten).  Keep this
++    // dispatch explicit for the same reason as PollEvents above; it also
++    // avoids a second LTO-pruned virtual call at the end of a restored frame.
++#if defined(AZAHAR_WEBGL2_OPENGL) && defined(ENABLE_OPENGL)
++    static_cast<EmuWindow_SDL2_GLES*>(g_emu_window.get())->EmuWindow_SDL2_GLES::Present();
++#elif defined(AZAHAR_WEBGL2_EXPERIMENTAL) && defined(ENABLE_WEBGL2_RENDERER)
++    static_cast<EmuWindow_SDL2_WebGL2*>(g_emu_window.get())->EmuWindow_SDL2_WebGL2::Present();
++#elif defined(ENABLE_SOFTWARE_RENDERER)
++    static_cast<EmuWindow_SDL2_SW*>(g_emu_window.get())->EmuWindow_SDL2_SW::Present();
++#else
+     g_emu_window->Present();
++#endif
+ 
+     return 0;
+ }
+ 
+-/// Return the number of non-black pixels held by the software renderer's
+-/// primary displays. This is intentionally small diagnostic surface for the
+-/// browser regression: it separates core rendering failures from SDL/canvas
+-/// presentation failures without copying a framebuffer into JavaScript.
++/// Return the number of non-black pixels held by the active renderer's primary
++/// displays. This deliberately small diagnostic separates core rendering
++/// failures from canvas presentation failures without copying a framebuffer
++/// into JavaScript.
+ extern "C" int azahar_framebuffer_nonblack_pixels() {
+-#ifdef ENABLE_SOFTWARE_RENDERER
+     if (!g_initialized || !g_system) {
+         return -1;
+     }
+ 
+-    const auto& renderer = static_cast<const SwRenderer::RendererSoftware&>(g_system->GPU().Renderer());
++#if defined(AZAHAR_WEBGL2_OPENGL) && defined(ENABLE_OPENGL)
++    return -2;
++#elif defined(AZAHAR_WEBGL2_EXPERIMENTAL) && defined(ENABLE_WEBGL2_RENDERER)
++    // A CPU-side ScreenInfo vector is not a synchronized view of the optional
++    // GPU-resident framebuffer. Reading it while the WebGL bridge owns the
++    // surface is both misleading and unsafe; browser compositor capture is
++    // the WebGL2 presentation diagnostic instead.
++    return -2;
++#elif defined(ENABLE_SOFTWARE_RENDERER)
++    const auto& renderer =
++        static_cast<const SwRenderer::RendererSoftware&>(g_system->GPU().Renderer());
+     int nonblack_pixels{};
+     for (const auto screen_id : {VideoCore::ScreenId::TopLeft, VideoCore::ScreenId::Bottom}) {
+         const auto& pixels = renderer.Screen(screen_id).pixels;
+@@ -249,6 +440,20 @@ extern "C" int azahar_framebuffer_nonblack_pixels() {
+ #endif
+ }
+ 
++/// Clear PICA-operation accounting after a state restore. This lets a browser
++/// differential measure the same gameplay interval rather than ROM boot work.
++extern "C" int azahar_reset_renderer_stats() {
++    if (!g_initialized || !g_system || !g_rom_loaded) {
++        return -2;
++    }
++
++#if defined(AZAHAR_WEBGL2_EXPERIMENTAL) && defined(ENABLE_WEBGL2_RENDERER) && !defined(AZAHAR_WEBGL2_OPENGL)
++    auto& renderer = static_cast<WebGL2::RendererWebGL2&>(g_system->GPU().Renderer());
++    renderer.ResetPicaStats();
++#endif
++    return 0;
++}
++
+ /// Queue a save-state operation for the next emulation slice. Serialization
+ /// remains inside RunLoop, so it cannot race active emulation or input.
+ extern "C" int azahar_save_state(int slot) {
+@@ -263,9 +468,94 @@ extern "C" int azahar_load_state(int slot) {
+     if (!g_initialized || !g_rom_loaded || !g_system || slot < 0 || slot > 10) {
+         return -1;
+     }
++#ifdef __EMSCRIPTEN__
++    g_startup_boost = false;
++#endif
+     return g_system->SendSignal(Core::System::Signal::Load, static_cast<u32>(slot)) ? 0 : -2;
+ }
+ 
++/// State operation acknowledgement: 0 is complete/idle, 1 is saving and 2 is loading.
++/// A queued request remains visible while the kernel finishes async work.
++extern "C" int azahar_get_state_operation() {
++    if (!g_initialized || !g_rom_loaded || !g_system) {
++        return -1;
++    }
++    switch (g_system->GetSaveStateOperationStatus()) {
++    case Core::System::SaveStateStatus::SAVING:
++        return 1;
++    case Core::System::SaveStateStatus::LOADING:
++        return 2;
++    case Core::System::SaveStateStatus::NONE:
++    default:
++        return 0;
++    }
++}
++
++/// Return the running title's 64-bit program ID as two little-endian u32
++/// words. JavaScript uses this stable ID to isolate persistent save slots for
++/// games that happen to have the same local filename.
++extern "C" int azahar_get_program_id(u32* out_words, int word_count) {
++    if (!g_initialized || !g_rom_loaded || !g_system || !out_words || word_count < 2) {
++        return -1;
++    }
++    u64 program_id{};
++    if (g_system->GetAppLoader().ReadProgramId(program_id) != Loader::ResultStatus::Success) {
++        return -2;
++    }
++    out_words[0] = static_cast<u32>(program_id);
++    out_words[1] = static_cast<u32>(program_id >> 32);
++    return 0;
++}
++
++/// Increase the amount of emulated work completed between browser paints.
++/// This is intentionally independent of the emulated ARM clock percentage:
++/// fast-forward advances time sooner without changing guest hardware timing.
++extern "C" int azahar_set_fast_forward(int multiplier) {
++    if (!g_initialized || multiplier < 1 || multiplier > 4) {
++        return -1;
++    }
++    g_fast_forward_multiplier = multiplier;
++    g_speed_last_wall_ms = 0.0;
++    return multiplier;
++}
++
++extern "C" int azahar_get_fast_forward() {
++    return g_initialized ? g_fast_forward_multiplier : -1;
++}
++
++/// Select the accelerated renderer's internal resolution multiplier. The
++/// rasterizer cache observes this setting at its next frame boundary and
++/// recreates scaled surfaces. Software rendering is intentionally native-only.
++extern "C" int azahar_set_resolution_scale(int scale) {
++    if (!g_initialized || scale < 1 || scale > 4) {
++        return -1;
++    }
++    if (Settings::values.graphics_api.GetValue() == Settings::GraphicsAPI::Software) {
++        Settings::values.resolution_factor.SetValue(1);
++        return 1;
++    }
++#if defined(AZAHAR_WEBGL2_OPENGL) && defined(ENABLE_OPENGL)
++    // ANGLE/D3D accepts the generated PICA vertex shaders at scaled
++    // resolutions but produces an empty framebuffer. Keep the accelerated
++    // OpenGL rasterizer and scaled render targets, while using the proven CPU
++    // vertex path above native resolution. Returning to 1x restores the
++    // adapter's preferred generated-shader fast path.
++    Settings::values.use_hw_shader.SetValue(scale == 1 && g_native_resolution_hw_shader);
++#endif
++    Settings::values.resolution_factor.SetValue(static_cast<u32>(scale));
++    return scale;
++}
++
++extern "C" int azahar_get_resolution_scale() {
++    if (!g_initialized) {
++        return -1;
++    }
++    if (Settings::values.graphics_api.GetValue() == Settings::GraphicsAPI::Software) {
++        return 1;
++    }
++    return static_cast<int>(Settings::values.resolution_factor.GetValue());
++}
++
+ /// Write performance counters into a caller-allocated buffer of 8 doubles.
+ /// Returns 0 on success, negative on error.
+ /// Buffer layout (8 × f64):
+@@ -295,6 +585,139 @@ extern "C" int azahar_get_perf_stats(double* out_buffer, int buffer_size) {
+     out_buffer[5] = stats.time_vblank_interval;
+     out_buffer[6] = g_system->perf_stats ? g_system->perf_stats->GetMeanFrametime() : 0.0;
+     out_buffer[7] = Settings::values.frame_limit.GetValue();
++    if (buffer_size >= 11) {
++        out_buffer[8] = Settings::values.cpu_clock_percentage.GetValue();
++        out_buffer[9] = g_fast_forward_multiplier;
++        out_buffer[10] = g_rom_loaded ? g_system->CoreTiming().GetGlobalTimeUs().count() : 0.0;
++    }
++
++    return 0;
++}
++
++/// Write backend-stage accounting into a caller-allocated buffer of at least 10 doubles.
++/// This is intentionally separate from azahar_get_perf_stats(): timings answer
++/// where time is spent, while these counters prove whether a WebGL2 PICA slice
++/// actually handled guest work or fell back to software.
++///
++/// Buffer layout (10 required x f64, 14 + profile-feature-count optional x f64):
++///   [0] renderer kind (0 = software, 1 = WebGL2)
++///   [1] highest PICA acceleration stage
++///   [2] accelerated PICA draw batches
++///   [3] hardware draw attempts offered by PicaCore
++///   [4] software draw batches
++///   [5] software triangles
++///   [6] indexed hardware draw attempts
++///   [7] display-transfer acceleration attempts
++///   [8] texture-copy acceleration attempts
++///   [9] memory-fill acceleration attempts
++///   [10] CPU-vertex/GPU-fragment candidate batches (optional)
++///   [11] triangles offered to that narrow candidate path (optional)
++///   [12] batches rejected by its PICA-state gate (optional)
++///   [13] candidate batches that failed before guest-memory writeback (optional)
++///   [14] OR-ed CPU-vertex state-rejection categories observed (optional)
++///   [15..19] rejection batch counts for framebuffer, output merger,
++///            texturing, rasterizer, and pipeline state (optional)
++///   [20] total input vertices offered by profile batches (optional)
++///   [21] largest input-vertex count of a profile batch (optional)
++///   [22] most frequent exact state-rejection mask (optional)
++///   [23] number of batches with that mask (optional)
++///   [24...] per-feature W1-1 profile counts in CpuVertexProfileFeature order
++///           (optional; observational only and never an acceleration claim)
++extern "C" int azahar_get_renderer_stats(double* out_buffer, int buffer_size) {
++    if (!out_buffer || buffer_size < 10) {
++        return -1;
++    }
++    if (!g_initialized || !g_system || !g_rom_loaded) {
++        return -2;
++    }
++
++    // The first ten doubles are the stable ABI, but callers may request the
++    // optional profile suffix. Clear every requested slot so a smaller later
++    // stats payload cannot leave stale diagnostics in a reused buffer.
++    for (int index = 0; index < buffer_size; ++index) {
++        out_buffer[index] = 0.0;
++    }
++
++#if defined(AZAHAR_WEBGL2_OPENGL) && defined(ENABLE_OPENGL)
++    // The GLES/OpenGL path has no PICA fallback counters; identify it so
++    // browser diagnostics can distinguish hardware presentation from the
++    // software-backed WebGL2 bridge.
++    out_buffer[0] = 2.0;
++#elif defined(AZAHAR_WEBGL2_EXPERIMENTAL) && defined(ENABLE_WEBGL2_RENDERER)
++    const auto& renderer = static_cast<const WebGL2::RendererWebGL2&>(g_system->GPU().Renderer());
++    const auto& stats = renderer.PicaStats();
++    out_buffer[0] = 1.0;
++    out_buffer[1] = static_cast<u32>(renderer.PicaStage());
++    out_buffer[2] = static_cast<double>(stats.accelerated_draw_batches);
++    out_buffer[3] = static_cast<double>(stats.hardware_draw_attempts);
++    out_buffer[4] = static_cast<double>(stats.software_draw_batches);
++    out_buffer[5] = static_cast<double>(stats.software_triangles);
++    out_buffer[6] = static_cast<double>(stats.indexed_draw_attempts);
++    out_buffer[7] = static_cast<double>(stats.display_transfer_attempts);
++    out_buffer[8] = static_cast<double>(stats.texture_copy_attempts);
++    out_buffer[9] = static_cast<double>(stats.fill_attempts);
++    if (buffer_size >= 14) {
++        out_buffer[10] = static_cast<double>(stats.cpu_vertex_candidate_batches);
++        out_buffer[11] = static_cast<double>(stats.cpu_vertex_candidate_triangles);
++        out_buffer[12] = static_cast<double>(stats.cpu_vertex_rejected_batches);
++        out_buffer[13] = static_cast<double>(stats.cpu_vertex_bridge_failures);
++    }
++    if (buffer_size >= 15) {
++        out_buffer[14] = static_cast<double>(stats.cpu_vertex_rejection_mask);
++    }
++    if (buffer_size >= 22) {
++        for (std::size_t bit = 0; bit < stats.cpu_vertex_rejection_bit_counts.size(); ++bit) {
++            out_buffer[15 + bit] = static_cast<double>(stats.cpu_vertex_rejection_bit_counts[bit]);
++        }
++        out_buffer[20] = static_cast<double>(stats.cpu_vertex_profile_vertices);
++        out_buffer[21] = static_cast<double>(stats.cpu_vertex_profile_max_vertices);
++    }
++    if (buffer_size >= 24) {
++        const auto modal = std::max_element(stats.cpu_vertex_rejection_mask_counts.begin(),
++                                            stats.cpu_vertex_rejection_mask_counts.end());
++        out_buffer[22] = static_cast<double>(
++            std::distance(stats.cpu_vertex_rejection_mask_counts.begin(), modal));
++        out_buffer[23] = static_cast<double>(*modal);
++    }
++    if (buffer_size >= 24 + static_cast<int>(WebGL2::CpuVertexProfileFeatureCount)) {
++        for (std::size_t feature = 0; feature < stats.cpu_vertex_profile_feature_counts.size();
++             ++feature) {
++            out_buffer[24 + feature] =
++                static_cast<double>(stats.cpu_vertex_profile_feature_counts[feature]);
++        }
++    }
++    constexpr int bridgeDiagBase = 24 + static_cast<int>(WebGL2::CpuVertexProfileFeatureCount);
++    if (buffer_size >= bridgeDiagBase + 5) {
++        for (std::size_t i = 0; i < stats.cpu_vertex_bridge_fail_counts.size(); ++i) {
++            out_buffer[bridgeDiagBase + i] =
++                static_cast<double>(stats.cpu_vertex_bridge_fail_counts[i]);
++        }
++    }
++    if (buffer_size >= bridgeDiagBase + 6) {
++        out_buffer[bridgeDiagBase + 5] =
++            static_cast<double>(stats.cpu_vertex_bridge_success_count);
++    }
++    if (buffer_size >= bridgeDiagBase + 7) {
++        out_buffer[bridgeDiagBase + 6] =
++            static_cast<double>(stats.cpu_vertex_bridge_last_gl_error);
++    }
++    if (buffer_size >= bridgeDiagBase + 8) {
++        out_buffer[bridgeDiagBase + 7] =
++            static_cast<double>(stats.cpu_vertex_bridge_fail_pre_draw);
++    }
++    if (buffer_size >= bridgeDiagBase + 9) {
++        out_buffer[bridgeDiagBase + 8] =
++            static_cast<double>(stats.cpu_vertex_bridge_fail_fbo);
++    }
++    if (buffer_size >= bridgeDiagBase + 10) {
++        out_buffer[bridgeDiagBase + 9] =
++            static_cast<double>(stats.cpu_vertex_bridge_last_vertex_count);
++    }
++    if (buffer_size >= bridgeDiagBase + 11) {
++        out_buffer[bridgeDiagBase + 10] =
++            static_cast<double>(stats.cpu_vertex_bridge_fail_step);
++    }
++#endif
+ 
+     return 0;
+ }
+@@ -303,18 +726,50 @@ extern "C" int azahar_get_perf_stats(double* out_buffer, int buffer_size) {
+ extern "C" void azahar_shutdown() {
+     LOG_INFO(Frontend, "azahar_shutdown");
+ 
++    // The web UI initializes the core before a ROM is selected. Emscripten's
++    // SDL WebGL context cannot be destroyed and recreated safely in that
++    // pre-ROM phase (the SDL shim traps on the unaligned context handle).
++    // Keep the initialized window for the subsequent ROM load; a loaded
++    // title still follows the full renderer teardown below.
++    if (!g_rom_loaded) {
++        return;
++    }
++
++    // The WebGL2 renderer owns GL objects and must release them while the
++    // browser context still belongs to its SDL window. The software artifact
++    // keeps its existing teardown order unchanged.
++#if (defined(AZAHAR_WEBGL2_OPENGL) && defined(ENABLE_OPENGL)) || (defined(AZAHAR_WEBGL2_EXPERIMENTAL) && defined(ENABLE_WEBGL2_RENDERER))
++    // Before a ROM is loaded no renderer owns the context yet; tear down the
++    // SDL window first so a repeated UI init/shutdown cycle cannot walk an
++    // unaligned, half-constructed graphics object. Once a title is active,
++    // destroy the renderer while its context is still current.
++    if (g_rom_loaded && g_system) {
++        g_system->Shutdown();
++    }
++    if (g_emu_window) {
++        g_emu_window.reset();
++    }
++    if (!g_rom_loaded && g_system) {
++        g_system->Shutdown();
++    }
++#else
+     if (g_emu_window) {
+         g_emu_window.reset();
+     }
+-
+     if (g_system) {
+         g_system->Shutdown();
+     }
++#endif
+ 
+     Common::Log::Stop();
+ 
+     g_initialized = false;
+     g_rom_loaded = false;
++    g_fast_forward_multiplier = 1;
++#ifdef __EMSCRIPTEN__
++    g_startup_boost = false;
++    g_rom_loaded_at_ms = 0.0;
++#endif
+     g_system = nullptr;
+ }
+ 
