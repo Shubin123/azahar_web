@@ -21,7 +21,7 @@ Open `http://localhost:8765` in Chrome, then load a **decrypted** `.3ds` ROM fil
 
 ### Deploy to GitHub Pages
 
-The `web/` folder is self-contained. Enable GitHub Pages pointed at the repo root or the `web/` directory. The included `coi-serviceworker.js` handles the required cross-origin isolation headers automatically on static hosts. The single `index.html` page provides Auto, accelerated WebGL2, and compatibility renderer modes; switching modes performs the fresh-page reload required by browser canvas contexts.
+The `web/` folder is self-contained and `.github/workflows/pages.yml` publishes it on every relevant `main` push. The included `coi-serviceworker.js` handles the required cross-origin isolation headers automatically on static hosts. The single `index.html` page provides Auto, accelerated WebGL2, and compatibility renderer modes plus 1x-4x internal-resolution scaling; switching renderers performs the fresh-page reload required by browser canvas contexts.
 
 ## What's Included
 

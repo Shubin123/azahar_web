@@ -36,6 +36,8 @@
     const logEl = document.getElementById('log');
     const rendererMode = document.getElementById('renderer-mode');
     const rendererModeHelp = document.getElementById('renderer-mode-help');
+    const resolutionScale = document.getElementById('resolution-scale');
+    const resolutionScaleHelp = document.getElementById('resolution-scale-help');
 
     // ── State ─────────────────────────────────────────────────────
     let wasmModule = null;
@@ -57,6 +59,38 @@
     let lastFrameCount = 0;
     let displayFps = 0;
     let emulationSpeed = 0;
+    const resolutionQuery = new URLSearchParams(location.search).get('resolution');
+    let selectedResolutionScale = Number.parseInt(resolutionQuery || '', 10);
+    if (!Number.isInteger(selectedResolutionScale)) {
+        try {
+            selectedResolutionScale = Number.parseInt(localStorage.getItem('azahar-resolution-scale') || '1', 10);
+        } catch (_) {
+            selectedResolutionScale = 1;
+        }
+    }
+    selectedResolutionScale = Math.max(1, Math.min(4, selectedResolutionScale || 1));
+
+    function updateResolutionHelp() {
+        if (!resolutionScaleHelp) return;
+        if (!isWebGL2Artifact) {
+            resolutionScaleHelp.textContent =
+                'Software compatibility mode renders at 1x native resolution.';
+            return;
+        }
+        resolutionScaleHelp.textContent = selectedResolutionScale === 1 ?
+            'Native internal resolution preserves maximum emulation speed.' :
+            `${selectedResolutionScale}x supersampling improves 3D edges and detail but increases GPU work.`;
+    }
+
+    function applyResolutionScale() {
+        if (!initialized || !wasmModule?._azahar_set_resolution_scale || !isWebGL2Artifact) return;
+        const applied = wasmModule._azahar_set_resolution_scale(selectedResolutionScale);
+        if (applied !== selectedResolutionScale) {
+            log(`Resolution ${selectedResolutionScale}x rejected (native result ${applied}).`);
+            return;
+        }
+        log(`Internal resolution set to ${applied}x.`);
+    }
 
     // Renderer changes require a fresh document because a browser canvas may
     // own either a 2D or WebGL context, never both. Keep both builds behind a
@@ -73,8 +107,32 @@
             if (rendererMode.value !== 'auto') {
                 destination.searchParams.set('renderer', rendererMode.value);
             }
+            if (selectedResolutionScale !== 1) {
+                destination.searchParams.set('resolution', String(selectedResolutionScale));
+            }
             if (!autoStart) destination.searchParams.set('autostart', '0');
             location.assign(destination.toString());
+        });
+    }
+
+    if (resolutionScale) {
+        resolutionScale.value = String(selectedResolutionScale);
+        resolutionScale.disabled = !isWebGL2Artifact;
+        updateResolutionHelp();
+        resolutionScale.addEventListener('change', () => {
+            selectedResolutionScale = Number.parseInt(resolutionScale.value, 10) || 1;
+            try {
+                localStorage.setItem('azahar-resolution-scale', String(selectedResolutionScale));
+            } catch (_) {}
+            const currentUrl = new URL(location.href);
+            if (selectedResolutionScale === 1) {
+                currentUrl.searchParams.delete('resolution');
+            } else {
+                currentUrl.searchParams.set('resolution', String(selectedResolutionScale));
+            }
+            history.replaceState(null, '', currentUrl);
+            updateResolutionHelp();
+            applyResolutionScale();
         });
     }
 
@@ -120,7 +178,7 @@
         // Preserve harness/user-flow controls across the fresh-document
         // renderer switch. In particular, losing autostart=0 would begin
         // execution while an uploaded save state is still being installed.
-        for (const name of ['autostart']) {
+        for (const name of ['autostart', 'resolution']) {
             if (currentUrl.searchParams.has(name)) {
                 destination.searchParams.set(name, currentUrl.searchParams.get(name));
             }
@@ -380,6 +438,7 @@ void main() { frag_color = vec4(1.0); }`);
                 return;
             }
             initialized = true;
+            applyResolutionScale();
             log('Emulator initialized successfully.');
             hideProgress();
             setStatus('Emulator ready. Choose a ROM to load and run.', 'ok');

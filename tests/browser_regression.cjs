@@ -18,6 +18,14 @@ const extraChromeArgs = (process.env.AZAHAR_CHROME_ARGS || '')
 const staticHostMode = process.env.AZAHAR_STATIC_HOST === '1';
 const headless = process.env.AZAHAR_HEADLESS === '0' ? false : 'new';
 const sustainMs = Number.parseInt(process.env.AZAHAR_SUSTAIN_MS || '1000', 10);
+const requestedResolution = Math.max(1, Math.min(4,
+    Number.parseInt(process.env.AZAHAR_RESOLUTION_SCALE || '1', 10) || 1));
+const liveResolution = process.env.AZAHAR_LIVE_RESOLUTION_SCALE ? Math.max(1, Math.min(4,
+    Number.parseInt(process.env.AZAHAR_LIVE_RESOLUTION_SCALE, 10) || 1)) : 0;
+const requestedRenderer = process.env.AZAHAR_RENDERER || '';
+if (requestedRenderer && !['auto', 'webgl2', 'software'].includes(requestedRenderer)) {
+    throw new Error(`Unsupported AZAHAR_RENDERER: ${requestedRenderer}`);
+}
 
 async function waitForStatus(page, predicate, timeout = 120000) {
     await page.waitForFunction(predicate, {timeout});
@@ -101,8 +109,13 @@ async function main() {
     // Enter through the actual deployment URL. Adapter preflight may keep the
     // accelerated artifact or navigate to compatibility mode; both outcomes
     // must produce playable, composited output in the browser under test.
-    const webUrl = process.env.AZAHAR_WEB_URL ||
-        `http://127.0.0.1:${address.port}/index.html?autostart=0`;
+    const deploymentUrl = new URL(process.env.AZAHAR_WEB_URL ||
+        `http://127.0.0.1:${address.port}/index.html`);
+    deploymentUrl.searchParams.set('autostart', '0');
+    if (requestedRenderer && requestedRenderer !== 'auto') {
+        deploymentUrl.searchParams.set('renderer', requestedRenderer);
+    }
+    const webUrl = deploymentUrl.toString();
     const browser = await puppeteer.launch({
         headless,
         executablePath: process.env.CHROME_PATH || cfg.chromePath || "chrome",
@@ -136,12 +149,40 @@ async function main() {
         }
         const wasmReadyStatus = await page.$eval('#status', element => element.textContent);
         const selectedRenderer = await page.evaluate(() => window.AzaharWebConfig?.renderer);
+        if (requestedRenderer && requestedRenderer !== 'auto' && selectedRenderer !== requestedRenderer) {
+            throw new Error(`Requested renderer ${requestedRenderer}, got ${selectedRenderer}`);
+        }
         const heapBytes = await page.evaluate(() => Module.HEAPU8.byteLength);
         const rendererModes = await page.$$eval('#renderer-mode option', options =>
             options.map(option => option.value));
         if (rendererModes.join(',') !== 'auto,webgl2,software') {
             throw new Error(`Unified renderer toggle is missing or stale: ${JSON.stringify(rendererModes)}`);
         }
+        const resolutionModes = await page.$$eval('#resolution-scale option', options =>
+            options.map(option => option.value));
+        if (resolutionModes.join(',') !== '1,2,3,4') {
+            throw new Error(`Resolution selector is missing or stale: ${JSON.stringify(resolutionModes)}`);
+        }
+        let testedResolution = await page.evaluate(() => Module._azahar_get_resolution_scale());
+        if (selectedRenderer === 'webgl2') {
+            // The ordinary regression keeps its established 1x visual and
+            // performance baseline, but still proves a live 2x->1x cache
+            // transition. AZAHAR_RESOLUTION_SCALE=2 (or 3/4) retains the
+            // selected scale through real gameplay and validates its visible
+            // browser-compositor output.
+            const probeResolution = requestedResolution === 1 ? 2 : requestedResolution;
+            await page.select('#resolution-scale', String(probeResolution));
+            await page.waitForFunction(scale => Module._azahar_get_resolution_scale() === scale,
+                {}, probeResolution);
+            testedResolution = await page.evaluate(() => Module._azahar_get_resolution_scale());
+            if (requestedResolution === 1) {
+                await page.select('#resolution-scale', '1');
+                await page.waitForFunction(() => Module._azahar_get_resolution_scale() === 1);
+            }
+        } else if (testedResolution !== 1) {
+            throw new Error(`Software renderer did not remain native resolution: ${testedResolution}`);
+        }
+        let finalResolution = await page.evaluate(() => Module._azahar_get_resolution_scale());
 
         console.log('phase: upload ROM');
         await (await page.$('#rom-file')).uploadFile(romPath);
@@ -230,6 +271,28 @@ async function main() {
             if (capturePath) await page.screenshot({path: capturePath, fullPage: true});
         }
 
+        // Optional focused gate for changing scale while a game is already
+        // rendering. This exercises rasterizer-cache invalidation rather than
+        // only constructing a fresh renderer at the requested scale.
+        let liveResolutionFrame = null;
+        if (liveResolution && selectedRenderer === 'webgl2') {
+            console.log(`phase: switch live gameplay to ${liveResolution}x resolution`);
+            await page.select('#resolution-scale', String(liveResolution));
+            await page.waitForFunction(scale => Module._azahar_get_resolution_scale() === scale,
+                {}, liveResolution);
+            const liveDeadline = Date.now() + 15000;
+            do {
+                await new Promise(resolve => setTimeout(resolve, 500));
+                liveResolutionFrame = await readVisibleCanvasStats(page);
+                if (hasVisibleGameFrame(liveResolutionFrame)) break;
+            } while (Date.now() < liveDeadline);
+            if (!liveResolutionFrame || !hasVisibleGameFrame(liveResolutionFrame)) {
+                throw new Error(`Live ${liveResolution}x switch lost visible rendering: ` +
+                    JSON.stringify(liveResolutionFrame));
+            }
+            finalResolution = await page.evaluate(() => Module._azahar_get_resolution_scale());
+        }
+
         // Keep the real rAF-driven UI alive after the first valid frame. This
         // catches renderer-process exits, runaway heap growth, and event-loop
         // starvation that a one-frame screenshot check cannot observe.
@@ -284,8 +347,15 @@ async function main() {
         console.log(JSON.stringify({
             ok: true,
             staticHostMode,
+            requestedRenderer: requestedRenderer || 'auto',
             selectedRenderer,
             rendererModes,
+            resolutionModes,
+            requestedResolution,
+            testedResolution,
+            finalResolution,
+            liveResolution,
+            liveResolutionFrame,
             heapBytes,
             sustainMs,
             sustainedSamples: sustainedSamples.length,

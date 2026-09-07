@@ -20,6 +20,8 @@ const pageName = 'index.html';
 const expectedExports = [
     'azahar_init',
     'azahar_load_state',
+    'azahar_set_resolution_scale',
+    'azahar_get_resolution_scale',
     'azahar_load_rom',
     'azahar_framebuffer_nonblack_pixels',
     'azahar_reset_renderer_stats',
