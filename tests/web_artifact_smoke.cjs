@@ -20,6 +20,10 @@ const pageName = 'index.html';
 const expectedExports = [
     'azahar_init',
     'azahar_load_state',
+    'azahar_get_state_operation',
+    'azahar_get_program_id',
+    'azahar_set_fast_forward',
+    'azahar_get_fast_forward',
     'azahar_set_resolution_scale',
     'azahar_get_resolution_scale',
     'azahar_load_rom',
@@ -63,6 +67,8 @@ const glue = read(path.join(webDir, `${artifactName}.js`)).toString('utf8');
 
 assert.match(html, /<canvas\s+id=["']canvas["']/i);
 assert.match(html, /azahar_ui\.js/);
+assert.match(html, /azahar_savestates\.js/);
+requireFile(webDir, 'azahar_savestates.js');
 assert.match(html, /id=["']renderer-mode["']/i);
 assert.match(ui, /script\.src\s*=\s*`\$\{artifactName\}\.js`/);
 if (artifactKind === 'webgl2') {

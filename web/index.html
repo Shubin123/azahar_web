@@ -115,6 +115,53 @@
         }
         .mode-help { font-size: 0.72rem; color: #888; line-height: 1.35; }
 
+        .save-toolbar {
+            display: grid;
+            grid-template-columns: 82px 1fr;
+            gap: 6px;
+            align-items: start;
+        }
+        .save-toolbar .renderer-select { margin-bottom: 0; }
+        .save-list {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            margin-top: 8px;
+            max-height: 230px;
+            overflow-y: auto;
+        }
+        .save-empty { color: #777; font-size: 0.75rem; padding: 6px 0; }
+        .save-game-group { display: flex; flex-direction: column; gap: 5px; }
+        .save-game-title { color: #f0a2af; font-size: 0.76rem; font-weight: 700; overflow-wrap: anywhere; }
+        .save-game-id { color: #66738c; font-size: 0.62rem; font-family: monospace; }
+        .save-entry {
+            background: #0d1730;
+            border: 1px solid #253d69;
+            border-radius: 5px;
+            padding: 7px;
+        }
+        .save-entry-title { font-size: 0.78rem; font-weight: 700; color: #eee; }
+        .save-entry-meta {
+            color: #8995aa;
+            font-size: 0.67rem;
+            line-height: 1.4;
+            margin: 3px 0 6px;
+            overflow-wrap: anywhere;
+        }
+        .save-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+        .save-actions .btn { padding: 5px 7px; margin: 0; font-size: 0.72rem; }
+        .btn-danger { background: #71313d; color: #fff; }
+        #save-state-status { margin-top: 7px; min-height: 1em; }
+        .speed-control { margin-top: 10px; }
+        .speed-control label {
+            display: flex;
+            justify-content: space-between;
+            color: #aaa;
+            font-size: 0.76rem;
+            margin-bottom: 4px;
+        }
+        .speed-control input { width: 100%; accent-color: #e94560; }
+
         #status {
             font-size: 0.8rem;
             color: #aaa;
@@ -198,6 +245,39 @@
                 <button class="btn btn-success" id="btn-step" disabled>Step Frame</button>
                 <button class="btn btn-secondary" id="btn-run" disabled>▶ Run / Resume</button>
                 <button class="btn btn-secondary" id="btn-stop" disabled>⏹ Stop</button>
+                <div class="speed-control">
+                    <label for="fast-forward">
+                        <span>Fast-forward</span><output id="fast-forward-value">1x</output>
+                    </label>
+                    <input id="fast-forward" type="range" min="1" max="4" step="1" value="1"
+                           aria-label="Fast-forward multiplier">
+                    <div class="mode-help">Target speed for cutscenes: 1x normal, up to 4x fast-forward. Actual speed depends on your device and the game.</div>
+                </div>
+            </div>
+
+            <div class="card" id="save-state-card">
+                <h2>Save States</h2>
+                <div class="save-toolbar">
+                    <select id="save-state-slot" class="renderer-select" aria-label="Save-state slot">
+                        <option value="1">Slot 1</option>
+                        <option value="2">Slot 2</option>
+                        <option value="3">Slot 3</option>
+                        <option value="4">Slot 4</option>
+                        <option value="5">Slot 5</option>
+                        <option value="6">Slot 6</option>
+                        <option value="7">Slot 7</option>
+                        <option value="8">Slot 8</option>
+                        <option value="9">Slot 9</option>
+                        <option value="10">Slot 10</option>
+                    </select>
+                    <button class="btn btn-success" id="btn-save-state" disabled>Save current game</button>
+                </div>
+                <div id="save-storage-info" class="mode-help">Opening browser storage...</div>
+                <div id="save-state-status" class="mode-help" aria-live="polite"></div>
+                <div id="save-state-list" class="save-list"></div>
+                <div class="mode-help" style="margin-top:7px;">
+                    Saves are compressed by Azahar and kept only in this browser. Load the matching ROM before restoring.
+                </div>
             </div>
 
             <div class="card">
@@ -216,6 +296,7 @@
             {renderer: 'webgl2', artifact: 'azahar_webgl2',
              softwareFallbackUrl: 'index.html?renderer=software'};
     </script>
+    <script src="azahar_savestates.js"></script>
     <script src="azahar_ui.js"></script>
 </body>
 </html>

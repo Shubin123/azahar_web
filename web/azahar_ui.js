@@ -38,6 +38,13 @@
     const rendererModeHelp = document.getElementById('renderer-mode-help');
     const resolutionScale = document.getElementById('resolution-scale');
     const resolutionScaleHelp = document.getElementById('resolution-scale-help');
+    const saveStateSlot = document.getElementById('save-state-slot');
+    const btnSaveState = document.getElementById('btn-save-state');
+    const saveStorageInfo = document.getElementById('save-storage-info');
+    const saveStateStatus = document.getElementById('save-state-status');
+    const saveStateList = document.getElementById('save-state-list');
+    const fastForward = document.getElementById('fast-forward');
+    const fastForwardValue = document.getElementById('fast-forward-value');
 
     // ── State ─────────────────────────────────────────────────────
     let wasmModule = null;
@@ -59,6 +66,10 @@
     let lastFrameCount = 0;
     let displayFps = 0;
     let emulationSpeed = 0;
+    let saveStateStore = null;
+    let saveStateBusy = false;
+    let currentProgramId = '';
+    const saveStateDirectory = '/home/web_user/.local/share/azahar-emu/states';
     const resolutionQuery = new URLSearchParams(location.search).get('resolution');
     let selectedResolutionScale = Number.parseInt(resolutionQuery || '', 10);
     if (!Number.isInteger(selectedResolutionScale)) {
@@ -69,6 +80,16 @@
         }
     }
     selectedResolutionScale = Math.max(1, Math.min(4, selectedResolutionScale || 1));
+    const fastForwardQuery = new URLSearchParams(location.search).get('speed');
+    let selectedFastForward = Number.parseInt(fastForwardQuery || '', 10);
+    if (!Number.isInteger(selectedFastForward)) {
+        try {
+            selectedFastForward = Number.parseInt(localStorage.getItem('azahar-fast-forward') || '1', 10);
+        } catch (_) {
+            selectedFastForward = 1;
+        }
+    }
+    selectedFastForward = Math.max(1, Math.min(4, selectedFastForward || 1));
 
     function updateResolutionHelp() {
         if (!resolutionScaleHelp) return;
@@ -92,6 +113,16 @@
         log(`Internal resolution set to ${applied}x.`);
     }
 
+    function applyFastForward() {
+        if (!initialized || !wasmModule?._azahar_set_fast_forward) return;
+        const applied = wasmModule._azahar_set_fast_forward(selectedFastForward);
+        if (applied !== selectedFastForward) {
+            log(`Fast-forward ${selectedFastForward}x rejected (${applied}).`);
+            return;
+        }
+        log(`Fast-forward set to ${applied}x.`);
+    }
+
     // Renderer changes require a fresh document because a browser canvas may
     // own either a 2D or WebGL context, never both. Keep both builds behind a
     // single deployment page and make that required reload explicit.
@@ -109,6 +140,9 @@
             }
             if (selectedResolutionScale !== 1) {
                 destination.searchParams.set('resolution', String(selectedResolutionScale));
+            }
+            if (selectedFastForward !== 1) {
+                destination.searchParams.set('speed', String(selectedFastForward));
             }
             if (!autoStart) destination.searchParams.set('autostart', '0');
             location.assign(destination.toString());
@@ -133,6 +167,23 @@
             history.replaceState(null, '', currentUrl);
             updateResolutionHelp();
             applyResolutionScale();
+        });
+    }
+
+    if (fastForward) {
+        fastForward.value = String(selectedFastForward);
+        fastForwardValue.textContent = `${selectedFastForward}x`;
+        fastForward.addEventListener('input', () => {
+            selectedFastForward = Number.parseInt(fastForward.value, 10) || 1;
+            fastForwardValue.textContent = `${selectedFastForward}x`;
+            try {
+                localStorage.setItem('azahar-fast-forward', String(selectedFastForward));
+            } catch (_) {}
+            const currentUrl = new URL(location.href);
+            if (selectedFastForward === 1) currentUrl.searchParams.delete('speed');
+            else currentUrl.searchParams.set('speed', String(selectedFastForward));
+            history.replaceState(null, '', currentUrl);
+            applyFastForward();
         });
     }
 
@@ -166,6 +217,295 @@
         return new Promise(resolve => requestAnimationFrame(resolve));
     }
 
+    function delay(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function formatBytes(bytes) {
+        if (bytes < 1024) return `${bytes} B`;
+        if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+        return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+    }
+
+    function stateKey(programId, slot) {
+        return `${programId}:${slot}`;
+    }
+
+    function nativeStatePath(programId, slot) {
+        return `${saveStateDirectory}/${programId}.${String(slot).padStart(2, '0')}.cst`;
+    }
+
+    function inspectCst(bytes) {
+        if (!(bytes instanceof Uint8Array) || bytes.byteLength < 256) {
+            throw new Error('Save file is incomplete');
+        }
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        if (view.getUint8(0) !== 0x43 || view.getUint8(1) !== 0x53 ||
+            view.getUint8(2) !== 0x54 || view.getUint8(3) !== 0x1b) {
+            throw new Error('Save file has an invalid CST header');
+        }
+        const low = view.getUint32(4, true);
+        const high = view.getUint32(8, true);
+        const programId = high.toString(16).padStart(8, '0') +
+            low.toString(16).padStart(8, '0');
+        const timestamp = Number(view.getBigUint64(32, true)) * 1000;
+        return {programId: programId.toUpperCase(), timestamp};
+    }
+
+    function readCurrentProgramId() {
+        if (!wasmModule?._azahar_get_program_id) return '';
+        const pointer = wasmModule._malloc(8);
+        try {
+            if (wasmModule._azahar_get_program_id(pointer, 2) !== 0) return '';
+            const view = new DataView(wasmModule.HEAPU8.buffer, pointer, 8);
+            const low = view.getUint32(0, true);
+            const high = view.getUint32(4, true);
+            return (high.toString(16).padStart(8, '0') +
+                low.toString(16).padStart(8, '0')).toUpperCase();
+        } finally {
+            wasmModule._free(pointer);
+        }
+    }
+
+    function setSaveStateMessage(message, isError = false) {
+        if (!saveStateStatus) return;
+        saveStateStatus.textContent = message;
+        saveStateStatus.style.color = isError ? '#ff6b6b' : '#8fcf9f';
+    }
+
+    function updateSaveControls() {
+        if (btnSaveState) btnSaveState.disabled = saveStateBusy || !romLoaded ||
+            !currentProgramId || !saveStateStore;
+        if (!saveStateList) return;
+        for (const button of saveStateList.querySelectorAll('button')) {
+            const matchesGame = button.closest('.save-entry')?.dataset.programId === currentProgramId;
+            button.disabled = saveStateBusy || (button.dataset.action === 'load' &&
+                (!romLoaded || !matchesGame));
+        }
+    }
+
+    function setSaveStateBusy(busy) {
+        saveStateBusy = busy;
+        if (saveStateSlot) saveStateSlot.disabled = busy;
+        updateSaveControls();
+    }
+
+    async function refreshSaveStateList() {
+        if (!saveStateStore || !saveStateList) return;
+        const records = await saveStateStore.list();
+        saveStateList.replaceChildren();
+        if (!records.length) {
+            const empty = document.createElement('div');
+            empty.className = 'save-empty';
+            empty.textContent = 'No browser saves yet.';
+            saveStateList.appendChild(empty);
+        }
+        const groups = new Map();
+        for (const record of records) {
+            let group = groups.get(record.programId);
+            if (!group) {
+                group = document.createElement('section');
+                group.className = 'save-game-group';
+                group.dataset.programId = record.programId;
+                const gameTitle = document.createElement('div');
+                gameTitle.className = 'save-game-title';
+                gameTitle.textContent = record.romName || 'Unknown game';
+                const gameId = document.createElement('div');
+                gameId.className = 'save-game-id';
+                gameId.textContent = `Title ID ${record.programId}`;
+                group.append(gameTitle, gameId);
+                groups.set(record.programId, group);
+                saveStateList.appendChild(group);
+            }
+            const entry = document.createElement('div');
+            entry.className = 'save-entry';
+            entry.dataset.stateKey = record.key;
+            entry.dataset.programId = record.programId;
+
+            const title = document.createElement('div');
+            title.className = 'save-entry-title';
+            title.textContent = `Slot ${record.slot}`;
+            const meta = document.createElement('div');
+            meta.className = 'save-entry-meta';
+            meta.textContent = `${formatBytes(record.size)} - ${new Date(record.savedAt).toLocaleString()}`;
+            const actions = document.createElement('div');
+            actions.className = 'save-actions';
+            const loadButton = document.createElement('button');
+            loadButton.className = 'btn btn-secondary';
+            loadButton.dataset.action = 'load';
+            loadButton.dataset.stateKey = record.key;
+            loadButton.textContent = 'Load';
+            const deleteButton = document.createElement('button');
+            deleteButton.className = 'btn btn-danger';
+            deleteButton.dataset.action = 'delete';
+            deleteButton.dataset.stateKey = record.key;
+            deleteButton.textContent = 'Delete';
+            actions.append(loadButton, deleteButton);
+            entry.append(title, meta, actions);
+            group.appendChild(entry);
+        }
+        const totalBytes = records.reduce((sum, record) => sum + record.size, 0);
+        const persistence = await saveStateStore.persistence();
+        const durability = persistence.persistent ? 'persistent storage granted' :
+            (persistence.supported ? 'standard browser storage' : 'browser-managed storage');
+        saveStorageInfo.textContent = `${records.length} save${records.length === 1 ? '' : 's'}, ` +
+            `${formatBytes(totalBytes)} total - ${durability}.`;
+        updateSaveControls();
+    }
+
+    async function initializeSaveStateStorage() {
+        if (!window.AzaharSaveStateStore) {
+            saveStorageInfo.textContent = 'Persistent save storage is unavailable.';
+            return;
+        }
+        try {
+            saveStateStore = await window.AzaharSaveStateStore.open();
+            await refreshSaveStateList();
+        } catch (error) {
+            saveStorageInfo.textContent = `Save storage unavailable: ${error.message}`;
+            setSaveStateMessage('Browser saves are disabled.', true);
+            log(`Save storage error: ${error.message}`);
+        }
+    }
+
+    async function stepForStateOperation() {
+        await yieldToBrowser();
+        frameCount++;
+        const result = wasmModule._azahar_step_frame();
+        if (result !== 0) throw new Error(`Emulator rejected save-state operation (${result})`);
+        updateCanvasFromWasm();
+    }
+
+    async function waitForNativeStateOperation(kind, path = null) {
+        const deadline = performance.now() + 30000;
+        let advanced = false;
+        while (performance.now() < deadline) {
+            if (!running) {
+                await stepForStateOperation();
+                advanced = true;
+            } else {
+                const before = frameCount;
+                await delay(25);
+                if (!running) {
+                    throw new Error(`Emulation stopped while ${kind} the state`);
+                }
+                advanced ||= frameCount > before;
+            }
+            const operation = wasmModule._azahar_get_state_operation?.();
+            if (operation === -1) throw new Error('Native state-operation acknowledgement is unavailable');
+            if (advanced && operation === 0) {
+                if (!path) return;
+                try {
+                    const stat = wasmModule.FS.stat(path);
+                    if (stat.size >= 256) return stat.size;
+                } catch (_) {}
+                throw new Error('Native save completed without producing a valid state file');
+            }
+            await delay(25);
+        }
+        throw new Error(`Timed out waiting for Azahar to finish ${kind}ing the state`);
+    }
+
+    async function saveCurrentState() {
+        if (saveStateBusy || !saveStateStore || !romLoaded || !currentProgramId) return;
+        const slot = Number.parseInt(saveStateSlot.value, 10);
+        setSaveStateBusy(true);
+        setSaveStateMessage(`Saving slot ${slot} (compressed)...`);
+        try {
+            await saveStateStore.requestPersistence();
+            wasmModule.FS.mkdirTree(saveStateDirectory);
+            const path = nativeStatePath(currentProgramId, slot);
+            try { wasmModule.FS.unlink(path); } catch (_) {}
+            const request = wasmModule._azahar_save_state(slot);
+            if (request !== 0) throw new Error(`Save request rejected (${request})`);
+            await waitForNativeStateOperation('sav', path);
+            const bytes = wasmModule.FS.readFile(path);
+            const header = inspectCst(bytes);
+            if (header.programId !== currentProgramId) {
+                throw new Error('Azahar returned a save for a different title');
+            }
+            const storedBytes = bytes.slice();
+            await saveStateStore.put({
+                key: stateKey(currentProgramId, slot),
+                programId: currentProgramId,
+                slot,
+                romName,
+                savedAt: header.timestamp || Date.now(),
+                size: storedBytes.byteLength,
+                data: new Blob([storedBytes], {type: 'application/octet-stream'}),
+            });
+            // IndexedDB now owns the durable compressed copy. Removing the
+            // transient MEMFS file avoids retaining another ~20 MiB in the tab.
+            try { wasmModule.FS.unlink(path); } catch (_) {}
+            log(`Save slot ${slot} persisted for ${currentProgramId} (${formatBytes(storedBytes.byteLength)}).`);
+            await refreshSaveStateList();
+            setSaveStateMessage(`Saved slot ${slot} - ${formatBytes(storedBytes.byteLength)}.`);
+        } catch (error) {
+            setSaveStateMessage(`Save failed: ${error.message}`, true);
+            log(`Save-state error: ${error.message}`);
+        } finally {
+            setSaveStateBusy(false);
+        }
+    }
+
+    async function loadStoredState(key) {
+        if (saveStateBusy || !saveStateStore || !romLoaded) return;
+        setSaveStateBusy(true);
+        try {
+            const record = await saveStateStore.get(key);
+            if (!record) throw new Error('The selected save no longer exists');
+            if (record.programId !== currentProgramId) {
+                throw new Error('Load the matching ROM before restoring this save');
+            }
+            setSaveStateMessage(`Loading slot ${record.slot}...`);
+            const bytes = new Uint8Array(await record.data.arrayBuffer());
+            const header = inspectCst(bytes);
+            if (header.programId !== currentProgramId) throw new Error('Save belongs to another title');
+            wasmModule.FS.mkdirTree(saveStateDirectory);
+            const path = nativeStatePath(currentProgramId, record.slot);
+            wasmModule.FS.writeFile(path, bytes, {canOwn: true});
+            const request = wasmModule._azahar_load_state(record.slot);
+            if (request !== 0) throw new Error(`Load request rejected (${request})`);
+            await waitForNativeStateOperation('load');
+            setSaveStateMessage(`Loaded slot ${record.slot} - ${formatBytes(record.size)}.`);
+            log(`Loaded persistent save slot ${record.slot} for ${currentProgramId}.`);
+        } catch (error) {
+            setSaveStateMessage(`Load failed: ${error.message}`, true);
+            log(`Load-state error: ${error.message}`);
+        } finally {
+            setSaveStateBusy(false);
+        }
+    }
+
+    async function deleteStoredState(key) {
+        if (saveStateBusy || !saveStateStore) return;
+        const record = await saveStateStore.get(key);
+        if (!record) return refreshSaveStateList();
+        if (!window.confirm(`Delete ${record.romName || record.programId} slot ${record.slot}?`)) return;
+        setSaveStateBusy(true);
+        try {
+            await saveStateStore.delete(key);
+            if (record.programId === currentProgramId && wasmModule) {
+                try { wasmModule.FS.unlink(nativeStatePath(record.programId, record.slot)); } catch (_) {}
+            }
+            setSaveStateMessage(`Deleted slot ${record.slot}.`);
+            log(`Deleted persistent save ${key}.`);
+            await refreshSaveStateList();
+        } catch (error) {
+            setSaveStateMessage(`Delete failed: ${error.message}`, true);
+        } finally {
+            setSaveStateBusy(false);
+        }
+    }
+
+    btnSaveState?.addEventListener('click', () => void saveCurrentState());
+    saveStateList?.addEventListener('click', event => {
+        const button = event.target.closest('button[data-action]');
+        if (!button || button.disabled) return;
+        if (button.dataset.action === 'load') void loadStoredState(button.dataset.stateKey);
+        if (button.dataset.action === 'delete') void deleteStoredState(button.dataset.stateKey);
+    });
+
     let softwareFallbackStarted = false;
 
     function restartInSoftware(reason) {
@@ -178,7 +518,7 @@
         // Preserve harness/user-flow controls across the fresh-document
         // renderer switch. In particular, losing autostart=0 would begin
         // execution while an uploaded save state is still being installed.
-        for (const name of ['autostart', 'resolution']) {
+        for (const name of ['autostart', 'resolution', 'speed']) {
             if (currentUrl.searchParams.has(name)) {
                 destination.searchParams.set(name, currentUrl.searchParams.get(name));
             }
@@ -439,6 +779,7 @@ void main() { frag_color = vec4(1.0); }`);
             }
             initialized = true;
             applyResolutionScale();
+            applyFastForward();
             log('Emulator initialized successfully.');
             hideProgress();
             setStatus('Emulator ready. Choose a ROM to load and run.', 'ok');
@@ -490,6 +831,13 @@ void main() { frag_color = vec4(1.0); }`);
             const result = wasmModule.ccall('azahar_load_rom', 'number', ['string'], [romPath]);
             if (result === 0) {
                 romLoaded = true;
+                currentProgramId = readCurrentProgramId();
+                if (!currentProgramId) {
+                    log('WARNING: Could not determine the loaded title ID; browser saves are disabled.');
+                    setSaveStateMessage('Could not identify this title for browser saves.', true);
+                }
+                updateSaveControls();
+                if (saveStateStore) void refreshSaveStateList();
                 log('ROM loaded successfully!');
                 hideProgress();
                 if (autoStart) {
@@ -669,16 +1017,18 @@ void main() { frag_color = vec4(1.0); }`);
                         lastFpsAt = now;
                         lastFrameCount = frameCount;
                         // Pull emulation speed from the C++ perf counters
+                        let gameFps = 0;
                         if (wasmModule._azahar_get_perf_stats) {
                             var buf = wasmModule._malloc(64); // 8 × f64
                             if (wasmModule._azahar_get_perf_stats(buf, 8) === 0) {
-                                emulationSpeed = new Float64Array(
-                                    wasmModule.HEAPU8.buffer, buf, 8)[2] * 100;
+                                const stats = new Float64Array(wasmModule.HEAPU8.buffer, buf, 8);
+                                gameFps = stats[0];
+                                emulationSpeed = stats[2] * 100;
                             }
                             wasmModule._free(buf);
                         }
                         if (displayFps > 0) {
-                            fpsEl.textContent = displayFps.toFixed(0) + ' FPS' +
+                            fpsEl.textContent = gameFps.toFixed(0) + ' game FPS' +
                                 (emulationSpeed > 0 ? ' | ' + emulationSpeed.toFixed(0) + '% speed' : '');
                         }
                     }
@@ -756,6 +1106,7 @@ void main() { frag_color = vec4(1.0); }`);
     log('Azahar Web UI ready.');
     setStatus('Loading WASM module...');
     showProgress(null);
+    void initializeSaveStateStorage();
     loadWasmModule().then(function () {
         return initializeEmulator();
     }).catch(function (err) {

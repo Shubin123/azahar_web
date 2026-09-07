@@ -23,6 +23,9 @@ const requestedResolution = Math.max(1, Math.min(4,
 const liveResolution = process.env.AZAHAR_LIVE_RESOLUTION_SCALE ? Math.max(1, Math.min(4,
     Number.parseInt(process.env.AZAHAR_LIVE_RESOLUTION_SCALE, 10) || 1)) : 0;
 const requestedRenderer = process.env.AZAHAR_RENDERER || '';
+const testSaveStateUi = process.env.AZAHAR_SAVE_STATE_UI === '1';
+const requestedFastForward = Math.max(1, Math.min(4,
+    Number.parseInt(process.env.AZAHAR_FAST_FORWARD || '1', 10) || 1));
 if (requestedRenderer && !['auto', 'webgl2', 'software'].includes(requestedRenderer)) {
     throw new Error(`Unsupported AZAHAR_RENDERER: ${requestedRenderer}`);
 }
@@ -183,6 +186,28 @@ async function main() {
             throw new Error(`Software renderer did not remain native resolution: ${testedResolution}`);
         }
         let finalResolution = await page.evaluate(() => Module._azahar_get_resolution_scale());
+        const speedControl = await page.$eval('#fast-forward', input => ({
+            min: input.min, max: input.max, step: input.step,
+        }));
+        if (JSON.stringify(speedControl) !== JSON.stringify({min: '1', max: '4', step: '1'})) {
+            throw new Error(`Fast-forward slider is missing or stale: ${JSON.stringify(speedControl)}`);
+        }
+        const speedProbe = requestedFastForward === 1 ? 2 : requestedFastForward;
+        await page.$eval('#fast-forward', (input, value) => {
+            input.value = String(value);
+            input.dispatchEvent(new Event('input', {bubbles: true}));
+        }, speedProbe);
+        await page.waitForFunction(speed => Module._azahar_get_fast_forward() === speed,
+            {}, speedProbe);
+        const testedFastForward = await page.evaluate(() => Module._azahar_get_fast_forward());
+        if (requestedFastForward === 1) {
+            await page.$eval('#fast-forward', input => {
+                input.value = '1';
+                input.dispatchEvent(new Event('input', {bubbles: true}));
+            });
+            await page.waitForFunction(() => Module._azahar_get_fast_forward() === 1);
+        }
+        const finalFastForward = await page.evaluate(() => Module._azahar_get_fast_forward());
 
         console.log('phase: upload ROM');
         await (await page.$('#rom-file')).uploadFile(romPath);
@@ -293,6 +318,47 @@ async function main() {
             finalResolution = await page.evaluate(() => Module._azahar_get_resolution_scale());
         }
 
+        let saveStateUi = null;
+        if (testSaveStateUi) {
+            console.log('phase: save and restore through persistent save-state UI');
+            await page.select('#save-state-slot', '2');
+            await page.click('#btn-save-state');
+            await page.waitForFunction(() =>
+                document.querySelector('#save-state-status')?.textContent.startsWith('Saved slot 2'),
+                {timeout: 60000});
+            const stored = await page.evaluate(async () => {
+                const entry = document.querySelector('#save-state-list .save-entry');
+                const key = entry?.dataset.stateKey;
+                if (!key) return null;
+                const store = await window.AzaharSaveStateStore.open();
+                const record = await store.get(key);
+                const bytes = new Uint8Array(await record.data.arrayBuffer());
+                return {
+                    key,
+                    size: record.size,
+                    blobSize: record.data.size,
+                    programId: record.programId,
+                    slot: record.slot,
+                    magic: Array.from(bytes.slice(0, 4)),
+                    rowText: entry.textContent,
+                    groupText: entry.closest('.save-game-group')?.textContent || '',
+                };
+            });
+            if (!stored || stored.size < 256 || stored.size !== stored.blobSize ||
+                stored.slot !== 2 || stored.magic.join(',') !== '67,83,84,27' ||
+                stored.key !== `${stored.programId}:2` || !stored.rowText.includes('MiB') ||
+                !stored.groupText.includes(stored.programId) ||
+                !stored.groupText.includes(path.basename(romPath))) {
+                throw new Error(`Persistent save record is invalid: ${JSON.stringify(stored)}`);
+            }
+            if (capturePath) await page.screenshot({path: capturePath, fullPage: true});
+            await page.click(`[data-state-key="${stored.key}"] button[data-action="load"]`);
+            await page.waitForFunction(() =>
+                document.querySelector('#save-state-status')?.textContent.startsWith('Loaded slot 2'),
+                {timeout: 60000});
+            saveStateUi = {stored, restored: true, persistedAfterReload: false, deleted: false};
+        }
+
         // Keep the real rAF-driven UI alive after the first valid frame. This
         // catches renderer-process exits, runaway heap growth, and event-loop
         // starvation that a one-frame screenshot check cannot observe.
@@ -313,6 +379,35 @@ async function main() {
             }
         }
 
+        // Changing fast-forward must never underclock the guest. Verify the
+        // live 1x -> 4x -> selected path, including actual guest-time progress.
+        const speedRuntime = await page.evaluate(() => {
+            const ptr = Module._malloc(88);
+            const read = () => {
+                Module._azahar_get_perf_stats(ptr, 11);
+                return Array.from(new Float64Array(Module.HEAPU8.buffer, ptr, 11));
+            };
+            const selected = Module._azahar_get_fast_forward();
+            const before = read();
+            Module._azahar_set_fast_forward(1);
+            const normal = read();
+            Module._azahar_set_fast_forward(4);
+            const fast = read();
+            Module._azahar_step_frame();
+            const after = read();
+            Module._azahar_set_fast_forward(selected);
+            Module._free(ptr);
+            return {clockBefore: before[8], clockNormal: normal[8], clockFast: fast[8],
+                targetNormal: normal[9], targetFast: fast[9],
+                advancedUs: after[10] - fast[10]};
+        });
+        if (speedRuntime.clockBefore !== speedRuntime.clockNormal ||
+            speedRuntime.clockNormal !== speedRuntime.clockFast ||
+            speedRuntime.targetNormal !== 1 || speedRuntime.targetFast !== 4 ||
+            speedRuntime.advancedUs <= 0) {
+            throw new Error(`Fast-forward timing regression: ${JSON.stringify(speedRuntime)}`);
+        }
+        console.log('fast-forward runtime:', JSON.stringify(speedRuntime));
         console.log('phase: stop emulation');
         await page.click('#btn-stop');
         await waitForStatus(page, () => /^Stopped at step \d+$/.test(document.querySelector('#status').textContent));
@@ -340,6 +435,48 @@ async function main() {
             canvasDimensions.clientHeight !== canvasDimensions.backingHeight * 2) {
             throw new Error(`Desktop canvas lost exact 2x pixel scaling: ${JSON.stringify(canvasDimensions)}`);
         }
+
+        if (testSaveStateUi) {
+            console.log('phase: save and restore while paused');
+            await page.select('#save-state-slot', '3');
+            await page.click('#btn-save-state');
+            await page.waitForFunction(() =>
+                document.querySelector('#save-state-status')?.textContent.startsWith('Saved slot 3'),
+                {timeout: 60000});
+            const pausedKey = await page.$eval('#save-state-list [data-state-key$=":3"]',
+                entry => entry.dataset.stateKey);
+            await page.click(`[data-state-key="${pausedKey}"] button[data-action="load"]`);
+            await page.waitForFunction(() =>
+                document.querySelector('#save-state-status')?.textContent.startsWith('Loaded slot 3'),
+                {timeout: 60000});
+            page.once('dialog', dialog => void dialog.accept());
+            await page.click(`[data-state-key="${pausedKey}"] button[data-action="delete"]`);
+            await page.waitForFunction(key =>
+                document.querySelector(`[data-state-key="${key}"]`) === null,
+                {timeout: 30000}, pausedKey);
+            saveStateUi.pausedLifecycle = true;
+            console.log('phase: reload, verify persistence, and delete browser save');
+            await page.reload({waitUntil: 'networkidle0', timeout: 120000});
+            await waitForStatus(page, () =>
+                document.querySelector('#status')?.textContent.includes('Emulator ready'));
+            await page.waitForFunction(key =>
+                document.querySelector(`[data-state-key="${key}"]`) !== null,
+                {timeout: 30000}, saveStateUi.stored.key);
+            saveStateUi.persistedAfterReload = true;
+            page.once('dialog', dialog => void dialog.accept());
+            await page.click(`[data-state-key="${saveStateUi.stored.key}"] button[data-action="delete"]`);
+            await page.waitForFunction(key =>
+                document.querySelector(`[data-state-key="${key}"]`) === null,
+                {timeout: 30000}, saveStateUi.stored.key);
+            const deletedRecord = await page.evaluate(async key => {
+                const store = await window.AzaharSaveStateStore.open();
+                return await store.get(key);
+            }, saveStateUi.stored.key);
+            if (deletedRecord !== undefined) {
+                throw new Error('Deleted save still exists in IndexedDB');
+            }
+            saveStateUi.deleted = true;
+        }
         if (consoleErrors.length || pageErrors.length) {
             throw new Error(`Browser errors: ${JSON.stringify({consoleErrors, pageErrors})}`);
         }
@@ -356,6 +493,11 @@ async function main() {
             finalResolution,
             liveResolution,
             liveResolutionFrame,
+            saveStateUi,
+            speedControl,
+            requestedFastForward,
+            testedFastForward,
+            finalFastForward,
             heapBytes,
             sustainMs,
             sustainedSamples: sustainedSamples.length,

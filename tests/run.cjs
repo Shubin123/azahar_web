@@ -11,6 +11,7 @@
  *   node tests/run.cjs --bench              # Benchmark only (with save state)
  *   node tests/run.cjs --regression         # Rendering regression only
  *   node tests/run.cjs --transition         # Cold boot, touch title, sustain gameplay
+ *   node tests/run.cjs --save-states        # Persistent UI save/load/reload/delete lifecycle
  *   node tests/run.cjs --bench --no-state   # Benchmark from cold boot (slow)
  *   node tests/run.cjs --duration 30        # Custom benchmark duration
  *   node tests/run.cjs --warmup 10          # Custom warmup (short with save state)
@@ -30,11 +31,12 @@ const argVal = (k, d) => {
 };
 
 const explicit = argFlag('--smoke') || argFlag('--bench') || argFlag('--regression') ||
-  argFlag('--transition');
+  argFlag('--transition') || argFlag('--save-states');
 const runSmoke = !explicit || argFlag('--smoke');
 const runBench = !explicit || argFlag('--bench');
 const runRegression = !explicit || argFlag('--regression');
 const runTransition = argFlag('--transition');
+const runSaveStates = argFlag('--save-states');
 const useState = !argFlag('--no-state');
 const artifact = argVal('--artifact', 'software');
 const duration = argVal('--duration', useState ? '15' : '15');
@@ -144,6 +146,20 @@ if (runTransition) {
   } else {
     run('Title Transition Regression',
       path.join(TESTS_DIR, 'title_transition_regression.cjs'), [], { timeout: 150000 });
+  }
+}
+
+if (runSaveStates) {
+  if (!cfg.chromePath) {
+    header('Save-state UI'); console.log('  Skipped: Chrome not found.'); skipped++;
+  } else if (!cfg.romPath || !cfg.statePath) {
+    header('Save-state UI'); console.log('  Skipped: ROM or gameplay state not found.'); skipped++;
+  } else {
+    run('Persistent Save-state UI Lifecycle',
+      path.join(TESTS_DIR, 'browser_regression.cjs'), [], {
+        timeout: 240000,
+        env: { AZAHAR_SAVE_STATE_UI: '1', AZAHAR_RENDERER: artifact },
+      });
   }
 }
 

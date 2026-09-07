@@ -154,14 +154,15 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
 
         function readPerfStats() {
             if (!Module._azahar_get_perf_stats) return null;
-            const buf = Module._malloc(64);
+            const buf = Module._malloc(88);
             let stats = null;
-            if (Module._azahar_get_perf_stats(buf, 8) === 0) {
-                const v = new Float64Array(Module.HEAPU8.buffer, buf, 8);
+            if (Module._azahar_get_perf_stats(buf, 11) === 0) {
+                const v = new Float64Array(Module.HEAPU8.buffer, buf, 11);
                 stats = {
                     gameFps: v[0], systemFps: v[1], emulationSpeed: v[2],
                     timeGpu: v[3], timeSwap: v[4], timeVblank: v[5],
                     meanFrametime: v[6], frameLimitPct: v[7],
+                    cpuClockPct: v[8], targetSpeed: v[9], guestTimeUs: v[10],
                 };
             }
             Module._free(buf);
