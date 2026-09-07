@@ -137,9 +137,9 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
         const perf = performance;
         const Module = window.Module;
 
-        // The experimental page intentionally redirects to the stable
-        // software artifact when WebGL2 initialization fails. Never record
-        // that fallback as a WebGL2 benchmark result.
+        // Never record a software recovery as a WebGL2 benchmark result. The
+        // compositor regression separately proves that this backend presents
+        // a visible scene; WebGL may discard its readback buffer after paint.
         if (artifact_ === 'webgl2') {
             if (window.AzaharWebConfig?.renderer !== 'webgl2') {
                 throw new Error('WebGL2 artifact fell back to software before benchmarking');
@@ -461,6 +461,13 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
             let restoreStats = null;
             if (stateName_) {
                 restoreStats = await restoreState();
+                // Restoring has its own short correctness settle, but it must
+                // not replace the requested benchmark warmup. WebGL scene
+                // transitions can compile shaders for several seconds; time
+                // those frames outside the sustained gameplay measurement.
+                if (warmupSeconds_ > 0) {
+                    warmupStats = await runForDuration(warmupSeconds_, false);
+                }
             } else if (manualStart_) {
                 await runUntilManualStart();
             } else if (warmupSeconds_ > 0) {

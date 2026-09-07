@@ -10,6 +10,7 @@
  *   node tests/run.cjs --smoke              # WASM artifact integrity only
  *   node tests/run.cjs --bench              # Benchmark only (with save state)
  *   node tests/run.cjs --regression         # Rendering regression only
+ *   node tests/run.cjs --transition         # Cold boot, touch title, sustain gameplay
  *   node tests/run.cjs --bench --no-state   # Benchmark from cold boot (slow)
  *   node tests/run.cjs --duration 30        # Custom benchmark duration
  *   node tests/run.cjs --warmup 10          # Custom warmup (short with save state)
@@ -28,10 +29,12 @@ const argVal = (k, d) => {
   return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : d;
 };
 
-const explicit = argFlag('--smoke') || argFlag('--bench') || argFlag('--regression');
+const explicit = argFlag('--smoke') || argFlag('--bench') || argFlag('--regression') ||
+  argFlag('--transition');
 const runSmoke = !explicit || argFlag('--smoke');
 const runBench = !explicit || argFlag('--bench');
 const runRegression = !explicit || argFlag('--regression');
+const runTransition = argFlag('--transition');
 const useState = !argFlag('--no-state');
 const artifact = argVal('--artifact', 'software');
 const duration = argVal('--duration', useState ? '15' : '15');
@@ -127,6 +130,20 @@ if (runRegression) {
         timeout: 120000,
         env: { AZAHAR_STATIC_HOST: '1' },
       });
+  }
+}
+
+// The title transition is intentionally opt-in because it cold boots a game
+// and sustains the post-touch scene for 45 seconds. It guards a distinct class
+// of cache-lifetime and shader/upload failures that save-state tests bypass.
+if (runTransition) {
+  if (!cfg.chromePath) {
+    header('Title Transition Regression'); console.log('  ⊘ Skipped: Chrome not found.'); skipped++;
+  } else if (!cfg.romPath) {
+    header('Title Transition Regression'); console.log('  ⊘ Skipped: No ROM found.'); skipped++;
+  } else {
+    run('Title Transition Regression',
+      path.join(TESTS_DIR, 'title_transition_regression.cjs'), [], { timeout: 150000 });
   }
 }
 

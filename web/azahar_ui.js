@@ -444,10 +444,15 @@ void main() { frag_color = vec4(1.0); }`);
             } else if (isWebGL2Artifact && result === -7) {
                 hideProgress();
                 restartInSoftware('native GLSL ES 3.00 setup failed');
-            } else if (result === -4) {
+            } else if (result === -8) {
                 hideProgress();
                 setStatus('ROM is encrypted. Use a decrypted dump with your own keys.', 'error');
                 log('ERROR: azahar_load_rom rejected an encrypted ROM');
+                btnLoad.disabled = false;
+            } else if (result === -4) {
+                hideProgress();
+                setStatus('ROM file could not be opened from browser storage.', 'error');
+                log('ERROR: azahar_load_rom could not open the mounted ROM path');
                 btnLoad.disabled = false;
             } else {
                 hideProgress();
@@ -629,7 +634,11 @@ void main() { frag_color = vec4(1.0); }`);
                     stopRunning();
                 }
             } catch (err) {
-                log(`Run error: ${err.message}`);
+                // Preserve the WebAssembly function/offset stack in the UI.
+                // A bare `unreachable` message hides the native renderer path
+                // that trapped, making scene-transition failures impossible
+                // to diagnose from an uploaded static deployment.
+                log(`Run error: ${err.stack || err.message}`);
                 setStatus(`Error: ${err.message}`, 'error');
                 stopRunning();
             }

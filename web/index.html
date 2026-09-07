@@ -35,7 +35,9 @@
         .canvas-panel {
             flex: 1 1 auto;
             min-width: 400px;
-            max-width: 800px;
+            /* 800px drawable area plus the 2px border on each side gives the
+               native 400px buffer an exact 2x scale on desktop. */
+            max-width: 804px;
             text-align: center;
         }
         canvas {
@@ -152,9 +154,9 @@
 
     <div class="main-layout">
         <div class="canvas-panel">
-            <canvas id="canvas" width="800" height="480"></canvas>
+            <canvas id="canvas" width="400" height="480"></canvas>
             <p style="font-size:0.7rem;color:#555;margin-top:4px;">
-                800×480 — Top: 400×240, Bottom: 320×240
+                Native 400×480 — Top: 400×240, Bottom: 320×240
                 <span id="fps" style="margin-left:12px;color:#aaa;"></span>
             </p>
         </div>

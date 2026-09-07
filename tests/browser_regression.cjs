@@ -273,6 +273,10 @@ async function main() {
         if (backingAspectError > 0.01 || clientAspectError > 0.01) {
             throw new Error(`Dual-screen canvas aspect ratio regressed: ${JSON.stringify(canvasDimensions)}`);
         }
+        if (canvasDimensions.clientWidth !== canvasDimensions.backingWidth * 2 ||
+            canvasDimensions.clientHeight !== canvasDimensions.backingHeight * 2) {
+            throw new Error(`Desktop canvas lost exact 2x pixel scaling: ${JSON.stringify(canvasDimensions)}`);
+        }
         if (consoleErrors.length || pageErrors.length) {
             throw new Error(`Browser errors: ${JSON.stringify({consoleErrors, pageErrors})}`);
         }
