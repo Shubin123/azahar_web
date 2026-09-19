@@ -54,8 +54,15 @@ endif()
 # -pthread and -msimd128 are part of that block and must be applied uniformly,
 # since both change the ABI of every object. Repeating them is harmless if a
 # checkout already sets them itself.
+# Exceptions: Emscripten disables catching by default, but citra_core throws
+# (file IO, boost serialization), so a title aborts at load with
+# "Exception thrown, but exception catching is not enabled". -fwasm-exceptions
+# uses the native WebAssembly EH proposal rather than JS trampolines; the
+# shipped artifact's glue contains no invoke_* thunks, which is what the JS
+# fallback would generate, so it was built this way too. Must match on compile
+# and link, and across every object.
 if (EMSCRIPTEN)
-    add_compile_options(-Wno-c++11-narrowing -pthread -msimd128)
-    add_link_options(-pthread -msimd128)
-    message(STATUS "Web shim: Emscripten compile options (narrowing, pthreads, SIMD)")
+    add_compile_options(-Wno-c++11-narrowing -pthread -msimd128 -fwasm-exceptions)
+    add_link_options(-pthread -msimd128 -fwasm-exceptions)
+    message(STATUS "Web shim: Emscripten compile options (narrowing, pthreads, SIMD, wasm EH)")
 endif()

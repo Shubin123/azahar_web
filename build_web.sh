@@ -14,6 +14,7 @@
 #
 # Environment:
 #   AZAHAR_BUILD_DIR  Build directory (default: build-web-sw)
+#   AZAHAR_WEB_ASSERTIONS  ON to link -sASSERTIONS=1 (readable aborts, slower)
 #   EMSDK             Emscripten SDK root (default: $HOME/emsdk)
 set -euo pipefail
 
@@ -59,6 +60,9 @@ if [ "$do_clean" = "1" ] || [ "$configure_only" = "1" ] || [ ! -f "$BUILD_DIR/bu
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_PROJECT_TOP_LEVEL_INCLUDES="$ROOT/cmake/emscripten-web-shims.cmake" \
         -DCMAKE_PROJECT_LibreSSL_INCLUDE="$ROOT/cmake/emscripten-libressl.cmake" \
+        -DCMAKE_PROJECT_citra_INCLUDE="$ROOT/cmake/emscripten-web-overlay.cmake" \
+        -DAZAHAR_WEB_PORT_DIR="$ROOT/port" \
+        -DAZAHAR_WEB_ASSERTIONS="${AZAHAR_WEB_ASSERTIONS:-OFF}" \
         -DBUILD_SHARED_LIBS=OFF \
         -DENABLE_QT=OFF \
         -DENABLE_SDL2=ON \
@@ -88,5 +92,14 @@ else
 fi
 
 if [ -f "$BUILD_DIR/bin/Release/azahar.wasm" ]; then
-    node "$ROOT/tests/web_artifact_smoke.cjs"
+    echo
+    echo "Built: $BUILD_DIR/bin/Release/azahar.{js,wasm}"
+    echo
+    # Deliberately NOT copied over web/. Those are the fork's artifacts, and
+    # web/azahar_webgl2.* cannot be rebuilt here at all, so overwriting them
+    # would trade a working accelerated renderer for a reconstruction.
+    echo "To try them without touching web/:"
+    echo "  ./stage_web.sh /tmp/azahar-staged"
+    echo "  AZAHAR_WEB_DIR=/tmp/azahar-staged node tests/benchmark_browser.cjs \\"
+    echo "    --artifact software --no-state --warmup-seconds 60 --duration-seconds 10"
 fi
