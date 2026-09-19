@@ -89,6 +89,27 @@ cmake --build build-webgl2-opengl --parallel 8 --target azahar_web_bundle
 
 The `azahar_web_bundle` target builds both renderers and copies their artifacts into `web/` automatically.
 
+### macOS / Linux
+
+`./build_web.sh` configures and builds in one step, injecting the shims in
+`cmake/` that the Emscripten build needs (see `PROJECT.md` → "Build
+reproducibility" for what each compensates for):
+
+```bash
+git clone --recurse-submodules https://github.com/azahar-emu/azahar.git azahar
+./build_web.sh                      # configure (if needed) and build
+./build_web.sh --target citra_core  # one target
+./build_web.sh --clean              # start from scratch
+```
+
+Requires the Emscripten SDK at `$EMSDK` (default `~/emsdk`).
+
+> **Note:** the upstream checkout alone cannot produce the shipped `.wasm`
+> artifacts. `src/citra_sdl/`, `src/video_core/renderer_webgl2/` and the web
+> CMake targets belong to a private Azahar fork that `patches/` was cut
+> against, so `build_web.sh` builds the emulator libraries but no web frontend.
+> See `PROJECT.md` → "Build reproducibility".
+
 ## Testing
 
 ```bash

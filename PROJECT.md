@@ -68,19 +68,47 @@ Artifacts are generated under `build-web/bin/Release/` and automatically synchro
 
 ### Build reproducibility (2026-09-19)
 
-The Emscripten toolchain builds cleanly on macOS (emcc 6.0.9, CMake, Ninja),
-but **the web port cannot currently be rebuilt from this repository**. `patches/`
-holds per-file deltas, not the port: `src/citra_sdl/emscripten_main.cpp` and
-`src/video_core/renderer_webgl2/` do not exist upstream, and there is no
-`ENABLE_WEBGL2_RENDERER` or `azahar_web_bundle` in upstream CMake. Against
-current upstream `main`, three of the four patches fail `git apply --check`
-(their base is commit `30d214dd`, and `patches/README.md` states they are not a
-replacement for the port).
+**The toolchain builds; the port's own sources are missing.** These are separate
+problems and were previously conflated.
+
+*Toolchain — working.* emcc 6.0.9 compiles and runs C++20 with `-msimd128` and
+`-pthread` (verified by disassembling the emitted `v128` instructions and
+joining threads at runtime). `emcmake` + CMake 4.4.3 + Ninja configure and build
+the upstream Azahar tree for WebAssembly via `./build_web.sh`, which injects
+`cmake/emscripten-web-shims.cmake`. Two upstream assumptions need compensating,
+both documented in that file:
+
+- `tsl::robin_map` is only provided by the dynarmic subdirectory, which
+  `externals/CMakeLists.txt` adds for x86_64/arm64 only. Emscripten reports
+  `ARCHITECTURE=GENERIC`, so it is skipped while `src/video_core` links the
+  target unconditionally and the generate step fails.
+- LibreSSL selects its entropy backend by platform macro and stops with
+  "No arc4random hooks defined for this platform" because Emscripten defines
+  `__EMSCRIPTEN__` and `__unix__` but not `__linux__`. It cannot simply be
+  dropped: `hle/service/ssl/ssl_c.cpp` includes `<openssl/rand.h>`, so stub
+  targets satisfy the link line but not the compile.
+  `cmake/emscripten-libressl.cmake` selects the Linux getentropy backend for
+  that subproject only.
+
+Note CMake 4.4.3 only *warns* about the pre-3.10 `cmake_minimum_required` calls
+in SDL2, enet and nihstro; they are not fatal.
+
+*Port sources — absent, and not reconstructible here.* `patches/README.md` names
+base commit `30d214dd69a791dc91a024c5062b09ec33792985`, and that commit **does
+not exist in azahar-emu/azahar**: the GitHub API returns 422 for it while
+returning 200 for upstream HEAD. The port was developed against a private fork.
+Consistent with that, upstream's SDL frontend is `src/citra_cli` (gated behind
+`ENABLE_QT`), there is no `src/citra_sdl/` or `src/video_core/renderer_webgl2/`
+upstream, `ENABLE_WEBGL2_RENDERER` and `azahar_web_bundle` do not exist, and
+`emscripten-main-web.patch` *modifies* `emscripten_main.cpp` rather than
+creating it — only about 49% of that file appears as patch context.
 
 Consequence: any optimization inside `azahar.wasm` / `azahar_webgl2.wasm` —
-including the CPU-side limits noted under "Next FPS Work" — is blocked until the
-port's full sources are checked in or the original build tree is restored. Work
-in `web/` and `tests/` is unaffected, which is where optimization 15 lives.
+including the CPU-side limits under "Next FPS Work" — needs that fork or the
+original build tree. Work in `web/` and `tests/` is unaffected, which is where
+optimization 15 lives. See `FORK_HANDOFF.md` for the steps to
+move the fork off the machine that holds it (per `run_build.bat`, that is
+`C:\Users\shubadub\Documents\azahar`).
 
 ## Performance & Benchmarking
 
