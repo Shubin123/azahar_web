@@ -40,3 +40,22 @@ endif()
 # cmake/emscripten-libressl.cmake fixes; build_web.sh injects that file with
 # -DCMAKE_PROJECT_LibreSSL_INCLUDE. Leave USE_SYSTEM_OPENSSL off so upstream
 # takes the bundled branch.
+
+# ── Emscripten compile options ───────────────────────────────────────────────
+# wasm32 has a 32-bit size_t, so `ResultVal<u64>` narrows `unsigned long long`
+# to `unsigned long` inside a braced initializer in common/expected.h. Clang
+# reports -Wc++11-narrowing as a default-*error*, which the tree's existing `-w`
+# cannot suppress, so citra_core will not compile without opting out explicitly.
+#
+# This mirrors the port's own `if (EMSCRIPTEN)` block, recorded in
+# patches/cmake-web.patch, which upstream HEAD does not have:
+#     add_compile_options(-Wno-c++11-narrowing -pthread -msimd128)
+#     add_link_options(-msimd128)
+# -pthread and -msimd128 are part of that block and must be applied uniformly,
+# since both change the ABI of every object. Repeating them is harmless if a
+# checkout already sets them itself.
+if (EMSCRIPTEN)
+    add_compile_options(-Wno-c++11-narrowing -pthread -msimd128)
+    add_link_options(-pthread -msimd128)
+    message(STATUS "Web shim: Emscripten compile options (narrowing, pthreads, SIMD)")
+endif()

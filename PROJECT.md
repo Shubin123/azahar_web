@@ -71,12 +71,15 @@ Artifacts are generated under `build-web/bin/Release/` and automatically synchro
 **The toolchain builds; the port's own sources are missing.** These are separate
 problems and were previously conflated.
 
-*Toolchain — working.* emcc 6.0.9 compiles and runs C++20 with `-msimd128` and
-`-pthread` (verified by disassembling the emitted `v128` instructions and
-joining threads at runtime). `emcmake` + CMake 4.4.3 + Ninja configure and build
-the upstream Azahar tree for WebAssembly via `./build_web.sh`, which injects
-`cmake/emscripten-web-shims.cmake`. Two upstream assumptions need compensating,
-both documented in that file:
+*Toolchain — working, and verified end to end.* `./build_web.sh` builds the
+upstream Azahar tree for WebAssembly on macOS (Apple M1, emcc 6.0.9, CMake
+4.4.3, Ninja): 1439/1439 steps, zero errors, producing `libcitra_core.a`
+(71.4 MB, 242 members), `libvideo_core.a`, `libaudio_core.a`,
+`libcitra_common.a` and `libnetwork.a`. The objects are ThinLTO bitcode
+carrying the `wasm32-unknown-emscripten` triple, not host code.
+
+Three upstream assumptions hold only on native targets and are compensated in
+`cmake/emscripten-web-shims.cmake` and `cmake/emscripten-libressl.cmake`:
 
 - `tsl::robin_map` is only provided by the dynarmic subdirectory, which
   `externals/CMakeLists.txt` adds for x86_64/arm64 only. Emscripten reports
@@ -89,6 +92,14 @@ both documented in that file:
   targets satisfy the link line but not the compile.
   `cmake/emscripten-libressl.cmake` selects the Linux getentropy backend for
   that subproject only.
+- `-Wc++11-narrowing` is a clang *default-error*, which the tree's existing `-w`
+  cannot suppress. wasm32 has a 32-bit `size_t`, so `ResultVal<u64>` narrows
+  inside a braced initializer in `common/expected.h` and `citra_core` will not
+  compile. The shim replicates the port's own `if (EMSCRIPTEN)` block, recorded
+  in `patches/cmake-web.patch` and absent from upstream HEAD:
+  `add_compile_options(-Wno-c++11-narrowing -pthread -msimd128)`. That the patch
+  *edits* that line rather than adding it is further evidence the fork carried
+  Emscripten support upstream never had.
 
 Note CMake 4.4.3 only *warns* about the pre-3.10 `cmake_minimum_required` calls
 in SDL2, enet and nihstro; they are not fatal.
