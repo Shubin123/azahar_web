@@ -477,7 +477,10 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
 
             // Benchmark the sustained post-warmup browser path.
             const picaBefore = { ...globalThis.azaharPicaTrace };
+            await window.azaharProcessSample?.('start');
             await window.azaharProfileStart?.();
+            const glBefore = globalThis.__azaharGlCensus?.() || null;
+            const frameTraceBefore = globalThis.__azaharFrameTrace?.()?.length ?? null;
             const guestStartUs = readPerfStats()?.guestTimeUs;
             let bench;
             try {
@@ -485,8 +488,19 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
             } finally {
                 await window.azaharProfileStop?.();
             }
+            await window.azaharProcessSample?.('end');
+            const visual = await readCanvasSceneStats();
             const perfStats = readPerfStats();
             const rendererStats = readRendererStats();
+            const glAfter = globalThis.__azaharGlCensus?.() || null;
+            const frameTraceAll = globalThis.__azaharFrameTrace?.() || null;
+            const frameTrace = frameTraceAll && frameTraceBefore !== null ?
+                frameTraceAll.slice(frameTraceBefore) : null;
+            const glCensus = glBefore && glAfter ? Object.fromEntries(
+                Object.entries(glAfter)
+                    .map(([name, value]) => [name, value - (glBefore[name] || 0)])
+                    .filter(([, delta]) => delta > 0)
+                    .sort((a, b) => b[1] - a[1])) : null;
             const picaTrace = globalThis.azaharPicaTrace ? Object.fromEntries(
                 Object.entries(globalThis.azaharPicaTrace).map(([key, value]) =>
                     [key, value - (picaBefore[key] || 0)])) : null;
@@ -507,6 +521,7 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
                 heapAfter,
                 warmup: warmupStats ? { avg: warmupStats.avg, fps: warmupStats.fps, p50: warmupStats.p50, p95: warmupStats.p95 } : null,
                 bench: {
+                    count: bench.count, elapsedMs: bench.elapsedMs,
                     avg: bench.avg, fps: bench.fps, stddev: bench.stddev,
                     min: bench.min, max: bench.max,
                     p50: bench.p50, p95: bench.p95, p99: bench.p99, p999: bench.p999,
@@ -515,6 +530,9 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
                 perfStats,
                 rendererStats,
                 picaTrace,
+                glCensus,
+                frameTrace,
+                visual,
                 profileSamples: bench.samples,
             });
         }
@@ -564,7 +582,11 @@ async function main() {
     // Exercise the same unified entry point users deploy. index_webgl2.html is
     // retained only as a redirect for old bookmarks and must not be part of a
     // renderer performance measurement.
-    const pageName = ARTIFACT === 'webgl2' ? 'index.html?renderer=webgl2' :
+    // A benchmark must measure the artifact it was asked for. The UI's
+    // throughput fallback would otherwise switch renderers mid-run and either
+    // abort the measurement or silently report the other backend's numbers.
+    const pageName = ARTIFACT === 'webgl2' ?
+        'index.html?renderer=webgl2&autoFallback=0' :
         'index.html?renderer=software';
     const pageQuery = process.env.AZAHAR_PAGE_QUERY || '';
     const queryJoin = pageName.includes('?') && pageQuery.startsWith('?') ? '&' : '';
@@ -583,11 +605,79 @@ async function main() {
         defaultViewport: { width: 1280, height: 900 },
         // The evaluate() call wraps init + ROM load + warmup + benchmark
         // inside a single Promise, so the protocol timeout must cover the
-        // full wall-clock duration (25 s + overhead).
-        protocolTimeout: 120000,
+        // full wall-clock duration. Deriving it from the requested durations
+        // keeps long warmups (needed by slow-booting titles) from failing the
+        // run after the work has already been done.
+        protocolTimeout: Math.max(120000,
+            (WARMUP_SECONDS + BENCH_SECONDS * REPEAT) * 1000 + 120000),
     });
 
     const page = await browser.newPage();
+
+    // Opt-in WebGL call census. The emulator's own timeGpu counter measures
+    // only the CPU time spent emitting commands, so a GPU process saturated by
+    // ANGLE/driver translation is invisible to it. Counting calls by name
+    // attributes that cost to specific PICA operations. Wrapping every entry
+    // point costs measurable overhead, so this stays disabled by default and
+    // is never part of a reported performance number.
+    if (process.env.AZAHAR_GL_CENSUS === '1') {
+        await page.evaluateOnNewDocument(() => {
+            const counts = Object.create(null);
+            const install = prototype => {
+                if (!prototype || prototype.__azaharGlCensusInstalled) return;
+                prototype.__azaharGlCensusInstalled = true;
+                for (const name of Object.getOwnPropertyNames(prototype)) {
+                    if (name === 'constructor') continue;
+                    const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
+                    if (!descriptor || typeof descriptor.value !== 'function') continue;
+                    if (!descriptor.writable && !descriptor.configurable) continue;
+                    const original = descriptor.value;
+                    const counted = function () {
+                        counts[name] = (counts[name] || 0) + 1;
+                        return original.apply(this, arguments);
+                    };
+                    Object.defineProperty(prototype, name, { ...descriptor, value: counted });
+                }
+            };
+            install(globalThis.WebGL2RenderingContext?.prototype);
+            install(globalThis.WebGLRenderingContext?.prototype);
+            globalThis.__azaharGlCensus = () => Object.assign({}, counts);
+        });
+    }
+
+    // Opt-in frame attribution. A callback that finishes quickly while the
+    // browser still delivers few frames means the cost sits outside script:
+    // long-animation-frame entries split each frame into script, rendering,
+    // and the unattributed remainder so that distinction is measurable rather
+    // than inferred.
+    if (process.env.AZAHAR_FRAME_TRACE === '1') {
+        await page.evaluateOnNewDocument(() => {
+            const frames = [];
+            globalThis.__azaharFrameTrace = () => frames.slice();
+            try {
+                new PerformanceObserver(list => {
+                    for (const entry of list.getEntries()) {
+                        frames.push({
+                            startTime: entry.startTime,
+                            duration: entry.duration,
+                            renderStart: entry.renderStart,
+                            styleAndLayoutStart: entry.styleAndLayoutStart,
+                            blockingDuration: entry.blockingDuration,
+                            scripts: (entry.scripts || []).map(script => ({
+                                name: script.name,
+                                invoker: script.invoker,
+                                duration: script.duration,
+                                pauseDuration: script.pauseDuration,
+                                forcedStyleAndLayoutDuration: script.forcedStyleAndLayoutDuration,
+                            })),
+                        });
+                    }
+                }).observe({ type: 'long-animation-frame', buffered: true });
+            } catch (_) {
+                globalThis.__azaharFrameTrace = () => null;
+            }
+        });
+    }
     const profiler = CPU_PROFILE_PATH ? await page.createCDPSession() : null;
     if (profiler) {
         await profiler.send('Profiler.enable');
@@ -613,6 +703,27 @@ async function main() {
         });
         await page.exposeFunction('azaharProfileStop', stopProfiler);
     }
+    // Chrome's own per-process accounting, scoped to this browser instance.
+    // `ps` cannot separate the harness browser from any other Chrome running
+    // on the machine, and the emulator's counters only see its own thread, so
+    // neither can show whether the GPU process is the limiter.
+    const processCpuSession = await browser.target().createCDPSession();
+    const processCpuSamples = {};
+    await page.exposeFunction('azaharProcessSample', async label => {
+        try {
+            const { processInfo } = await processCpuSession.send('SystemInfo.getProcessInfo');
+            processCpuSamples[label] = {
+                at: Date.now(),
+                byType: processInfo.reduce((acc, proc) => {
+                    acc[proc.type] = (acc[proc.type] || 0) + proc.cpuTime;
+                    return acc;
+                }, {}),
+            };
+        } catch (_) {
+            processCpuSamples[label] = null;
+        }
+    });
+
     const consoleErrors = [];
     const debugMessageCounts = new Map();
     page.on('console', msg => {
@@ -886,6 +997,51 @@ async function main() {
                             + `Tex0Only=${pf[11]}`);
                     }
                 }
+                if (run.visual) {
+                    console.log(`   Scene: nonBlack ${(run.visual.nonBlackCoverage * 100).toFixed(1)}% `
+                        + `colorful ${(run.visual.colorfulCoverage * 100).toFixed(1)}% `
+                        + `(sampled ${run.visual.samples} px)`);
+                }
+                if (processCpuSamples.start && processCpuSamples.end) {
+                    const wall = (processCpuSamples.end.at - processCpuSamples.start.at) / 1000;
+                    const deltas = Object.entries(processCpuSamples.end.byType)
+                        .map(([type, cpu]) => [type, cpu - (processCpuSamples.start.byType[type] || 0)])
+                        .filter(([, delta]) => delta > 0.01)
+                        .sort((a, b) => b[1] - a[1]);
+                    console.log(`   Browser CPU over ${wall.toFixed(1)}s (1.00 = one saturated core):`);
+                    for (const [type, delta] of deltas) {
+                        console.log(`     ${type.padEnd(14)} ${(delta / wall).toFixed(2)} cores`);
+                    }
+                }
+                if (run.frameTrace && run.frameTrace.length) {
+                    const t = run.frameTrace;
+                    const mean = key => t.reduce((sum, f) => sum + key(f), 0) / t.length;
+                    const scriptMs = mean(f => (f.scripts || []).reduce((s2, x) => s2 + x.duration, 0));
+                    const renderMs = mean(f => f.renderStart ? f.startTime + f.duration - f.renderStart : 0);
+                    const durationMs = mean(f => f.duration);
+                    console.log(`   Long frames: ${t.length} entries, mean duration ${durationMs.toFixed(1)}ms `
+                        + `(script ${scriptMs.toFixed(1)}ms, render ${renderMs.toFixed(1)}ms, `
+                        + `blocking ${mean(f => f.blockingDuration).toFixed(1)}ms)`);
+                    const byInvoker = new Map();
+                    for (const f of t) for (const x of f.scripts || []) {
+                        byInvoker.set(x.invoker, (byInvoker.get(x.invoker) || 0) + x.duration);
+                    }
+                    for (const [invoker, ms] of [...byInvoker].sort((a, b) => b[1] - a[1]).slice(0, 5)) {
+                        console.log(`     ${String(invoker).slice(0, 46).padEnd(46)} ${(ms / t.length).toFixed(1)}ms/frame`);
+                    }
+                }
+                if (run.glCensus) {
+                    const entries = Object.entries(run.glCensus);
+                    const total = entries.reduce((sum, [, n]) => sum + n, 0);
+                    const perSecond = total / (run.bench.count ? run.bench.elapsedMs / 1000 : 1);
+                    console.log(`   GL calls: ${total.toLocaleString()} total, `
+                        + `${Math.round(perSecond).toLocaleString()}/s, `
+                        + `${Math.round(total / Math.max(1, run.bench.count)).toLocaleString()}/callback`);
+                    for (const [name, n] of entries.slice(0, 10)) {
+                        console.log(`     ${name.padEnd(28)} ${n.toLocaleString().padStart(10)}`
+                            + `  ${(100 * n / total).toFixed(1)}%`);
+                    }
+                }
                 console.log(`   Heap: ${(run.heapAfter / 1024 / 1024).toFixed(0)}MB`);
                 if (run.measuredGuestSpeed !== null) {
                     console.log(`   Whole-window guest speed: ${(run.measuredGuestSpeed * 100).toFixed(1)}%`);
@@ -980,6 +1136,20 @@ async function main() {
         }
         process.exitCode = 1;
     } finally {
+        // A renderer that draws nothing is trivially fast, so a speed
+        // comparison between backends is only meaningful alongside the frame
+        // each one actually produced.
+        if (process.env.AZAHAR_SCREENSHOT) {
+            try {
+                const canvas = await page.$('#canvas');
+                if (canvas) {
+                    await canvas.screenshot({ path: process.env.AZAHAR_SCREENSHOT });
+                    console.log(`   Canvas screenshot: ${process.env.AZAHAR_SCREENSHOT}`);
+                }
+            } catch (error) {
+                console.error(`   Screenshot failed: ${error.message}`);
+            }
+        }
         await browser.close();
         await new Promise(resolve => server.close(resolve));
     }

@@ -66,6 +66,12 @@
     let lastFrameCount = 0;
     let displayFps = 0;
     let emulationSpeed = 0;
+    // Display-path throughput accounting. `stepWorkMs` is the time actually
+    // spent emulating, so it separates "the browser delivers few frames" from
+    // "each frame is expensive", which need opposite remedies.
+    let stepWorkMs = 0;
+    let stepWorkFrames = 0;
+    let gameGraphicsAt = 0;
     let saveStateStore = null;
     let saveStateBusy = false;
     let currentProgramId = '';
@@ -507,6 +513,21 @@
     });
 
     let softwareFallbackStarted = false;
+    // An accelerated backend can be slower than the software renderer without
+    // ever failing: some drivers stall frame production instead of rejecting
+    // work, which caps emulation at the frame rate rather than at the CPU.
+    // `?autoFallback=0` pins the selected renderer for measurement.
+    const autoFallbackEnabled =
+        new URLSearchParams(location.search).get('autoFallback') !== '0';
+    // An explicit renderer choice is honoured for far longer than Auto, which
+    // exists precisely to pick the faster backend on the user's behalf.
+    const throughputWindowMs = explicitWebGL2 ? 30000 : 8000;
+    // Scene loads and the first frames after a title screen briefly starve the
+    // callback rate on a backend that is otherwise keeping up. Only a run of
+    // consecutive bad samples is evidence of a sustained limit, so the switch
+    // needs ~6 s of them rather than one unlucky half-second.
+    const throughputBadSamplesRequired = 12;
+    let throughputBadSamples = 0;
 
     function restartInSoftware(reason) {
         if (!isWebGL2Artifact || softwareFallbackStarted) return;
@@ -518,7 +539,7 @@
         // Preserve harness/user-flow controls across the fresh-document
         // renderer switch. In particular, losing autostart=0 would begin
         // execution while an uploaded save state is still being installed.
-        for (const name of ['autostart', 'resolution', 'speed']) {
+        for (const name of ['autostart', 'resolution', 'speed', 'scheduler']) {
             if (currentUrl.searchParams.has(name)) {
                 destination.searchParams.set(name, currentUrl.searchParams.get(name));
             }
@@ -529,6 +550,35 @@
         // diagnostic without weakening the user-facing recovery path.
         destination.searchParams.set('webgl2-fallback-reason', reason);
         window.setTimeout(() => window.location.replace(destination.toString()), 0);
+    }
+
+    /**
+     * Fall back when the accelerated path is throughput-limited rather than
+     * broken.
+     *
+     * Emulation advances once per browser frame, so a backend that delivers
+     * few frames caps guest speed no matter how little work each frame costs.
+     * The duty cycle distinguishes the two causes: when the callback is idle
+     * most of the time, the CPU is not the limit and the software renderer,
+     * which needs no GPU-process work at all, runs faster. A busy callback
+     * means the opposite, and switching would make things worse.
+     */
+    function checkDisplayThroughput(now) {
+        if (!isWebGL2Artifact || softwareFallbackStarted || !autoFallbackEnabled) return;
+        if (!gameGraphicsDetected || !gameGraphicsAt) return;
+        if (now - gameGraphicsAt < throughputWindowMs) return;
+        if (!stepWorkFrames || displayFps <= 0) return;
+        const dutyCycle = (stepWorkMs / stepWorkFrames) * displayFps / 1000;
+        if (displayFps >= 20 || dutyCycle >= 0.35 || emulationSpeed >= 60) {
+            throughputBadSamples = 0;
+            return;
+        }
+        if (++throughputBadSamples < throughputBadSamplesRequired) return;
+        restartInSoftware(
+            `accelerated path delivered ${displayFps.toFixed(1)} frames/s at ` +
+            `${(dutyCycle * 100).toFixed(0)}% duty cycle ` +
+            `(${emulationSpeed.toFixed(0)}% speed) over ` +
+            `${throughputBadSamples} consecutive samples`);
     }
 
     function compileWebGL2Probe(gl, type, source) {
@@ -957,6 +1007,7 @@ void main() { frag_color = vec4(1.0); }`);
                     }
                 }
                 gameGraphicsDetected = nonBlackSamples >= 16 && colors.size >= 2;
+                if (gameGraphicsDetected) gameGraphicsAt = now;
             }
         }
         if (gameGraphicsDetected) {
@@ -1003,7 +1054,10 @@ void main() { frag_color = vec4(1.0); }`);
 
             try {
                 frameCount++;
+                const stepStartedAt = performance.now();
                 const result = wasmModule._azahar_step_frame();
+                stepWorkMs += performance.now() - stepStartedAt;
+                stepWorkFrames++;
 
                 if (result === 0) {
                     updateCanvasFromWasm();
@@ -1031,6 +1085,9 @@ void main() { frag_color = vec4(1.0); }`);
                             fpsEl.textContent = gameFps.toFixed(0) + ' game FPS' +
                                 (emulationSpeed > 0 ? ' | ' + emulationSpeed.toFixed(0) + '% speed' : '');
                         }
+                        checkDisplayThroughput(now);
+                        stepWorkMs = 0;
+                        stepWorkFrames = 0;
                     }
                     runAnimationFrame = AzaharScheduler.request(tick);
                 } else if (result === 1) {

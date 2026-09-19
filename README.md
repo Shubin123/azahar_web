@@ -39,6 +39,8 @@ web/                    # Ready-to-serve web application
   azahar_webgl2.wasm    # WebAssembly binary (WebGL2, ~10 MB)
 tests/                  # Test suite
   web_artifact_smoke.cjs  # Offline WASM validation
+  prepare_rom.cjs         # Verify/flag a decrypted dump as a test title
+  renderer_autofallback.cjs # Auto renderer switch, end to end through the UI
   benchmark_browser.cjs   # Headless Chrome performance benchmark
   browser_regression.cjs  # E2E rendering regression test
   title_transition_regression.cjs # Cold-boot title-to-game regression
@@ -99,6 +101,14 @@ AZAHAR_CHROME_ARGS=--use-angle=vulkan node tests/benchmark_browser.cjs --artifac
 # Rendering regression test (requires a decrypted ROM)
 AZAHAR_ROM_PATH=test_games/your_rom.3ds node tests/browser_regression.cjs
 
+# Prepare a decrypted dump as a test title (verifies it, copies into test_games/)
+node tests/prepare_rom.cjs '/path/to/game.3ds'
+
+# Auto renderer fallback, driven through the production UI
+node tests/renderer_autofallback.cjs
+AZAHAR_CHROME_ARGS=--use-angle=swiftshader \
+  node tests/renderer_autofallback.cjs --expect-none
+
 # Cold boot, press the title-screen touch target, and sustain gameplay
 AZAHAR_ROM_PATH=test_games/your_rom.3ds node tests/run.cjs --transition
 
@@ -125,6 +135,16 @@ Tested with Super Mario 3D Land (demo), Chrome headless:
 | Software compatibility | 31.3 | 12.6 | 21% | 66.88 ms |
 | WebGL2 + D3D11 ANGLE (CPU vertices) | 42.8 | 16.8 | 28% | 39.70 ms |
 | WebGL2 + Vulkan ANGLE | 140.1 | 68.9 | 115% | 4.44 ms |
+
+Auto also leaves an accelerated backend that *stalls* rather than fails. Some
+drivers throttle frame production instead of rejecting work, and because the
+emulator advances one guest step per browser frame, that caps speed no matter how
+cheap each frame is. On macOS/ANGLE-Metal, `2in1 Horses 3D` runs at 11 game FPS
+(18% speed) on WebGL2 and 60 game FPS (101%) on the software renderer, so Auto
+switches after ~14 seconds of sustained low throughput. The decision uses the
+callback duty cycle, not the frame rate alone: a slow frame rate with a *busy*
+callback is CPU-bound, where switching would be worse. `?autoFallback=0` pins the
+current renderer, which benchmarks pass so they measure what they asked for.
 
 The accelerated renderer is attempted first and stays active on D3D11 rather
 than falsely falling back. Vulkan/native-GL ANGLE paths are currently the

@@ -1,0 +1,19 @@
+{
+  "name": "azahar_web",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Build tooling, web frontend, and browser test harness for the Azahar WebAssembly port.",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node tests/run.cjs",
+    "smoke": "node tests/web_artifact_smoke.cjs",
+    "bench": "node tests/benchmark_browser.cjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Shubin123/azahar_web.git"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^23.11.1"
+  }
+}

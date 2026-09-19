@@ -66,6 +66,22 @@ cmake --build build-web2 --parallel 8
 
 Artifacts are generated under `build-web/bin/Release/` and automatically synchronized into `web/` by the `azahar_web_assets` CMake target. `build_web.bat` runs that target and verifies both files have matching SHA-256 hashes, so no manual copy step is needed. `node tests/web_artifact_smoke.cjs` validates the synchronized artifacts, generated API names, and WASM compilation. `tests/browser_regression.cjs`, supplied with a decrypted local `.3ds` through `AZAHAR_ROM_PATH`, verifies cross-origin isolation, initialization, ROM mounting/loading, automatic run-loop startup, canvas output, and browser errors. The accelerated display-scheduled loop detected a multi-color kiosk-demo framebuffer in about 8 seconds in Chrome. An encrypted CIA is expected to fail cleanly with the UI's encrypted-ROM status.
 
+### Build reproducibility (2026-09-19)
+
+The Emscripten toolchain builds cleanly on macOS (emcc 6.0.9, CMake, Ninja),
+but **the web port cannot currently be rebuilt from this repository**. `patches/`
+holds per-file deltas, not the port: `src/citra_sdl/emscripten_main.cpp` and
+`src/video_core/renderer_webgl2/` do not exist upstream, and there is no
+`ENABLE_WEBGL2_RENDERER` or `azahar_web_bundle` in upstream CMake. Against
+current upstream `main`, three of the four patches fail `git apply --check`
+(their base is commit `30d214dd`, and `patches/README.md` states they are not a
+replacement for the port).
+
+Consequence: any optimization inside `azahar.wasm` / `azahar_webgl2.wasm` —
+including the CPU-side limits noted under "Next FPS Work" — is blocked until the
+port's full sources are checked in or the original build tree is restored. Work
+in `web/` and `tests/` is unaffected, which is where optimization 15 lives.
+
 ## Performance & Benchmarking
 
 ### Optimization History
@@ -85,6 +101,7 @@ Artifacts are generated under `build-web/bin/Release/` and automatically synchro
 | 11 | Float UV-to-texel conversion | Compute UV-to-texel in native float32 inside TextureColor, avoiding f24 round-trip for width/height scaling | GPU cmd 187->178 ms; game FPS 3.8->4.0 |
 | 12 | Float-native texture sampling | TextureColorFloat bypasses f24 round-trip for UV coords entirely; float32 throughout the texture sampling path | Part of Opts 12-14 batch |
 | 13 | TEV stage early-exit | Pre-compute active TEV stage count per triangle; skip pass-through stages in the inner pixel loop | Part of Opts 12-14 batch |
+| 15 | Display-path throughput fallback | Auto leaves an accelerated backend that stalls frame production instead of failing. Emulation advances once per browser frame, so a backend delivering few frames caps guest speed regardless of how cheap each frame is; the callback duty cycle separates that from being CPU-bound | 2in1 Horses 3D: 11 -> 60 game FPS (18% -> 101% speed) end to end through the UI |
 | 14 | Pre-computed TextureInfo | Hoist TextureInfo::FromPicaRegister and memory pointer lookups out of per-pixel loop to per-triangle setup; inline alpha test and hoist fog check | Part of Opts 12-14 batch |
 
 ### Benchmark Results (2026-09-01)
@@ -136,6 +153,19 @@ node tests/browser_regression.cjs
 
 Results are written to `tests/benchmark_results.json`.
 
+Optional diagnostics, all off by default because each one perturbs what it
+measures:
+
+| Variable | Effect |
+|---|---|
+| `AZAHAR_GL_CENSUS=1` | Counts WebGL2 calls by name over the measured window |
+| `AZAHAR_FRAME_TRACE=1` | Records long-animation-frame entries (script vs render vs idle) |
+| `AZAHAR_SCREENSHOT=PATH` | Writes the `#canvas` contents after the run |
+| `AZAHAR_CHROME_ARGS` | Extra Chrome flags, e.g. `--use-angle=swiftshader` |
+
+Per-process CPU (`SystemInfo.getProcessInfo` over CDP) is always sampled around
+the measured window and reported in cores, scoped to the browser under test.
+
 ### Current Cross-title Baseline (2026-09-06)
 
 These measurements use the deployed-default WebGL2 renderer on Chrome/ANGLE D3D11. Mario uses the player-controllable W1-1 state; the other dumps currently have only cold-boot measurements, so they identify broad title variance but are not yet comparable gameplay scenes.
@@ -153,15 +183,56 @@ Raw local results are written under `tmp_test/*_benchmark.json` so routine profi
 
 Fast-forward no longer changes the emulated CPU clock. It requests up to 4x guest-time progress within the normal browser work budget and caps missed-time backlog, so slow gameplay cannot make a later 1x scene run too fast. On the NSMB2 boot workload, the 1x setting measured 69.8 game FPS / 117% speed and the 4x target measured 127.4 game FPS / 213% speed. Mario W1-1 remains GPU/CPU-vertex bound, so it cannot meet the requested target until that renderer bottleneck is removed.
 
+### 2in1 Horses 3D — renderer throughput (2026-09-19)
+
+ROM: `2in1 Horses 3D` (Horse & Foal), 256 MB, title/game-select scene.
+Chrome headless on macOS (Apple M1), 120-second warmup, 15-second measurement.
+Both renderers were confirmed to draw the same scene before comparing.
+
+| Renderer | Guest speed | Game FPS | Browser callbacks/s | GPU process | Renderer process |
+|---|---:|---:|---:|---:|---:|
+| Software | 100.3% | 60.0 | 60.0 | 0.03 cores | 1.19 cores |
+| WebGL2, ANGLE Metal (default) | 44.1% | 23.3 | 10.2 | 0.76 cores | 0.05 cores |
+| WebGL2, ANGLE SwiftShader | 101.0% | 59.5 | 59.9 | 1.63 cores | 0.17 cores |
+
+The accelerated backend is not doing more work; it is stalling. Its GPU process
+burns 0.76 cores to deliver 10 frames a second on 4,337 GL calls/s and 139
+draws/s, with no texture upload and no shader compilation inside the measured
+window. Long-animation-frame entries average 105 ms with 0.0 ms of script and
+0.0 ms blocking, so the main thread is idle and waiting. SwiftShader — a pure
+CPU implementation of the same GL commands, and far slower at real
+rasterization — reaches a full 60 Hz, which rules out command volume as the
+cause and points at a per-frame synchronization stall in ANGLE's Metal backend.
+
+Because `azahar_step_frame` advances the guest once per browser frame, capped
+frame production caps emulation. That is what optimization 15 detects and
+escapes. `?autoFallback=0` pins the selected renderer, which the benchmark now
+passes so it always measures the artifact it was asked for.
+
 ### Next FPS Work
 
 See `tests/PERFORMANCE.md` for the 2026-09-07 gameplay-only CPU trace, rejected
-4096-entry vertex-cache experiment, and new cross-title state inventory.
+4096-entry vertex-cache experiment, cross-title state inventory, and the
+2026-09-19 renderer-throughput investigation and its method.
 PICA execution accounts for 44.4% of the measured Mario main-thread trace;
 decode/setup is only 0.5%. The larger cache did not improve FPS and was reverted.
 
-1. Use the new persistent save UI to capture repeatable, player-controllable states for Zelda, NSMB2, and The Sims 3. Gate every optimization on the same scenes; boot screens are too light to predict gameplay cost.
-2. Add production OpenGL counters around CPU PICA vertex translation, draw submission, display transfer, cache upload/download, and shader compilation. The existing detailed renderer counters describe the experimental backend and are zero on the default OpenGL path, leaving the current 43 ms Mario GPU-command cost insufficiently attributed.
-3. Fix the generated PICA vertex-shader path on ANGLE/D3D11. It is fast at native resolution but currently produces empty scaled framebuffers, forcing the reliable CPU-vertex path for 2x-4x. A correct generated path removes the largest avoidable CPU graphics stage without reducing visuals.
-4. Batch and cache CPU-translated vertex streams by shader/uniform/input state so unchanged draws avoid reinterpreting PICA instructions and rebuilding host buffers. This is the safest macro-level fallback if D3D shader generation remains driver-sensitive.
-5. Profile the ARM11 pretranslated dyncom block dispatcher separately from graphics. Browser WebAssembly cannot directly execute arbitrary generated machine code, so the practical JIT direction is larger cached micro-op/superblock translation with fewer indirect dispatches, then validation against all captured gameplay states.
+0. **Find the per-frame stall in the WebGL2 path on ANGLE Metal.** Optimization
+   15 escapes it but does not fix it, so the accelerated backend is still
+   unavailable to this title on macOS. SwiftShader running the identical command
+   stream at 60 Hz localises the cause to backend synchronization rather than to
+   command volume, PICA work, or the emulator's own counters (`timeGpu` measures
+   only CPU time spent emitting commands and reports 0.13 ms while the GPU
+   process burns 0.82 cores). Blocked on build reproducibility.
+1. **Decouple emulation from frame production.** `azahar_step_frame` stops after
+   `max_slices_per_tick = 256` slices, which on this title is ~4 ms of a 14 ms
+   budget; the deadline is never reached. Whenever the display path is slow, the
+   emulator therefore idles most of every frame (measured duty cycle 2-5%).
+   Running to the deadline instead of a fixed slice count, or advancing the guest
+   without presenting when frames are being dropped, would raise guest speed on
+   any frame-starved configuration. Blocked on build reproducibility.
+2. Use the new persistent save UI to capture repeatable, player-controllable states for Zelda, NSMB2, and The Sims 3. Gate every optimization on the same scenes; boot screens are too light to predict gameplay cost.
+3. Add production OpenGL counters around CPU PICA vertex translation, draw submission, display transfer, cache upload/download, and shader compilation. The existing detailed renderer counters describe the experimental backend and are zero on the default OpenGL path, leaving the current 43 ms Mario GPU-command cost insufficiently attributed.
+4. Fix the generated PICA vertex-shader path on ANGLE/D3D11. It is fast at native resolution but currently produces empty scaled framebuffers, forcing the reliable CPU-vertex path for 2x-4x. A correct generated path removes the largest avoidable CPU graphics stage without reducing visuals.
+5. Batch and cache CPU-translated vertex streams by shader/uniform/input state so unchanged draws avoid reinterpreting PICA instructions and rebuilding host buffers. This is the safest macro-level fallback if D3D shader generation remains driver-sensitive.
+6. Profile the ARM11 pretranslated dyncom block dispatcher separately from graphics. Browser WebAssembly cannot directly execute arbitrary generated machine code, so the practical JIT direction is larger cached micro-op/superblock translation with fewer indirect dispatches, then validation against all captured gameplay states.
