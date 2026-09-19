@@ -166,13 +166,25 @@ speed before the run requirement was added.
 carries both directions:
 
 ```bash
-# Positive: ANGLE Metal stalls, Auto must leave it
+# Positive: ANGLE Metal stalls, Auto must leave it and reuse the verdict
 node tests/renderer_autofallback.cjs
+
+# Back-compat: an explicit WebGL2 choice survives the same stalling backend
+node tests/renderer_autofallback.cjs --pinned
 
 # Negative control: WebGL2 keeps up, Auto must stay on it
 AZAHAR_CHROME_ARGS=--use-angle=swiftshader \
   node tests/renderer_autofallback.cjs --expect-none
 ```
+
+Measured on 2026-09-19 with `2in1 Horses 3D`:
+
+| Direction | Result |
+|---|---|
+| Auto, ANGLE Metal | switched; 14 -> 60 game FPS, 23% -> 100% speed |
+| Auto, repeat visit | went straight to software in 0.1 s from the stored verdict |
+| Pinned `?renderer=webgl2` | stayed on WebGL2 (47 game FPS / 78%) as chosen |
+| Auto, ANGLE SwiftShader | stayed on WebGL2 |
 
 It uploads the ROM through the browser's real file picker. A 256 MB `File`
 constructed inside the page competes with the 768 MB emulator heap and fails

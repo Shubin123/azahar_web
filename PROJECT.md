@@ -206,8 +206,29 @@ cause and points at a per-frame synchronization stall in ANGLE's Metal backend.
 
 Because `azahar_step_frame` advances the guest once per browser frame, capped
 frame production caps emulation. That is what optimization 15 detects and
-escapes. `?autoFallback=0` pins the selected renderer, which the benchmark now
-passes so it always measures the artifact it was asked for.
+escapes.
+
+Scope, so existing configurations are unaffected:
+
+- Only **Auto** re-picks a backend. `?renderer=webgl2` (the dropdown's
+  "Accelerated") is pinned and is never switched for being slow; the
+  hard-failure fallbacks still apply to both, because a backend that cannot
+  present is not a choice.
+- The verdict is stored under `azahar-renderer-verdict`, keyed by the
+  `UNMASKED_RENDERER_WEBGL` adapter string, so a macOS/Metal result cannot
+  suppress the accelerated path on a D3D11 or Vulkan machine. The existing
+  D3D11 CPU-vertex selection in `preflightWebGL2` is unchanged.
+- A repeat visit acts on the stored verdict during preflight, before the WebGL2
+  module is fetched: measured at 0.1 s versus a ~14 s probe plus a second ROM
+  upload.
+- `?autoFallback=0` pins the current renderer and ignores any stored verdict.
+  The benchmark passes it so it always measures the artifact it was asked for.
+
+`tests/renderer_autofallback.cjs` covers all three directions: Auto switches and
+then reuses the verdict, `--pinned` asserts an explicit WebGL2 choice survives on
+the same stalling backend, and `--expect-none` (with
+`AZAHAR_CHROME_ARGS=--use-angle=swiftshader`) asserts Auto stays put when the
+accelerated path keeps up.
 
 ### Next FPS Work
 

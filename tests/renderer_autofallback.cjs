@@ -32,7 +32,8 @@ const cfg = require('./config.cjs');
 
 const romPath = cfg.argVal('--rom', cfg.romPath);
 const timeoutSeconds = Number(cfg.argVal('--timeout-seconds', '240'));
-const expectFallback = !cfg.argFlag('--expect-none');
+const pinnedMode = cfg.argFlag('--pinned');
+const expectFallback = !cfg.argFlag('--expect-none') && !pinnedMode;
 
 if (!romPath || !fs.existsSync(romPath)) {
     console.error('No ROM found. Place one in test_games/ or pass --rom PATH.');
@@ -48,10 +49,14 @@ function log(message) { console.log(`   ${message}`); }
 async function main() {
     const server = createWebServer(path.join(cfg.ROOT, 'web'));
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-    const url = `http://127.0.0.1:${server.address().port}/index.html`;
-    console.log(`# Renderer auto-fallback test`);
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    // Pinned mode asserts the opposite guarantee: an explicit choice in the
+    // dropdown must survive even on a backend Auto would abandon, so the
+    // Windows/D3D11 and Vulkan configurations keep behaving as before.
+    const url = pinnedMode ? `${origin}/index.html?renderer=webgl2` : `${origin}/index.html`;
+    console.log(`# Renderer auto-fallback test${pinnedMode ? ' (pinned WebGL2)' : ''}`);
     console.log(`# ROM: ${path.basename(romPath)}`);
-    console.log(`# URL: ${url} (Auto — no renderer query)`);
+    console.log(`# URL: ${url}${pinnedMode ? '' : ' (Auto — no renderer query)'}`);
 
     const browser = await puppeteer.launch({
         headless: 'new',
@@ -108,7 +113,11 @@ async function main() {
             await new Promise(r => setTimeout(r, 500));
         }
 
-        if (switched && !expectFallback) {
+        if (switched && pinnedMode) {
+            failure = 'An explicit WebGL2 choice was overridden by the throughput fallback';
+        } else if (pinnedMode) {
+            log(`stayed on WebGL2 as chosen; meter: ${lastMeter || 'n/a'}`);
+        } else if (switched && !expectFallback) {
             const fromUrl = new URLSearchParams(switched.search)
                 .get('webgl2-fallback-reason');
             failure = `Fell back although the accelerated path was keeping up: ` +
@@ -162,6 +171,25 @@ async function main() {
             const speed = Number((after.match(/(\d+)% speed/) || [])[1] || 0);
             if (speed < 60) {
                 failure = `Software renderer reached only ${speed}% speed after fallback`;
+            }
+
+            // A repeat visit must act on the stored verdict instead of paying
+            // the timed probe and a second ROM upload again. This is what makes
+            // the measured result the machine's setting rather than a ritual.
+            const startedAt = Date.now();
+            await page.goto(url, { waitUntil: 'domcontentloaded' });
+            await page.waitForFunction(
+                () => /renderer=software/.test(window.location.search),
+                { timeout: 60000 });
+            const revisitSeconds = (Date.now() - startedAt) / 1000;
+            const revisitReason = await page.evaluate(() =>
+                new URLSearchParams(window.location.search).get('webgl2-fallback-reason') || '');
+            log(`repeat visit went straight to software in ${revisitSeconds.toFixed(1)}s`);
+            log(`repeat reason: ${revisitReason}`);
+            if (!/remembered/.test(revisitReason)) {
+                failure = `Repeat visit re-probed instead of using the stored verdict: ${revisitReason}`;
+            } else if (revisitSeconds > 30) {
+                failure = `Repeat visit took ${revisitSeconds.toFixed(1)}s; expected a redirect, not a probe`;
             }
         }
     } catch (error) {

@@ -136,6 +136,14 @@ Tested with Super Mario 3D Land (demo), Chrome headless:
 | WebGL2 + D3D11 ANGLE (CPU vertices) | 42.8 | 16.8 | 28% | 39.70 ms |
 | WebGL2 + Vulkan ANGLE | 140.1 | 68.9 | 115% | 4.44 ms |
 
+### Renderer dropdown
+
+| Setting | Behaviour |
+|---|---|
+| **Auto — best for this machine** (default) | Starts accelerated, and switches only if this GPU fails or cannot keep up. The result is remembered per GPU adapter, so later visits start on the right renderer immediately. |
+| **Accelerated (WebGL2)** | Pinned. Never switched for being slow; only a backend that cannot present at all still falls back. |
+| **Compatibility (software)** | Pinned software rasterizer. |
+
 Auto also leaves an accelerated backend that *stalls* rather than fails. Some
 drivers throttle frame production instead of rejecting work, and because the
 emulator advances one guest step per browser frame, that caps speed no matter how
@@ -143,8 +151,15 @@ cheap each frame is. On macOS/ANGLE-Metal, `2in1 Horses 3D` runs at 11 game FPS
 (18% speed) on WebGL2 and 60 game FPS (101%) on the software renderer, so Auto
 switches after ~14 seconds of sustained low throughput. The decision uses the
 callback duty cycle, not the frame rate alone: a slow frame rate with a *busy*
-callback is CPU-bound, where switching would be worse. `?autoFallback=0` pins the
-current renderer, which benchmarks pass so they measure what they asked for.
+callback is CPU-bound, where switching would be worse.
+
+The verdict is keyed by the WebGL adapter string, so a result measured on one
+GPU never suppresses the accelerated path on another — Windows D3D11 and Vulkan
+machines keep their own answer, and the D3D11 CPU-vertex selection is untouched.
+A repeat visit then costs a redirect (~0.1 s) instead of another timed probe and
+a second ROM upload. "Re-measure this machine" clears it, and so does picking a
+renderer by hand. `?autoFallback=0` pins the current renderer and ignores any
+stored verdict, which benchmarks pass so they measure what they asked for.
 
 The accelerated renderer is attempted first and stays active on D3D11 rather
 than falsely falling back. Vulkan/native-GL ANGLE paths are currently the
