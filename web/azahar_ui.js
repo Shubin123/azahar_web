@@ -34,8 +34,62 @@
     const progressEl = document.getElementById('progress');
     const fpsEl = document.getElementById('fps');
     const logEl = document.getElementById('log');
+    // The adapter string keys the remembered verdict, so a result measured on
+    // one GPU/driver never suppresses the accelerated path on another. A
+    // Windows D3D11 or Vulkan machine therefore keeps its own answer.
+    let webglAdapter = '';
+    const RENDERER_VERDICT_KEY = 'azahar-renderer-verdict';
+    const RENDERER_VERDICT_VERSION = 1;
+
+    function readRendererVerdict() {
+        try {
+            const stored = JSON.parse(localStorage.getItem(RENDERER_VERDICT_KEY) || 'null');
+            if (!stored || stored.v !== RENDERER_VERDICT_VERSION) return null;
+            return stored;
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function storeRendererVerdict(entry) {
+        try {
+            localStorage.setItem(RENDERER_VERDICT_KEY, JSON.stringify({
+                v: RENDERER_VERDICT_VERSION,
+                adapter: webglAdapter || 'masked/unknown',
+                at: Date.now(),
+                ...entry,
+            }));
+        } catch (_) {}
+    }
+
+    function clearRendererVerdict() {
+        try {
+            localStorage.removeItem(RENDERER_VERDICT_KEY);
+        } catch (_) {}
+    }
+
+    // An accelerated backend can be slower than the software renderer without
+    // ever failing: some drivers stall frame production instead of rejecting
+    // work, which caps emulation at the frame rate rather than at the CPU.
+    // `?autoFallback=0` pins the selected renderer for measurement.
+    const autoFallbackEnabled =
+        new URLSearchParams(location.search).get('autoFallback') !== '0';
+    // Only Auto re-picks a backend. Choosing "Accelerated (WebGL2)" in the
+    // dropdown is a decision to run that backend, including where it is slow,
+    // so throughput never overrides it; the hard-failure fallbacks above still
+    // apply to both because a backend that cannot present is not a choice.
+    const throughputFallbackAllowed = autoFallbackEnabled && !explicitWebGL2;
+    const throughputWindowMs = 8000;
+    // Scene loads and the first frames after a title screen briefly starve the
+    // callback rate on a backend that is otherwise keeping up. Only a run of
+    // consecutive bad samples is evidence of a sustained limit, so the switch
+    // needs ~6 s of them rather than one unlucky half-second.
+    const throughputBadSamplesRequired = 12;
+    let throughputBadSamples = 0;
+
     const rendererMode = document.getElementById('renderer-mode');
     const rendererModeHelp = document.getElementById('renderer-mode-help');
+    const rendererRemeasure = document.getElementById('renderer-remeasure');
     const resolutionScale = document.getElementById('resolution-scale');
     const resolutionScaleHelp = document.getElementById('resolution-scale-help');
     const saveStateSlot = document.getElementById('save-state-slot');
@@ -66,6 +120,12 @@
     let lastFrameCount = 0;
     let displayFps = 0;
     let emulationSpeed = 0;
+    // Display-path throughput accounting. `stepWorkMs` is the time actually
+    // spent emulating, so it separates "the browser delivers few frames" from
+    // "each frame is expensive", which need opposite remedies.
+    let stepWorkMs = 0;
+    let stepWorkFrames = 0;
+    let gameGraphicsAt = 0;
     let saveStateStore = null;
     let saveStateBusy = false;
     let currentProgramId = '';
@@ -128,12 +188,52 @@
     // single deployment page and make that required reload explicit.
     if (rendererMode) {
         const query = new URLSearchParams(location.search);
-        rendererMode.value = query.get('renderer') || 'auto';
+        // An automatic fallback lands on `renderer=software`, but the mode the
+        // user selected is still Auto. Showing "Compatibility" there would
+        // misreport their setting and make the switch look manual.
+        rendererMode.value = query.has('webgl2-fallback') ?
+            'auto' : (query.get('renderer') || 'auto');
         if (!rendererMode.options[rendererMode.selectedIndex]) rendererMode.value = 'auto';
-        rendererModeHelp.textContent = isWebGL2Artifact ?
-            'Active: accelerated WebGL2. Auto falls back if this GPU path is incompatible.' :
-            `Active: compatibility renderer${query.has('webgl2-fallback') ? ' (automatic fallback)' : ''}.`;
+        const remembered = readRendererVerdict();
+        if (isWebGL2Artifact) {
+            rendererModeHelp.textContent = explicitWebGL2 ?
+                'Active: accelerated WebGL2, pinned by your choice. Auto would switch ' +
+                'if this GPU path measured slower.' :
+                'Active: accelerated WebGL2. Auto switches if this GPU path fails or ' +
+                'cannot keep up.';
+        } else if (remembered && remembered.verdict === 'software') {
+            // Say what was measured, not just that something happened: the
+            // accelerated option is still selectable and this is the evidence
+            // for leaving it alone.
+            rendererModeHelp.textContent =
+                `Active: compatibility renderer — fastest measured on this GPU ` +
+                `(${remembered.adapter}). Accelerated gave ${remembered.fps} frames/s ` +
+                `at ${remembered.speed}% speed.`;
+        } else {
+            rendererModeHelp.textContent =
+                `Active: compatibility renderer${query.has('webgl2-fallback') ? ' (automatic fallback)' : ''}.`;
+        }
+        if (rendererRemeasure && remembered) {
+            rendererRemeasure.hidden = false;
+            rendererRemeasure.addEventListener('click', () => {
+                clearRendererVerdict();
+                const destination = new URL('index.html', location.href);
+                if (selectedResolutionScale !== 1) {
+                    destination.searchParams.set('resolution', String(selectedResolutionScale));
+                }
+                if (selectedFastForward !== 1) {
+                    destination.searchParams.set('speed', String(selectedFastForward));
+                }
+                if (!autoStart) destination.searchParams.set('autostart', '0');
+                location.assign(destination.toString());
+            });
+        }
         rendererMode.addEventListener('change', () => {
+            // Picking a renderer by hand retires the remembered measurement:
+            // choosing Accelerated is a request to run it, and returning to
+            // Auto afterwards should measure again rather than replay an old
+            // verdict the user has just overridden.
+            if (rendererMode.value !== 'auto') clearRendererVerdict();
             const destination = new URL('index.html', location.href);
             if (rendererMode.value !== 'auto') {
                 destination.searchParams.set('renderer', rendererMode.value);
@@ -507,7 +607,6 @@
     });
 
     let softwareFallbackStarted = false;
-
     function restartInSoftware(reason) {
         if (!isWebGL2Artifact || softwareFallbackStarted) return;
         softwareFallbackStarted = true;
@@ -518,7 +617,7 @@
         // Preserve harness/user-flow controls across the fresh-document
         // renderer switch. In particular, losing autostart=0 would begin
         // execution while an uploaded save state is still being installed.
-        for (const name of ['autostart', 'resolution', 'speed']) {
+        for (const name of ['autostart', 'resolution', 'speed', 'scheduler']) {
             if (currentUrl.searchParams.has(name)) {
                 destination.searchParams.set(name, currentUrl.searchParams.get(name));
             }
@@ -529,6 +628,43 @@
         // diagnostic without weakening the user-facing recovery path.
         destination.searchParams.set('webgl2-fallback-reason', reason);
         window.setTimeout(() => window.location.replace(destination.toString()), 0);
+    }
+
+    /**
+     * Fall back when the accelerated path is throughput-limited rather than
+     * broken.
+     *
+     * Emulation advances once per browser frame, so a backend that delivers
+     * few frames caps guest speed no matter how little work each frame costs.
+     * The duty cycle distinguishes the two causes: when the callback is idle
+     * most of the time, the CPU is not the limit and the software renderer,
+     * which needs no GPU-process work at all, runs faster. A busy callback
+     * means the opposite, and switching would make things worse.
+     */
+    function checkDisplayThroughput(now) {
+        if (!isWebGL2Artifact || softwareFallbackStarted || !throughputFallbackAllowed) return;
+        if (!gameGraphicsDetected || !gameGraphicsAt) return;
+        if (now - gameGraphicsAt < throughputWindowMs) return;
+        if (!stepWorkFrames || displayFps <= 0) return;
+        const dutyCycle = (stepWorkMs / stepWorkFrames) * displayFps / 1000;
+        if (displayFps >= 20 || dutyCycle >= 0.35 || emulationSpeed >= 60) {
+            throughputBadSamples = 0;
+            return;
+        }
+        if (++throughputBadSamples < throughputBadSamplesRequired) return;
+        const reason =
+            `accelerated path delivered ${displayFps.toFixed(1)} frames/s at ` +
+            `${(dutyCycle * 100).toFixed(0)}% duty cycle ` +
+            `(${emulationSpeed.toFixed(0)}% speed) over ` +
+            `${throughputBadSamples} consecutive samples`;
+        // Remember it so Auto does not repeat a ~14 s probe, and a second ROM
+        // upload, on every visit to a machine whose answer is already known.
+        storeRendererVerdict({
+            verdict: 'software', reason,
+            fps: Number(displayFps.toFixed(1)),
+            speed: Number(emulationSpeed.toFixed(0)),
+        });
+        restartInSoftware(reason);
     }
 
     function compileWebGL2Probe(gl, type, source) {
@@ -557,7 +693,17 @@
         const debugRenderer = gl.getExtension('WEBGL_debug_renderer_info');
         const renderer = debugRenderer ?
             gl.getParameter(debugRenderer.UNMASKED_RENDERER_WEBGL) : '';
-        log(`WebGL2 adapter: ${renderer || 'masked/unknown'}`);
+        webglAdapter = renderer || 'masked/unknown';
+        log(`WebGL2 adapter: ${webglAdapter}`);
+        // Auto already measured this adapter and found the accelerated path
+        // slower. Act on that here, before the WebGL2 module is fetched, so the
+        // repeat visit costs a redirect instead of another timed probe.
+        const remembered = readRendererVerdict();
+        if (throughputFallbackAllowed && remembered &&
+            remembered.adapter === webglAdapter && remembered.verdict === 'software') {
+            restartInSoftware(`remembered result for this GPU: ${remembered.reason}`);
+            return false;
+        }
         // ANGLE/D3D11 can spend about a minute synchronously translating the
         // generated PICA vertex shaders. Keep the WebGL2 rasterizer and select
         // its CPU-vertex path instead; this reaches gameplay in a few seconds
@@ -957,6 +1103,7 @@ void main() { frag_color = vec4(1.0); }`);
                     }
                 }
                 gameGraphicsDetected = nonBlackSamples >= 16 && colors.size >= 2;
+                if (gameGraphicsDetected) gameGraphicsAt = now;
             }
         }
         if (gameGraphicsDetected) {
@@ -1003,7 +1150,10 @@ void main() { frag_color = vec4(1.0); }`);
 
             try {
                 frameCount++;
+                const stepStartedAt = performance.now();
                 const result = wasmModule._azahar_step_frame();
+                stepWorkMs += performance.now() - stepStartedAt;
+                stepWorkFrames++;
 
                 if (result === 0) {
                     updateCanvasFromWasm();
@@ -1031,6 +1181,9 @@ void main() { frag_color = vec4(1.0); }`);
                             fpsEl.textContent = gameFps.toFixed(0) + ' game FPS' +
                                 (emulationSpeed > 0 ? ' | ' + emulationSpeed.toFixed(0) + '% speed' : '');
                         }
+                        checkDisplayThroughput(now);
+                        stepWorkMs = 0;
+                        stepWorkFrames = 0;
                     }
                     runAnimationFrame = AzaharScheduler.request(tick);
                 } else if (result === 1) {

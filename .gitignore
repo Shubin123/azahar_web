@@ -1,7 +1,7 @@
 # Azahar Web Emulator - .gitignore
 
-# Upstream emulator source (Git submodule checkout)
-/azahar/
+# Repository-local toolchains installed by setup_web_toolchain.sh
+/.toolchains/
 
 # Build directories
 /build-*/

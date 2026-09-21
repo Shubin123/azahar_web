@@ -53,11 +53,12 @@ module.exports = function(addTest) {
             'citra_core / azahar_core target must be defined in src/core/CMakeLists.txt');
     });
 
-    addTest('T1_F01_04', 'Tier 1', 'Emscripten CMake Build Setup', 'Target citra_sdl static library build target definition', async (harness) => {
-        const sdlCmake = path.join(AZAHAR_DIR, 'src', 'citra_sdl', 'CMakeLists.txt');
-        assert.ok(fs.existsSync(sdlCmake), 'src/citra_sdl/CMakeLists.txt must exist');
-        const content = fs.readFileSync(sdlCmake, 'utf-8');
-        assert.ok(content.includes('add_library(citra_sdl STATIC'), 'citra_sdl must be defined as STATIC library target');
+    addTest('T1_F01_04', 'Tier 1', 'Emscripten CMake Build Setup', 'Repo-owned web frontend target definition', async (harness) => {
+        const webCmake = path.join(ROOT_DIR, 'port', 'CMakeLists.txt');
+        assert.ok(fs.existsSync(webCmake), 'port/CMakeLists.txt must exist');
+        const content = fs.readFileSync(webCmake, 'utf-8');
+        assert.ok(content.includes('add_executable(azahar_web'),
+            'the repo-owned azahar_web executable target must be defined');
     });
 
     addTest('T1_F01_05', 'Tier 1', 'Emscripten CMake Build Setup', 'WASM module output interface instantiation', async (harness) => {
@@ -183,11 +184,11 @@ module.exports = function(addTest) {
     // =========================================================================
 
     addTest('T1_F05_01', 'Tier 1', 'Non-blocking Canvas Frontend', 'Single-frame present method non-blocking execution', async (harness) => {
-        const swFile = path.join(AZAHAR_DIR, 'src', 'citra_sdl', 'emu_window', 'emu_window_sdl2_sw.cpp');
-        assert.ok(fs.existsSync(swFile), 'emu_window_sdl2_sw.cpp must exist');
+        const swFile = path.join(ROOT_DIR, 'port', 'src', 'citra_web', 'emu_window_web.cpp');
+        assert.ok(fs.existsSync(swFile), 'port/src/citra_web/emu_window_web.cpp must exist');
         const content = fs.readFileSync(swFile, 'utf-8');
-        assert.ok(content.includes('Present') || content.includes('PresentSingleFrame') || content.includes('SDL_RenderPresent'),
-            'emu_window_sdl2_sw.cpp must define software frame presentation');
+        assert.ok(content.includes('EmuWindow_Web::Present') && content.includes('SDL_UpdateWindowSurface'),
+            'the web window must define non-blocking software frame presentation');
     });
 
     addTest('T1_F05_02', 'Tier 1', 'Non-blocking Canvas Frontend', 'SDL software window initialization without desktop display server', async (harness) => {

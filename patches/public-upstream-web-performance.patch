@@ -1,0 +1,1744 @@
+diff --git a/src/video_core/pica/pica_core.cpp b/src/video_core/pica/pica_core.cpp
+index 910ebc2..79246e0 100644
+--- a/src/video_core/pica/pica_core.cpp
++++ b/src/video_core/pica/pica_core.cpp
+@@ -14,6 +14,9 @@
+ #include "video_core/pica/vertex_loader.h"
+ #include "video_core/rasterizer_interface.h"
+ #include "video_core/shader/shader.h"
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ 
+ namespace Pica {
+ 
+@@ -1095,6 +1098,38 @@ void PicaCore::DrawArrays(bool is_indexed) {
+ }
+ 
+ void PicaCore::LoadVertices(bool is_indexed) {
++#ifdef __EMSCRIPTEN__
++    static const bool trace_vertices = EM_ASM_INT({
++        return new URLSearchParams(location.search).get('picaTrace') === '1';
++    });
++    const double trace_start = trace_vertices ? emscripten_get_now() : 0;
++    u32 trace_hits = 0;
++    u32 trace_misses = 0;
++    u32 trace_collisions = 0;
++    SCOPE_EXIT({
++        if (trace_vertices) {
++            EM_ASM({
++                const s = globalThis.azaharPicaTrace ||= ({
++                    batches: 0, vertices: 0, hits: 0, misses: 0, collisions: 0, vertexMs: 0
++                });
++                s.batches++; s.vertices += $0; s.hits += $1;
++                s.misses += $2; s.collisions += $3; s.vertexMs += $4;
++            }, regs.internal.pipeline.num_vertices, trace_hits, trace_misses,
++               trace_collisions, emscripten_get_now() - trace_start);
++        }
++    });
++    static u32 reported_paths = 0;
++    const u32 path = (Settings::values.use_hw_shader ? 1u : 0u) |
++        (regs.internal.pipeline.use_gs == PipelineRegs::UseGS::Yes ? 2u : 0u) |
++        (primitive_assembler.IsEmpty() ? 4u : 0u);
++    if (!(reported_paths & (1u << path))) {
++        reported_paths |= 1u << path;
++        EM_ASM({ console.info('[Azahar PICA] CPU vertex path: hardware=' + $0 +
++            ' geometry=' + $1 + ' assemblerEmpty=' + $2 + ' vertices=' + $3); },
++            path & 1, (path >> 1) & 1, (path >> 2) & 1,
++            regs.internal.pipeline.num_vertices);
++    }
++#endif
+     // Read and validate vertex information from the loaders
+     const auto& pipeline = regs.internal.pipeline;
+     const PAddr base_address = pipeline.vertex_attributes.GetPhysicalBaseAddress();
+@@ -1112,16 +1147,23 @@ void PicaCore::LoadVertices(bool is_indexed) {
+     const u16* index_address_16 = reinterpret_cast<const u16*>(index_address_8);
+     const bool index_u16 = index_info.format != 0;
+ 
+-    // Simple circular-replacement vertex cache
++#ifdef __EMSCRIPTEN__
++    // Vertex shader results are an internal optimization and are not visible
++    // to the guest. Avoid a linear scan in WebAssembly.
++    constexpr std::size_t VERTEX_CACHE_SIZE = 256;
++#else
+     const std::size_t VERTEX_CACHE_SIZE = 64;
++#endif
+     std::array<bool, VERTEX_CACHE_SIZE> vertex_cache_valid{};
+     std::array<u16, VERTEX_CACHE_SIZE> vertex_cache_ids;
+     std::array<AttributeBuffer, VERTEX_CACHE_SIZE> vertex_cache;
++#ifndef __EMSCRIPTEN__
+     u32 vertex_cache_pos = 0;
++#endif
+ 
+     // Compile the vertex shader for this batch.
+     ShaderUnit shader_unit;
+-    AttributeBuffer vs_output;
++    AttributeBuffer vs_output{};
+     shader_engine->SetupBatch(vs_setup, regs.internal.vs.main_offset);
+ 
+     // Setup geometry pipeline in case we are using a geometry shader.
+@@ -1142,6 +1184,17 @@ void PicaCore::LoadVertices(bool is_indexed) {
+                 continue;
+             }
+ 
++#ifdef __EMSCRIPTEN__
++            const std::size_t cache_slot = vertex & (VERTEX_CACHE_SIZE - 1);
++            if (vertex_cache_valid[cache_slot] && vertex == vertex_cache_ids[cache_slot]) {
++                vs_output = vertex_cache[cache_slot];
++                vertex_cache_hit = true;
++            }
++            if (trace_vertices) {
++                trace_hits += vertex_cache_hit;
++                trace_collisions += !vertex_cache_hit && vertex_cache_valid[cache_slot];
++            }
++#else
+             for (u32 i = 0; i < VERTEX_CACHE_SIZE; ++i) {
+                 if (vertex_cache_valid[i] && vertex == vertex_cache_ids[i]) {
+                     vs_output = vertex_cache[i];
+@@ -1149,11 +1202,15 @@ void PicaCore::LoadVertices(bool is_indexed) {
+                     break;
+                 }
+             }
++#endif
+         }
+ 
+         if (!vertex_cache_hit) {
++#ifdef __EMSCRIPTEN__
++            trace_misses += trace_vertices;
++#endif
+             // Initialize data for the current vertex
+-            AttributeBuffer input;
++            AttributeBuffer input{};
+             loader.LoadVertex(base_address, index, vertex, input, input_default_attributes);
+ 
+             // Record vertex processing to the debugger.
+@@ -1169,10 +1226,17 @@ void PicaCore::LoadVertices(bool is_indexed) {
+ 
+             // Cache the vertex when doing indexed rendering.
+             if (is_indexed) {
++#ifdef __EMSCRIPTEN__
++                const std::size_t cache_slot = vertex & (VERTEX_CACHE_SIZE - 1);
++                vertex_cache[cache_slot] = vs_output;
++                vertex_cache_valid[cache_slot] = true;
++                vertex_cache_ids[cache_slot] = vertex;
++#else
+                 vertex_cache[vertex_cache_pos] = vs_output;
+                 vertex_cache_valid[vertex_cache_pos] = true;
+                 vertex_cache_ids[vertex_cache_pos] = vertex;
+                 vertex_cache_pos = (vertex_cache_pos + 1) % VERTEX_CACHE_SIZE;
++#endif
+             }
+         }
+ 
+diff --git a/src/video_core/renderer_software/renderer_software.cpp b/src/video_core/renderer_software/renderer_software.cpp
+index 89b22f1..926c3c8 100644
+--- a/src/video_core/renderer_software/renderer_software.cpp
++++ b/src/video_core/renderer_software/renderer_software.cpp
+@@ -44,14 +44,41 @@ void RendererSoftware::LoadFBToScreenInfo(int i, const Pica::ColorFill& color_fi
+     const s32 bpp = Pica::BytesPerPixel(framebuffer.color_format);
+     const u8* framebuffer_data = memory.GetPhysicalPointer(framebuffer_addr);
+ 
+-    const s32 pixel_stride = framebuffer.stride / bpp;
+-    info.height = framebuffer.height;
+-    info.width = pixel_stride;
++    const u32 source_width = static_cast<u32>(framebuffer.stride / bpp);
++    const u32 source_height = framebuffer.height;
++#ifdef __EMSCRIPTEN__
++    // The LCD framebuffer is stored rotated. The loop below already writes a
++    // logical row-major image; publish the matching logical dimensions so the
++    // browser frontend does not rotate that image a second time.
++    info.width = source_height;
++    info.height = source_width;
++#else
++    info.width = source_width;
++    info.height = source_height;
++#endif
+     info.pixels.resize(info.width * info.height * 4);
+ 
++#ifdef __EMSCRIPTEN__
++    // Walk the logical output sequentially. RGBA8 is overwhelmingly the
++    // common display format, so decode its byte reversal directly instead of
++    // constructing a Vec4 and entering the generic format switch per pixel.
++    for (u32 x = 0; x < source_width; ++x) {
++        for (u32 y = 0; y < source_height; ++y) {
++            const u8* pixel =
++                framebuffer_data + (y * source_width + (source_width - 1 - x)) * bpp;
++            u8* dest = info.pixels.data() + (x * info.width + y) * 4;
++            if (!color_fill.is_enabled && framebuffer.color_format == Pica::PixelFormat::RGBA8) {
++                dest[0] = pixel[3];
++                dest[1] = pixel[2];
++                dest[2] = pixel[1];
++                dest[3] = pixel[0];
++                continue;
++            }
++#else
+     for (u32 y = 0; y < info.height; y++) {
+         for (u32 x = 0; x < info.width; x++) {
+-            const u8* pixel = framebuffer_data + (y * pixel_stride + pixel_stride - x) * bpp;
++            const u8* pixel = framebuffer_data + (y * source_width + source_width - x) * bpp;
++#endif
+             Common::Vec4 color = [&] {
+                 if (color_fill.is_enabled) {
+                     return Common::Vec4<u8>(color_fill.color_r, color_fill.color_g,
+@@ -72,9 +99,13 @@ void RendererSoftware::LoadFBToScreenInfo(int i, const Pica::ColorFill& color_fi
+                 }
+                 UNREACHABLE();
+             }();
++#ifdef __EMSCRIPTEN__
++            std::memcpy(dest, color.AsArray(), sizeof(color));
++#else
+             const u32 output_offset = (x * info.height + y) * 4;
+             u8* dest = info.pixels.data() + output_offset;
+             std::memcpy(dest, color.AsArray(), sizeof(color));
++#endif
+         }
+     }
+ }
+diff --git a/src/video_core/renderer_software/sw_framebuffer.cpp b/src/video_core/renderer_software/sw_framebuffer.cpp
+index cc8ea49..e64b675 100644
+--- a/src/video_core/renderer_software/sw_framebuffer.cpp
++++ b/src/video_core/renderer_software/sw_framebuffer.cpp
+@@ -70,7 +70,19 @@ void Framebuffer::DrawPixel(u32 x, u32 y, const Common::Vec4<u8>& color) const {
+ 
+     switch (framebuffer.color_format) {
+     case FramebufferRegs::ColorFormat::RGBA8:
++#ifdef __EMSCRIPTEN__
++        // A single i32 store is substantially cheaper in wasm than four byte
++        // stores through the generic encoder. memcpy keeps alignment legal.
++        {
++            const u32 packed = static_cast<u32>(color.a()) |
++                               (static_cast<u32>(color.b()) << 8) |
++                               (static_cast<u32>(color.g()) << 16) |
++                               (static_cast<u32>(color.r()) << 24);
++            std::memcpy(dst_pixel, &packed, sizeof(packed));
++        }
++#else
+         Common::Color::EncodeRGBA8(color, dst_pixel);
++#endif
+         break;
+     case FramebufferRegs::ColorFormat::RGB8:
+         Common::Color::EncodeRGB8(color, dst_pixel);
+diff --git a/src/video_core/renderer_software/sw_rasterizer.cpp b/src/video_core/renderer_software/sw_rasterizer.cpp
+index a64c951..169ed08 100644
+--- a/src/video_core/renderer_software/sw_rasterizer.cpp
++++ b/src/video_core/renderer_software/sw_rasterizer.cpp
+@@ -102,7 +102,11 @@ private:
+ 
+ RasterizerSoftware::RasterizerSoftware(Memory::MemorySystem& memory_, Pica::PicaCore& pica_)
+     : memory{memory_}, pica{pica_}, regs{pica.regs.internal},
++#ifdef __EMSCRIPTEN__
++      num_sw_threads{6},
++#else
+       num_sw_threads{std::max(std::thread::hardware_concurrency(), 2U)},
++#endif
+       sw_workers{num_sw_threads, "SwRenderer workers"}, fb{memory, regs.framebuffer} {}
+ 
+ void RasterizerSoftware::AddTriangle(const Pica::OutputVertex& v0, const Pica::OutputVertex& v1,
+@@ -296,16 +300,95 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+ 
+     const auto w_inverse = Common::MakeVec(v0.pos.w, v1.pos.w, v2.pos.w);
+ 
++#ifdef __EMSCRIPTEN__
++    // f24 is software-emulated in WebAssembly. Convert triangle attributes
++    // once and use native f32 in the per-pixel interpolation hot path.
++    const auto attr3 = [](f24 a, f24 b, f24 c) {
++        return std::array<f32, 3>{a.ToFloat32(), b.ToFloat32(), c.ToFloat32()};
++    };
++    const auto w_inverse_f = attr3(v0.pos.w, v1.pos.w, v2.pos.w);
++    const std::array color_f = {
++        attr3(v0.color.r(), v1.color.r(), v2.color.r()),
++        attr3(v0.color.g(), v1.color.g(), v2.color.g()),
++        attr3(v0.color.b(), v1.color.b(), v2.color.b()),
++        attr3(v0.color.a(), v1.color.a(), v2.color.a()),
++    };
++    const std::array uv_f = {
++        std::array{attr3(v0.tc0.u(), v1.tc0.u(), v2.tc0.u()),
++                   attr3(v0.tc0.v(), v1.tc0.v(), v2.tc0.v())},
++        std::array{attr3(v0.tc1.u(), v1.tc1.u(), v2.tc1.u()),
++                   attr3(v0.tc1.v(), v1.tc1.v(), v2.tc1.v())},
++        std::array{attr3(v0.tc2.u(), v1.tc2.u(), v2.tc2.u()),
++                   attr3(v0.tc2.v(), v1.tc2.v(), v2.tc2.v())},
++    };
++    const auto tc0_w_f = attr3(v0.tc0_w, v1.tc0_w, v2.tc0_w);
++    const std::array quat_f = {
++        attr3(v0.quat.x, v1.quat.x, v2.quat.x), attr3(v0.quat.y, v1.quat.y, v2.quat.y),
++        attr3(v0.quat.z, v1.quat.z, v2.quat.z), attr3(v0.quat.w, v1.quat.w, v2.quat.w),
++    };
++    const std::array view_f = {
++        attr3(v0.view.x, v1.view.x, v2.view.x), attr3(v0.view.y, v1.view.y, v2.view.y),
++        attr3(v0.view.z, v1.view.z, v2.view.z),
++    };
++#endif
++
+     const auto textures = regs.texturing.GetTextures();
+     const auto tev_stages = regs.texturing.GetTevStages();
+ 
++#ifdef __EMSCRIPTEN__
++    std::array<const u8*, 3> texture_data{};
++    std::array<TextureInfo, 3> texture_info{};
++    for (u32 unit = 0; unit < textures.size(); ++unit) {
++        const auto& texture = textures[unit];
++        const auto type = texture.config.type.Value();
++        const bool dynamic_cube_address = unit == 0 &&
++            (type == TexturingRegs::TextureConfig::TextureCube ||
++             type == TexturingRegs::TextureConfig::ShadowCube);
++        if (texture.enabled && texture.config.address != 0 && !dynamic_cube_address) {
++            texture_data[unit] = memory.GetPhysicalPointer(texture.config.GetPhysicalAddress());
++            texture_info[unit] = TextureInfo::FromPicaRegister(texture.config, texture.format);
++        }
++    }
++
++    const auto is_passthrough_tev = [](const TexturingRegs::TevStageConfig& stage) {
++        using Stage = TexturingRegs::TevStageConfig;
++        return stage.color_op == Stage::Operation::Replace &&
++               stage.alpha_op == Stage::Operation::Replace &&
++               stage.color_source1 == Stage::Source::Previous &&
++               stage.alpha_source1 == Stage::Source::Previous &&
++               stage.color_modifier1 == Stage::ColorModifier::SourceColor &&
++               stage.alpha_modifier1 == Stage::AlphaModifier::SourceAlpha &&
++               stage.GetColorMultiplier() == 1 && stage.GetAlphaMultiplier() == 1;
++    };
++    std::array<bool, 6> tev_passthrough{};
++    for (u32 stage = 1; stage < tev_stages.size(); ++stage) {
++        tev_passthrough[stage] = is_passthrough_tev(tev_stages[stage]);
++    }
++    const auto& early_output_merger = regs.framebuffer.output_merger;
++    const bool stencil_enabled = early_output_merger.stencil_test.enable &&
++        regs.framebuffer.framebuffer.depth_format == FramebufferRegs::DepthFormat::D24S8;
++    const bool early_depth_enabled = !stencil_enabled && early_output_merger.depth_test_enable &&
++        early_output_merger.fragment_operation_mode ==
++            FramebufferRegs::FragmentOperationMode::Default;
++#endif
++
+     fb.Bind();
+ 
+-    // Enter rasterization loop, starting at the center of the topleft bounding box corner.
+-    // TODO: Not sure if looping through x first might be faster
+-    for (u16 y = min_y + 8; y < max_y; y += 0x10) {
+-        const auto process_scanline = [&, y] {
+-            for (u16 x = min_x + 8; x < max_x; x += 0x10) {
++    // Enter rasterization loop, starting at the center of the top-left bounding box corner.
++    // Browser workers have materially higher dispatch/futex overhead than native threads.
++    // Process four rows per request so useful raster work dominates that fixed cost.
++    const auto process_scanline = [&](u16 y) {
++            const u16 first_x = min_x + 8;
++            s32 w0 = bias0 + SignedArea(vtxpos[1].xy(), vtxpos[2].xy(), {first_x, y});
++            s32 w1 = bias1 + SignedArea(vtxpos[2].xy(), vtxpos[0].xy(), {first_x, y});
++            s32 w2 = bias2 + SignedArea(vtxpos[0].xy(), vtxpos[1].xy(), {first_x, y});
++            const s32 w0_step = -16 * (static_cast<s32>(vtxpos[2].y) - vtxpos[1].y);
++            const s32 w1_step = -16 * (static_cast<s32>(vtxpos[0].y) - vtxpos[2].y);
++            const s32 w2_step = -16 * (static_cast<s32>(vtxpos[1].y) - vtxpos[0].y);
++            const s32 wsum = w0 + w1 + w2;
++
++            for (u16 x = first_x; x < max_x;
++                 x += 0x10, w0 += w0_step, w1 += w1_step, w2 += w2_step) {
+                 // Do not process the pixel if it's inside the scissor box and the scissor mode is
+                 // set to Exclude.
+                 if (regs.rasterizer.scissor_test.mode == RasterizerRegs::ScissorMode::Exclude) {
+@@ -314,22 +397,26 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+                     }
+                 }
+ 
+-                // Calculate the barycentric coordinates w0, w1 and w2
+-                const s32 w0 = bias0 + SignedArea(vtxpos[1].xy(), vtxpos[2].xy(), {x, y});
+-                const s32 w1 = bias1 + SignedArea(vtxpos[2].xy(), vtxpos[0].xy(), {x, y});
+-                const s32 w2 = bias2 + SignedArea(vtxpos[0].xy(), vtxpos[1].xy(), {x, y});
+-                const s32 wsum = w0 + w1 + w2;
+-
+                 // If current pixel is not covered by the current primitive
+                 if (w0 < 0 || w1 < 0 || w2 < 0) {
+                     continue;
+                 }
+ 
++#ifdef __EMSCRIPTEN__
++                const f32 interpolated_w_inverse =
++                    1.0f / (w_inverse_f[0] * w0 + w_inverse_f[1] * w1 + w_inverse_f[2] * w2);
++                const auto get_interpolated_attribute =
++                    [&](const std::array<f32, 3>& attr) {
++                        return (attr[0] * w0 + attr[1] * w1 + attr[2] * w2) *
++                               interpolated_w_inverse;
++                    };
++#else
+                 const auto baricentric_coordinates = Common::MakeVec(
+                     f24::FromFloat32(static_cast<f32>(w0)), f24::FromFloat32(static_cast<f32>(w1)),
+                     f24::FromFloat32(static_cast<f32>(w2)));
+                 const f24 interpolated_w_inverse =
+                     f24::One() / Common::Dot(w_inverse, baricentric_coordinates);
++#endif
+ 
+                 // interpolated_z = z / w
+                 const float interpolated_z_over_w =
+@@ -349,12 +436,22 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+                 if (regs.rasterizer.depthmap_enable ==
+                     Pica::RasterizerRegs::DepthBuffering::WBuffering) {
+                     // W-Buffer (z * scale + w * offset = (z / w * scale + offset) * w)
++#ifdef __EMSCRIPTEN__
++                    depth *= interpolated_w_inverse * wsum;
++#else
+                     depth *= interpolated_w_inverse.ToFloat32() * wsum;
++#endif
+                 }
+ 
+                 // Clamp the result
+                 depth = std::clamp(depth, 0.0f, 1.0f);
+ 
++#ifdef __EMSCRIPTEN__
++                if (early_depth_enabled && !DoEarlyDepthTest(x, y, depth)) {
++                    continue;
++                }
++#endif
++
+                 /**
+                  * Perspective correct attribute interpolation:
+                  * Attribute values cannot be calculated by simple linear interpolation since
+@@ -373,13 +470,23 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+                  * The generalization to three vertices is straightforward in baricentric
+                  *coordinates.
+                  **/
++#ifndef __EMSCRIPTEN__
+                 const auto get_interpolated_attribute = [&](f24 attr0, f24 attr1, f24 attr2) {
+                     auto attr_over_w = Common::MakeVec(attr0, attr1, attr2);
+                     f24 interpolated_attr_over_w =
+                         Common::Dot(attr_over_w, baricentric_coordinates);
+                     return interpolated_attr_over_w * interpolated_w_inverse;
+                 };
++#endif
+ 
++#ifdef __EMSCRIPTEN__
++                const Common::Vec4<u8> primary_color{
++                    static_cast<u8>(std::round(get_interpolated_attribute(color_f[0]) * 255)),
++                    static_cast<u8>(std::round(get_interpolated_attribute(color_f[1]) * 255)),
++                    static_cast<u8>(std::round(get_interpolated_attribute(color_f[2]) * 255)),
++                    static_cast<u8>(std::round(get_interpolated_attribute(color_f[3]) * 255)),
++                };
++#else
+                 const Common::Vec4<u8> primary_color{
+                     static_cast<u8>(
+                         round(get_interpolated_attribute(v0.color.r(), v1.color.r(), v2.color.r())
+@@ -398,7 +505,19 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+                                   .ToFloat32() *
+                               255)),
+                 };
+-
++#endif
++
++#ifdef __EMSCRIPTEN__
++                std::array<Common::Vec2<f32>, 3> uv{};
++                for (u32 unit = 0; unit < uv.size(); ++unit) {
++                    if (textures[unit].enabled ||
++                        (unit == regs.texturing.main_config.texture3_coordinates &&
++                         regs.texturing.main_config.texture3_enable)) {
++                        uv[unit].u() = get_interpolated_attribute(uv_f[unit][0]);
++                        uv[unit].v() = get_interpolated_attribute(uv_f[unit][1]);
++                    }
++                }
++#else
+                 std::array<Common::Vec2<f24>, 3> uv;
+                 uv[0].u() = get_interpolated_attribute(v0.tc0.u(), v1.tc0.u(), v2.tc0.u());
+                 uv[0].v() = get_interpolated_attribute(v0.tc0.v(), v1.tc0.v(), v2.tc0.v());
+@@ -406,15 +525,39 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+                 uv[1].v() = get_interpolated_attribute(v0.tc1.v(), v1.tc1.v(), v2.tc1.v());
+                 uv[2].u() = get_interpolated_attribute(v0.tc2.u(), v1.tc2.u(), v2.tc2.u());
+                 uv[2].v() = get_interpolated_attribute(v0.tc2.v(), v1.tc2.v(), v2.tc2.v());
++#endif
+ 
+                 // Sample bound texture units.
++#ifdef __EMSCRIPTEN__
++                const f32 tc0_w = get_interpolated_attribute(tc0_w_f);
++#else
+                 const f24 tc0_w = get_interpolated_attribute(v0.tc0_w, v1.tc0_w, v2.tc0_w);
+-                const auto texture_color = TextureColor(uv, textures, tc0_w);
++#endif
++                const auto texture_color = TextureColor(
++#ifdef __EMSCRIPTEN__
++                    uv, textures, tc0_w, texture_data, texture_info
++#else
++                    uv, textures, tc0_w
++#endif
++                );
+ 
+                 Common::Vec4<u8> primary_fragment_color = {0, 0, 0, 0};
+                 Common::Vec4<u8> secondary_fragment_color = {0, 0, 0, 0};
+ 
+                 if (!regs.lighting.disable) {
++#ifdef __EMSCRIPTEN__
++                    const auto normquat = Common::Quaternion<f32>{
++                        {get_interpolated_attribute(quat_f[0]),
++                         get_interpolated_attribute(quat_f[1]),
++                         get_interpolated_attribute(quat_f[2])},
++                        get_interpolated_attribute(quat_f[3]),
++                    }.Normalized();
++                    const Common::Vec3f view{
++                        get_interpolated_attribute(view_f[0]),
++                        get_interpolated_attribute(view_f[1]),
++                        get_interpolated_attribute(view_f[2]),
++                    };
++#else
+                     const auto normquat =
+                         Common::Quaternion<f32>{
+                             {get_interpolated_attribute(v0.quat.x, v1.quat.x, v2.quat.x)
+@@ -432,6 +575,7 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+                         get_interpolated_attribute(v0.view.y, v1.view.y, v2.view.y).ToFloat32(),
+                         get_interpolated_attribute(v0.view.z, v1.view.z, v2.view.z).ToFloat32(),
+                     };
++#endif
+                     std::tie(primary_fragment_color, secondary_fragment_color) =
+                         ComputeFragmentsColors(regs.lighting, pica.lighting, normquat, view,
+                                                texture_color);
+@@ -439,8 +583,11 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+ 
+                 // Write the TEV stages.
+                 auto combiner_output =
+-                    WriteTevConfig(texture_color, tev_stages, primary_color, primary_fragment_color,
+-                                   secondary_fragment_color);
++                    WriteTevConfig(texture_color, tev_stages,
++#ifdef __EMSCRIPTEN__
++                                   tev_passthrough,
++#endif
++                                   primary_color, primary_fragment_color, secondary_fragment_color);
+ 
+                 const auto& output_merger = regs.framebuffer.output_merger;
+                 if (output_merger.fragment_operation_mode ==
+@@ -458,6 +605,17 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+                     continue;
+                 }
+                 WriteFog(depth, combiner_output);
++#ifdef __EMSCRIPTEN__
++                if (early_depth_enabled) {
++                    if (output_merger.depth_write_enable &&
++                        regs.framebuffer.framebuffer.allow_depth_stencil_write != 0) {
++                        const auto& framebuffer = regs.framebuffer.framebuffer;
++                        const u32 bits = FramebufferRegs::DepthBitsPerPixel(framebuffer.depth_format);
++                        fb.SetDepth(x >> 4, y >> 4,
++                                    static_cast<u32>(depth * ((1U << bits) - 1)));
++                    }
++                } else
++#endif
+                 if (!DoDepthStencilTest(x, y, depth)) {
+                     continue;
+                 }
+@@ -466,15 +624,54 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
+                     fb.DrawPixel(x >> 4, y >> 4, result);
+                 }
+             }
++    };
++    constexpr u16 rows_per_request = 4;
++    constexpr u16 raster_row_step = 0x10;
++    const u16 first_raster_y = min_y + 8;
++#ifdef __EMSCRIPTEN__
++    const bool has_single_row_band =
++        first_raster_y >= max_y ||
++        static_cast<u32>(max_y) - first_raster_y <= rows_per_request * raster_row_step;
++#endif
++    for (u16 first_y = first_raster_y; first_y < max_y;
++         first_y += rows_per_request * raster_row_step) {
++        const auto process_rows = [&, first_y] {
++            const u32 end_y = std::min<u32>(max_y, first_y + rows_per_request * raster_row_step);
++            for (u16 y = first_y; y < end_y; y += raster_row_step) {
++                process_scanline(y);
++            }
+         };
+-        sw_workers.QueueWork(std::move(process_scanline));
++#ifdef __EMSCRIPTEN__
++        // Small triangles cannot use more than one worker. Execute their only
++        // band inline to avoid a mutex round-trip and browser worker wake-up.
++        if (has_single_row_band) {
++            process_rows();
++        } else {
++            sw_workers.QueueWork(std::move(process_rows));
++        }
++#else
++        sw_workers.QueueWork(std::move(process_rows));
++#endif
+     }
++#ifdef __EMSCRIPTEN__
++    if (!has_single_row_band) {
++        sw_workers.WaitForRequests();
++    }
++#else
+     sw_workers.WaitForRequests();
++#endif
+ }
+ 
+ std::array<Common::Vec4<u8>, 4> RasterizerSoftware::TextureColor(
++#ifdef __EMSCRIPTEN__
++    std::span<const Common::Vec2<f32>, 3> uv,
++    std::span<const Pica::TexturingRegs::FullTextureConfig, 3> textures, f32 tc0_w,
++    std::span<const u8* const, 3> precomputed_texture_data,
++    std::span<const TextureInfo, 3> precomputed_texture_info) const {
++#else
+     std::span<const Common::Vec2<f24>, 3> uv,
+     std::span<const Pica::TexturingRegs::FullTextureConfig, 3> textures, f24 tc0_w) const {
++#endif
+     std::array<Common::Vec4<u8>, 4> texture_color{};
+     for (u32 i = 0; i < 3; ++i) {
+         const auto& texture = textures[i];
+@@ -487,20 +684,34 @@ std::array<Common::Vec4<u8>, 4> RasterizerSoftware::TextureColor(
+         }
+ 
+         const s32 coordinate_i = (i == 2 && regs.texturing.main_config.texture2_use_coord1) ? 1 : i;
+-        f24 u = uv[coordinate_i].u();
+-        f24 v = uv[coordinate_i].v();
++        auto u = uv[coordinate_i].u();
++        auto v = uv[coordinate_i].v();
+ 
+         // Only unit 0 respects the texturing type (according to 3DBrew)
+         PAddr texture_address = texture.config.GetPhysicalAddress();
++#ifdef __EMSCRIPTEN__
++        f32 shadow_z = 0.0f;
++#else
+         f24 shadow_z;
++#endif
+         if (i == 0) {
+             switch (texture.config.type) {
+             case TexturingRegs::TextureConfig::Texture2D:
+                 break;
+             case TexturingRegs::TextureConfig::ShadowCube:
+             case TexturingRegs::TextureConfig::TextureCube: {
++#ifdef __EMSCRIPTEN__
++                auto [cube_u, cube_v, cube_z, cube_address] =
++                    ConvertCubeCoord(f24::FromFloat32(u), f24::FromFloat32(v),
++                                     f24::FromFloat32(tc0_w), regs.texturing);
++                u = cube_u.ToFloat32();
++                v = cube_v.ToFloat32();
++                shadow_z = cube_z.ToFloat32();
++                texture_address = cube_address;
++#else
+                 std::tie(u, v, shadow_z, texture_address) =
+                     ConvertCubeCoord(u, v, tc0_w, regs.texturing);
++#endif
+                 break;
+             }
+             case TexturingRegs::TextureConfig::Projection2D: {
+@@ -513,7 +724,11 @@ std::array<Common::Vec4<u8>, 4> RasterizerSoftware::TextureColor(
+                     u /= tc0_w;
+                     v /= tc0_w;
+                 }
++#ifdef __EMSCRIPTEN__
++                shadow_z = std::abs(tc0_w);
++#else
+                 shadow_z = f24::FromFloat32(std::abs(tc0_w.ToFloat32()));
++#endif
+                 break;
+             }
+             case TexturingRegs::TextureConfig::Disabled:
+@@ -525,10 +740,15 @@ std::array<Common::Vec4<u8>, 4> RasterizerSoftware::TextureColor(
+             }
+         }
+ 
++#ifdef __EMSCRIPTEN__
++        s32 s = static_cast<s32>(u * static_cast<f32>(texture.config.width));
++        s32 t = static_cast<s32>(v * static_cast<f32>(texture.config.height));
++#else
+         const f24 width = f24::FromFloat32(static_cast<f32>(texture.config.width));
+         const f24 height = f24::FromFloat32(static_cast<f32>(texture.config.height));
+         s32 s = static_cast<s32>((u * width).ToFloat32());
+         s32 t = static_cast<s32>((v * height).ToFloat32());
++#endif
+ 
+         bool use_border_s = false;
+         bool use_border_t = false;
+@@ -558,17 +778,33 @@ std::array<Common::Vec4<u8>, 4> RasterizerSoftware::TextureColor(
+             t = texture.config.height - 1 -
+                 GetWrappedTexCoord(texture.config.wrap_t, t, texture.config.height);
+ 
++#ifdef __EMSCRIPTEN__
++            const bool use_precomputed = precomputed_texture_data[i] != nullptr;
++            const u8* texture_data = use_precomputed ? precomputed_texture_data[i]
++                                                     : memory.GetPhysicalPointer(texture_address);
++            if (use_precomputed) {
++                texture_color[i] = LookupTexture(texture_data, s, t, precomputed_texture_info[i]);
++            } else {
++                const auto info = TextureInfo::FromPicaRegister(texture.config, texture.format);
++                texture_color[i] = LookupTexture(texture_data, s, t, info);
++            }
++#else
+             const u8* texture_data = memory.GetPhysicalPointer(texture_address);
+             const auto info = TextureInfo::FromPicaRegister(texture.config, texture.format);
++            texture_color[i] = LookupTexture(texture_data, s, t, info);
++#endif
+ 
+             // TODO: Apply the min and mag filters to the texture
+-            texture_color[i] = LookupTexture(texture_data, s, t, info);
+         }
+ 
+         if (i == 0 && (texture.config.type == TexturingRegs::TextureConfig::Shadow2D ||
+                        texture.config.type == TexturingRegs::TextureConfig::ShadowCube)) {
+ 
++#ifdef __EMSCRIPTEN__
++            s32 z_int = static_cast<s32>(std::min(shadow_z, 1.0f) * 0xFFFFFF);
++#else
+             s32 z_int = static_cast<s32>(std::min(shadow_z.ToFloat32(), 1.0f) * 0xFFFFFF);
++#endif
+             z_int -= regs.texturing.shadow.bias << 1;
+             const auto& color = texture_color[i];
+             const s32 z_ref = (color.w << 16) | (color.z << 8) | color.y;
+@@ -585,8 +821,12 @@ std::array<Common::Vec4<u8>, 4> RasterizerSoftware::TextureColor(
+     // Sample procedural texture
+     if (regs.texturing.main_config.texture3_enable) {
+         const auto& proctex_uv = uv[regs.texturing.main_config.texture3_coordinates];
++#ifdef __EMSCRIPTEN__
++        texture_color[3] = ProcTex(proctex_uv.u(), proctex_uv.v(), regs.texturing, pica.proctex);
++#else
+         texture_color[3] = ProcTex(proctex_uv.u().ToFloat32(), proctex_uv.v().ToFloat32(),
+                                    regs.texturing, pica.proctex);
++#endif
+     }
+ 
+     return texture_color;
+@@ -594,10 +834,42 @@ std::array<Common::Vec4<u8>, 4> RasterizerSoftware::TextureColor(
+ 
+ Common::Vec4<u8> RasterizerSoftware::PixelColor(u16 x, u16 y,
+                                                 Common::Vec4<u8> combiner_output) const {
++    const auto& output_merger = regs.framebuffer.output_merger;
++#ifdef __EMSCRIPTEN__
++    // An unmasked logic-copy neither reads nor combines with the destination.
++    // Avoid Morton address calculation and decode for a value then discarded.
++    if (!output_merger.alphablend_enable &&
++        output_merger.logic_op == FramebufferRegs::LogicOp::Copy &&
++        output_merger.red_enable && output_merger.green_enable &&
++        output_merger.blue_enable && output_merger.alpha_enable) {
++        return combiner_output;
++    }
++#endif
+     const auto dest = fb.GetPixel(x >> 4, y >> 4);
+     Common::Vec4<u8> blend_output = combiner_output;
+ 
+-    const auto& output_merger = regs.framebuffer.output_merger;
++#ifdef __EMSCRIPTEN__
++    const auto& blend = output_merger.alpha_blending;
++    if (output_merger.alphablend_enable &&
++        blend.blend_equation_rgb == FramebufferRegs::BlendEquation::Add &&
++        blend.blend_equation_a == FramebufferRegs::BlendEquation::Add &&
++        blend.factor_source_rgb == FramebufferRegs::BlendFactor::SourceAlpha &&
++        blend.factor_dest_rgb == FramebufferRegs::BlendFactor::OneMinusSourceAlpha &&
++        blend.factor_source_a == FramebufferRegs::BlendFactor::SourceAlpha &&
++        blend.factor_dest_a == FramebufferRegs::BlendFactor::OneMinusSourceAlpha &&
++        output_merger.red_enable && output_merger.green_enable &&
++        output_merger.blue_enable && output_merger.alpha_enable) {
++        const u32 src_a = combiner_output.a();
++        const u32 dst_a = 255 - src_a;
++        return Common::Vec4<u8>{
++            static_cast<u8>((combiner_output.r() * src_a + dest.r() * dst_a) / 255),
++            static_cast<u8>((combiner_output.g() * src_a + dest.g() * dst_a) / 255),
++            static_cast<u8>((combiner_output.b() * src_a + dest.b() * dst_a) / 255),
++            static_cast<u8>((combiner_output.a() * src_a + dest.a() * dst_a) / 255),
++        };
++    }
++#endif
++
+     if (output_merger.alphablend_enable) {
+         const auto params = output_merger.alpha_blending;
+         const auto lookup_factor = [&](u32 channel, FramebufferRegs::BlendFactor factor) -> u8 {
+@@ -686,6 +958,9 @@ Common::Vec4<u8> RasterizerSoftware::PixelColor(u16 x, u16 y,
+ Common::Vec4<u8> RasterizerSoftware::WriteTevConfig(
+     std::span<const Common::Vec4<u8>, 4> texture_color,
+     std::span<const Pica::TexturingRegs::TevStageConfig, 6> tev_stages,
++#ifdef __EMSCRIPTEN__
++    std::span<const bool, 6> tev_passthrough,
++#endif
+     Common::Vec4<u8> primary_color, Common::Vec4<u8> primary_fragment_color,
+     Common::Vec4<u8> secondary_fragment_color) {
+     /**
+@@ -747,17 +1022,30 @@ Common::Vec4<u8> RasterizerSoftware::WriteTevConfig(
+          *       combiner_output.rgb(), but instead store it in a temporary variable until
+          *       alpha combining has been done.
+          **/
++        #ifdef __EMSCRIPTEN__
++        if (!tev_passthrough[tev_stage_index]) {
++        #endif
+         const auto source1 = tev_stage_index == 0 && tev_stage.color_source1 == Source::Previous
+                                  ? tev_stage.color_source3.Value()
+                                  : tev_stage.color_source1.Value();
+         const auto source2 = tev_stage_index == 0 && tev_stage.color_source2 == Source::Previous
+                                  ? tev_stage.color_source3.Value()
+                                  : tev_stage.color_source2.Value();
+-        const std::array<Common::Vec3<u8>, 3> color_result = {
+-            GetColorModifier(tev_stage.color_modifier1, get_source(source1)),
+-            GetColorModifier(tev_stage.color_modifier2, get_source(source2)),
+-            GetColorModifier(tev_stage.color_modifier3, get_source(tev_stage.color_source3)),
+-        };
++        using Operation = TexturingRegs::TevStageConfig::Operation;
++        const auto color_op = tev_stage.color_op.Value();
++        const bool color_uses_second = color_op != Operation::Replace;
++        const bool color_uses_third = color_op == Operation::Lerp ||
++                                      color_op == Operation::MultiplyThenAdd ||
++                                      color_op == Operation::AddThenMultiply;
++        std::array<Common::Vec3<u8>, 3> color_result{};
++        color_result[0] = GetColorModifier(tev_stage.color_modifier1, get_source(source1));
++        if (color_uses_second) {
++            color_result[1] = GetColorModifier(tev_stage.color_modifier2, get_source(source2));
++        }
++        if (color_uses_third) {
++            color_result[2] = GetColorModifier(tev_stage.color_modifier3,
++                                               get_source(tev_stage.color_source3));
++        }
+         const Common::Vec3<u8> color_output = ColorCombine(tev_stage.color_op, color_result);
+ 
+         u8 alpha_output;
+@@ -766,11 +1054,22 @@ Common::Vec4<u8> RasterizerSoftware::WriteTevConfig(
+             alpha_output = color_output.x;
+         } else {
+             // alpha combiner
+-            const std::array<u8, 3> alpha_result = {{
+-                GetAlphaModifier(tev_stage.alpha_modifier1, get_source(tev_stage.alpha_source1)),
+-                GetAlphaModifier(tev_stage.alpha_modifier2, get_source(tev_stage.alpha_source2)),
+-                GetAlphaModifier(tev_stage.alpha_modifier3, get_source(tev_stage.alpha_source3)),
+-            }};
++            const auto alpha_op = tev_stage.alpha_op.Value();
++            const bool alpha_uses_second = alpha_op != Operation::Replace;
++            const bool alpha_uses_third = alpha_op == Operation::Lerp ||
++                                          alpha_op == Operation::MultiplyThenAdd ||
++                                          alpha_op == Operation::AddThenMultiply;
++            std::array<u8, 3> alpha_result{};
++            alpha_result[0] =
++                GetAlphaModifier(tev_stage.alpha_modifier1, get_source(tev_stage.alpha_source1));
++            if (alpha_uses_second) {
++                alpha_result[1] = GetAlphaModifier(tev_stage.alpha_modifier2,
++                                                   get_source(tev_stage.alpha_source2));
++            }
++            if (alpha_uses_third) {
++                alpha_result[2] = GetAlphaModifier(tev_stage.alpha_modifier3,
++                                                   get_source(tev_stage.alpha_source3));
++            }
+             alpha_output = AlphaCombine(tev_stage.alpha_op, alpha_result);
+         }
+ 
+@@ -778,6 +1077,9 @@ Common::Vec4<u8> RasterizerSoftware::WriteTevConfig(
+         combiner_output[1] = std::min(255U, color_output.g() * tev_stage.GetColorMultiplier());
+         combiner_output[2] = std::min(255U, color_output.b() * tev_stage.GetColorMultiplier());
+         combiner_output[3] = std::min(255U, alpha_output * tev_stage.GetAlphaMultiplier());
++#ifdef __EMSCRIPTEN__
++        }
++#endif
+ 
+         combiner_buffer = next_combiner_buffer;
+ 
+@@ -857,6 +1159,36 @@ bool RasterizerSoftware::DoAlphaTest(u8 alpha) const {
+     }
+ }
+ 
++#ifdef __EMSCRIPTEN__
++bool RasterizerSoftware::DoEarlyDepthTest(u16 x, u16 y, float depth) const {
++    const auto& framebuffer = regs.framebuffer.framebuffer;
++    const auto& output_merger = regs.framebuffer.output_merger;
++    const u32 num_bits = FramebufferRegs::DepthBitsPerPixel(framebuffer.depth_format);
++    const u32 z = static_cast<u32>(depth * ((1U << num_bits) - 1));
++    const u32 ref_z = fb.GetDepth(x >> 4, y >> 4);
++
++    switch (output_merger.depth_test_func) {
++    case FramebufferRegs::CompareFunc::Never:
++        return false;
++    case FramebufferRegs::CompareFunc::Always:
++        return true;
++    case FramebufferRegs::CompareFunc::Equal:
++        return z == ref_z;
++    case FramebufferRegs::CompareFunc::NotEqual:
++        return z != ref_z;
++    case FramebufferRegs::CompareFunc::LessThan:
++        return z < ref_z;
++    case FramebufferRegs::CompareFunc::LessThanOrEqual:
++        return z <= ref_z;
++    case FramebufferRegs::CompareFunc::GreaterThan:
++        return z > ref_z;
++    case FramebufferRegs::CompareFunc::GreaterThanOrEqual:
++        return z >= ref_z;
++    }
++    return false;
++}
++#endif
++
+ bool RasterizerSoftware::DoDepthStencilTest(u16 x, u16 y, float depth) const {
+     const auto& framebuffer = regs.framebuffer.framebuffer;
+     const auto stencil_test = regs.framebuffer.output_merger.stencil_test;
+diff --git a/src/video_core/renderer_software/sw_rasterizer.h b/src/video_core/renderer_software/sw_rasterizer.h
+index a25cbf6..d8a3d42 100644
+--- a/src/video_core/renderer_software/sw_rasterizer.h
++++ b/src/video_core/renderer_software/sw_rasterizer.h
+@@ -10,6 +10,7 @@
+ #include "video_core/rasterizer_interface.h"
+ #include "video_core/renderer_software/sw_clipper.h"
+ #include "video_core/renderer_software/sw_framebuffer.h"
++#include "video_core/texture/texture_decode.h"
+ 
+ namespace Pica {
+ struct RegsInternal;
+@@ -42,9 +43,17 @@ private:
+                          bool reversed = false);
+ 
+     /// Returns the texture color of the currently processed pixel.
++#ifdef __EMSCRIPTEN__
++    std::array<Common::Vec4<u8>, 4> TextureColor(
++        std::span<const Common::Vec2<f32>, 3> uv,
++        std::span<const Pica::TexturingRegs::FullTextureConfig, 3> textures, f32 tc0_w,
++        std::span<const u8* const, 3> texture_data,
++        std::span<const Pica::Texture::TextureInfo, 3> texture_info) const;
++#else
+     std::array<Common::Vec4<u8>, 4> TextureColor(
+         std::span<const Common::Vec2<f24>, 3> uv,
+         std::span<const Pica::TexturingRegs::FullTextureConfig, 3> textures, f24 tc0_w) const;
++#endif
+ 
+     /// Returns the final pixel color with blending or logic ops applied.
+     Common::Vec4<u8> PixelColor(u16 x, u16 y, Common::Vec4<u8> combiner_output) const;
+@@ -53,6 +62,9 @@ private:
+     Common::Vec4<u8> WriteTevConfig(
+         std::span<const Common::Vec4<u8>, 4> texture_color,
+         std::span<const Pica::TexturingRegs::TevStageConfig, 6> tev_stages,
++#ifdef __EMSCRIPTEN__
++        std::span<const bool, 6> tev_passthrough,
++#endif
+         Common::Vec4<u8> primary_color, Common::Vec4<u8> primary_fragment_color,
+         Common::Vec4<u8> secondary_fragment_color);
+ 
+@@ -65,6 +77,12 @@ private:
+     /// Performs the depth stencil test. Returns false if the test failed.
+     bool DoDepthStencilTest(u16 x, u16 y, float depth) const;
+ 
++#ifdef __EMSCRIPTEN__
++    /// Read-only early depth comparison. This is only used when stencil is
++    /// disabled, so rejecting the fragment cannot suppress stencil side effects.
++    bool DoEarlyDepthTest(u16 x, u16 y, float depth) const;
++#endif
++
+ private:
+     Memory::MemorySystem& memory;
+     Pica::PicaCore& pica;
+diff --git a/src/video_core/renderer_software/sw_texturing.cpp b/src/video_core/renderer_software/sw_texturing.cpp
+index c0f3000..0307aa0 100644
+--- a/src/video_core/renderer_software/sw_texturing.cpp
++++ b/src/video_core/renderer_software/sw_texturing.cpp
+@@ -3,6 +3,7 @@
+ // Refer to the license.txt file included.
+ 
+ #include <algorithm>
++#include <bit>
+ #include "common/assert.h"
+ #include "common/common_types.h"
+ #include "common/vector_math.h"
+@@ -35,9 +36,19 @@ int GetWrappedTexCoord(Pica::TexturingRegs::TextureConfig::WrapMode mode, s32 va
+     case TextureConfig::Repeat2:
+     case TextureConfig::Repeat3:
+     case TextureConfig::Repeat:
++#ifdef __EMSCRIPTEN__
++        if (std::has_single_bit(size)) {
++            return static_cast<s32>(static_cast<u32>(val) & (size - 1));
++        }
++#endif
+         return static_cast<s32>(static_cast<u32>(val) % size);
+     case TextureConfig::MirroredRepeat: {
++#ifdef __EMSCRIPTEN__
++        u32 coord = std::has_single_bit(size) ? (static_cast<u32>(val) & (2 * size - 1))
++                                              : (static_cast<u32>(val) % (2 * size));
++#else
+         u32 coord = (static_cast<u32>(val) % (2 * size));
++#endif
+         if (coord >= size) {
+             coord = 2 * size - 1 - coord;
+         }
+diff --git a/src/video_core/shader/shader_interpreter.cpp b/src/video_core/shader/shader_interpreter.cpp
+index 4e8f30e..c3fdbff 100644
+--- a/src/video_core/shader/shader_interpreter.cpp
++++ b/src/video_core/shader/shader_interpreter.cpp
+@@ -3,10 +3,9 @@
+ // Refer to the license.txt file included.
+ 
+ #include <algorithm>
++#include <array>
+ #include <cmath>
+-#include <numeric>
+-#include <boost/circular_buffer.hpp>
+-#include <boost/container/static_vector.hpp>
++#include <unordered_map>
+ #include <nihstro/shader_bytecode.h>
+ #include "common/assert.h"
+ #include "common/common_types.h"
+@@ -20,8 +19,6 @@
+ 
+ using nihstro::Instruction;
+ using nihstro::OpCode;
+-using nihstro::RegisterType;
+-using nihstro::SourceRegister;
+ using nihstro::SwizzlePattern;
+ 
+ namespace Pica::Shader {
+@@ -44,42 +41,105 @@ struct LoopStackElement {
+     u8 previous_aL;
+ };
+ 
++struct DecodedInstruction {
++    Instruction instruction{};
++    OpCode::Type type{OpCode::Type::Unknown};
++    OpCode::Id effective_opcode{};
++    std::array<std::array<u8, 4>, 3> selectors{};
++    std::array<u8, 3> sources{};
++    std::array<u8, 3> address_registers{};
++    u8 dest{};
++    u8 dest_mask{};
++    u8 negate_mask{};
++    bool has_second_source{};
++
++    bool DestComponentEnabled(int component) const {
++        return (dest_mask & (0x8u >> component)) != 0;
++    }
++};
++
++struct InterpreterCache {
++    std::array<DecodedInstruction, MAX_PROGRAM_CODE_LENGTH> instructions{};
++    u64 program_hash{};
++    u64 swizzle_hash{};
++    bool valid{};
++};
++
++static thread_local std::unordered_map<const ShaderSetup*, InterpreterCache> interpreter_caches;
++
++static inline f24 Multiply(f24 lhs, f24 rhs) {
++#ifdef __EMSCRIPTEN__
++    // The web wrapper runs with shaders_accurate_mul disabled. Avoid the
++    // float24 helper's two isnan checks for every vertex-shader multiply; the
++    // checks only affect the PICA-specific infinity-times-zero edge case.
++    return f24::FromFloat32(lhs.ToFloat32() * rhs.ToFloat32());
++#else
++    return lhs * rhs;
++#endif
++}
++
++template <typename Operation>
++static inline void WriteMasked(f24* dest, u8 mask, Operation&& operation) {
++    // xyzw is by far the most common PICA destination mask. Keep that path
++    // branch-free and only pay per-component mask tests for partial writes.
++    if (mask == 0xF) {
++        dest[0] = operation(0);
++        dest[1] = operation(1);
++        dest[2] = operation(2);
++        dest[3] = operation(3);
++        return;
++    }
++    for (int component = 0; component < 4; ++component) {
++        if (mask & (0x8u >> component)) {
++            dest[component] = operation(component);
++        }
++    }
++}
++
+ template <bool Debug>
+ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                            DebugData<Debug>& debug_data, unsigned entry_point) {
+-    boost::circular_buffer<IfStackElement> if_stack(8);
+-    boost::circular_buffer<CallStackElement> call_stack(4);
+-    boost::circular_buffer<LoopStackElement> loop_stack(4);
++    // PICA fixes the maximum nesting depths, so stack storage and cursors can
++    // remain entirely in this vertex invocation's stack frame.
++    std::array<IfStackElement, 8> if_stack;
++    std::array<CallStackElement, 4> call_stack;
++    std::array<LoopStackElement, 4> loop_stack;
++    u32 if_stack_size = 0;
++    u32 call_stack_size = 0;
++    u32 loop_stack_size = 0;
+     u32 program_counter = entry_point;
+ 
+     const auto do_if = [&](Instruction instr, bool condition) {
+         if (condition) {
+-            if_stack.push_back({
++            ASSERT(if_stack_size < if_stack.size());
++            if_stack[if_stack_size++] = {
+                 .else_address = instr.flow_control.dest_offset,
+                 .end_address = instr.flow_control.dest_offset + instr.flow_control.num_instructions,
+-            });
++            };
+         } else {
+             program_counter = instr.flow_control.dest_offset - 1;
+         }
+     };
+ 
+     const auto do_call = [&](Instruction instr) {
+-        call_stack.push_back({
++        ASSERT(call_stack_size < call_stack.size());
++        call_stack[call_stack_size++] = {
+             .end_address = instr.flow_control.dest_offset + instr.flow_control.num_instructions,
+             .return_address = program_counter + 1,
+-        });
++        };
+         program_counter = instr.flow_control.dest_offset - 1;
+     };
+ 
+     const auto do_loop = [&](Instruction instr, const Common::Vec4<u8>& loop_param) {
+         const u8 previous_aL = static_cast<u8>(state.address_registers[2]);
+-        loop_stack.push_back({
++        ASSERT(loop_stack_size < loop_stack.size());
++        loop_stack[loop_stack_size++] = {
+             .entry_address = program_counter + 1,
+             .end_address = instr.flow_control.dest_offset + 1,
+             .loop_downcounter = loop_param.x,
+             .address_increment = loop_param.z,
+             .previous_aL = previous_aL,
+-        });
++        };
+         state.address_registers[2] = loop_param.y;
+     };
+ 
+@@ -105,8 +165,8 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+     };
+ 
+     const auto& uniforms = setup.uniforms;
+-    const auto& swizzle_data = setup.GetSwizzleData();
+-    const auto& program_code = setup.GetProgramCode();
++    const auto* cache = static_cast<const InterpreterCache*>(setup.cached_shader);
++    ASSERT(cache && cache->valid);
+ 
+     // Constants for handling invalid inputs
+     static f24 dummy_vec4_float24_zeros[4] = {f24::Zero(), f24::Zero(), f24::Zero(), f24::Zero()};
+@@ -126,32 +186,37 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+         // TODO(PabloMK7): Find how real HW reacts to this, most likely the
+         // program counter wraps around after reaching the last instruction,
+         // but more testing is needed.
+-        Instruction instr{};
++        DecodedInstruction end_instruction{};
++        const DecodedInstruction* decoded;
+         if (program_counter < MAX_PROGRAM_CODE_LENGTH - 1) {
+-            instr.hex = program_code[program_counter];
++            decoded = &cache->instructions[program_counter];
+         } else {
+-            instr.opcode.Assign(OpCode::Id::END);
++            end_instruction.instruction.opcode.Assign(OpCode::Id::END);
++            end_instruction.type = OpCode::Type::Trivial;
++            end_instruction.effective_opcode = OpCode::Id::END;
++            decoded = &end_instruction;
+         }
+ 
+-        const SwizzlePattern swizzle = {swizzle_data[instr.common.operand_desc_id]};
++        const Instruction instr = decoded->instruction;
+ 
+         Record<DebugDataRecord::CUR_INSTR>(debug_data, iteration, program_counter);
+         if (iteration > 0)
+             Record<DebugDataRecord::NEXT_INSTR>(debug_data, iteration - 1, program_counter);
+ 
+-        debug_data.max_offset = std::max<u32>(debug_data.max_offset, 1 + program_counter);
+-
+-        auto LookupSourceRegister = [&](const SourceRegister& source_reg,
+-                                        int address_register_index) -> const f24* {
+-            int index = source_reg.GetIndex();
+-            switch (source_reg.GetRegisterType()) {
+-            case RegisterType::Input:
+-                return &state.input[index].x;
++        if constexpr (Debug) {
++            debug_data.max_offset = std::max<u32>(debug_data.max_offset, 1 + program_counter);
++        }
+ 
+-            case RegisterType::Temporary:
+-                return &state.temporary[index].x;
++        auto LookupSourceRegister = [&](u8 source_reg, u8 address_register_index) -> const f24* {
++            if (source_reg < 0x10) {
++                return &state.input[source_reg].x;
++            }
++            if (source_reg < 0x20) {
++                return &state.temporary[source_reg - 0x10].x;
++            }
+ 
+-            case RegisterType::FloatUniform:
++            int index = source_reg - 0x20;
++            {
+                 if (address_register_index != 0) {
+                     int offset = state.address_registers[address_register_index - 1];
+                     if (offset < std::numeric_limits<s8>::min() ||
+@@ -165,32 +230,26 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                     }
+                 }
+                 return &uniforms.f[index].x;
+-
+-            default:
+-                return dummy_vec4_float24_zeros;
+             }
+         };
+ 
+-        switch (instr.opcode.Value().GetInfo().type) {
++        switch (decoded->type) {
+         case OpCode::Type::Arithmetic: {
+-            const bool is_inverted =
+-                (0 != (instr.opcode.Value().GetInfo().subtype & OpCode::Info::SrcInversed));
+-
+             const f24* src1_ =
+-                LookupSourceRegister(instr.common.GetSrc1(is_inverted),
+-                                     !is_inverted * instr.common.address_register_index);
+-            const f24* src2_ =
+-                LookupSourceRegister(instr.common.GetSrc2(is_inverted),
+-                                     is_inverted * instr.common.address_register_index);
++                LookupSourceRegister(decoded->sources[0], decoded->address_registers[0]);
++            const f24* src2_ = decoded->has_second_source
++                                   ? LookupSourceRegister(decoded->sources[1],
++                                                          decoded->address_registers[1])
++                                   : dummy_vec4_float24_zeros;
+ 
+-            const bool negate_src1 = swizzle.negate_src1.Value() != 0;
+-            const bool negate_src2 = swizzle.negate_src2.Value() != 0;
++            const bool negate_src1 = (decoded->negate_mask & 1) != 0;
++            const bool negate_src2 = (decoded->negate_mask & 2) != 0;
+ 
+             f24 src1[4] = {
+-                src1_[(int)swizzle.src1_selector_0.Value()],
+-                src1_[(int)swizzle.src1_selector_1.Value()],
+-                src1_[(int)swizzle.src1_selector_2.Value()],
+-                src1_[(int)swizzle.src1_selector_3.Value()],
++                src1_[decoded->selectors[0][0]],
++                src1_[decoded->selectors[0][1]],
++                src1_[decoded->selectors[0][2]],
++                src1_[decoded->selectors[0][3]],
+             };
+             if (negate_src1) {
+                 src1[0] = -src1[0];
+@@ -198,40 +257,42 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                 src1[2] = -src1[2];
+                 src1[3] = -src1[3];
+             }
+-            f24 src2[4] = {
+-                src2_[(int)swizzle.src2_selector_0.Value()],
+-                src2_[(int)swizzle.src2_selector_1.Value()],
+-                src2_[(int)swizzle.src2_selector_2.Value()],
+-                src2_[(int)swizzle.src2_selector_3.Value()],
+-            };
+-            if (negate_src2) {
+-                src2[0] = -src2[0];
+-                src2[1] = -src2[1];
+-                src2[2] = -src2[2];
+-                src2[3] = -src2[3];
++            // Unary instructions do not consume src2. Avoid initializing four
++            // f24 values for every vertex invocation when the opcode cannot
++            // read them.
++            f24 src2[4];
++            if (decoded->has_second_source) {
++                src2[0] = src2_[decoded->selectors[1][0]];
++                src2[1] = src2_[decoded->selectors[1][1]];
++                src2[2] = src2_[decoded->selectors[1][2]];
++                src2[3] = src2_[decoded->selectors[1][3]];
++                if (negate_src2) {
++                    src2[0] = -src2[0];
++                    src2[1] = -src2[1];
++                    src2[2] = -src2[2];
++                    src2[3] = -src2[3];
++                }
+             }
+ 
+             f24* dest =
+-                (instr.common.dest.Value() < 0x10)
+-                    ? &state.output[state.output_bank][instr.common.dest.Value().GetIndex()][0]
+-                : (instr.common.dest.Value() < 0x20)
+-                    ? &state.temporary[instr.common.dest.Value().GetIndex()][0]
++                (decoded->dest < 0x10)
++                    ? &state.output[state.output_bank][decoded->dest][0]
++                : (decoded->dest < 0x20)
++                    ? &state.temporary[decoded->dest - 0x10][0]
+                     : dummy_vec4_float24_zeros;
+ 
+-            debug_data.max_opdesc_id =
+-                std::max<u32>(debug_data.max_opdesc_id, 1 + instr.common.operand_desc_id);
++            if constexpr (Debug) {
++                debug_data.max_opdesc_id =
++                    std::max<u32>(debug_data.max_opdesc_id, 1 + instr.common.operand_desc_id);
++            }
+ 
+-            switch (instr.opcode.Value().EffectiveOpCode()) {
++            switch (decoded->effective_opcode) {
+             case OpCode::Id::ADD: {
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::SRC2>(debug_data, iteration, src2);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
+-                    dest[i] = src1[i] + src2[i];
+-                }
++                WriteMasked(dest, decoded->dest_mask,
++                            [&](int i) { return src1[i] + src2[i]; });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+             }
+@@ -240,12 +301,8 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::SRC2>(debug_data, iteration, src2);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
+-                    dest[i] = src1[i] * src2[i];
+-                }
++                WriteMasked(dest, decoded->dest_mask,
++                            [&](int i) { return Multiply(src1[i], src2[i]); });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+             }
+@@ -253,12 +310,9 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+             case OpCode::Id::FLR:
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
+-                    dest[i] = f24::FromFloat32(std::floor(src1[i].ToFloat32()));
+-                }
++                WriteMasked(dest, decoded->dest_mask, [&](int i) {
++                    return f24::FromFloat32(std::floor(src1[i].ToFloat32()));
++                });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+ 
+@@ -266,15 +320,12 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::SRC2>(debug_data, iteration, src2);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
++                WriteMasked(dest, decoded->dest_mask, [&](int i) {
+                     // NOTE: Exact form required to match NaN semantics to hardware:
+                     //   max(0, NaN) -> NaN
+                     //   max(NaN, 0) -> 0
+-                    dest[i] = (src1[i] > src2[i]) ? src1[i] : src2[i];
+-                }
++                    return (src1[i] > src2[i]) ? src1[i] : src2[i];
++                });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+ 
+@@ -282,15 +333,12 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::SRC2>(debug_data, iteration, src2);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
++                WriteMasked(dest, decoded->dest_mask, [&](int i) {
+                     // NOTE: Exact form required to match NaN semantics to hardware:
+                     //   min(0, NaN) -> NaN
+                     //   min(NaN, 0) -> 0
+-                    dest[i] = (src1[i] < src2[i]) ? src1[i] : src2[i];
+-                }
++                    return (src1[i] < src2[i]) ? src1[i] : src2[i];
++                });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+ 
+@@ -302,19 +350,17 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                 Record<DebugDataRecord::SRC2>(debug_data, iteration, src2);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+ 
+-                OpCode::Id opcode = instr.opcode.Value().EffectiveOpCode();
++                const OpCode::Id opcode = decoded->effective_opcode;
+                 if (opcode == OpCode::Id::DPH || opcode == OpCode::Id::DPHI)
+                     src1[3] = f24::One();
+ 
+                 int num_components = (opcode == OpCode::Id::DP3) ? 3 : 4;
+-                f24 dot = std::inner_product(src1, src1 + num_components, src2, f24::Zero());
+-
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
+-                    dest[i] = dot;
++                f24 dot = f24::Zero();
++                for (int i = 0; i < num_components; ++i) {
++                    dot += Multiply(src1[i], src2[i]);
+                 }
++
++                WriteMasked(dest, decoded->dest_mask, [&](int) { return dot; });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+             }
+@@ -324,12 +370,7 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+                 f24 rcp_res = f24::FromFloat32(1.0f / src1[0].ToFloat32());
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
+-                    dest[i] = rcp_res;
+-                }
++                WriteMasked(dest, decoded->dest_mask, [&](int) { return rcp_res; });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+             }
+@@ -339,12 +380,7 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+                 f24 rsq_res = f24::FromFloat32(1.0f / std::sqrt(src1[0].ToFloat32()));
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
+-                    dest[i] = rsq_res;
+-                }
++                WriteMasked(dest, decoded->dest_mask, [&](int) { return rsq_res; });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+             }
+@@ -352,7 +388,7 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+             case OpCode::Id::MOVA: {
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 for (int i = 0; i < 2; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
++                    if (!decoded->DestComponentEnabled(i))
+                         continue;
+ 
+                     // TODO: Figure out how the rounding is done on hardware
+@@ -366,12 +402,7 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+             case OpCode::Id::MOV: {
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
+-                    dest[i] = src1[i];
+-                }
++                WriteMasked(dest, decoded->dest_mask, [&](int i) { return src1[i]; });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+             }
+@@ -381,12 +412,9 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::SRC2>(debug_data, iteration, src2);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
+-                    dest[i] = (src1[i] >= src2[i]) ? f24::One() : f24::Zero();
+-                }
++                WriteMasked(dest, decoded->dest_mask, [&](int i) {
++                    return (src1[i] >= src2[i]) ? f24::One() : f24::Zero();
++                });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+ 
+@@ -395,12 +423,9 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::SRC2>(debug_data, iteration, src2);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
+-                    dest[i] = (src1[i] < src2[i]) ? f24::One() : f24::Zero();
+-                }
++                WriteMasked(dest, decoded->dest_mask, [&](int i) {
++                    return (src1[i] < src2[i]) ? f24::One() : f24::Zero();
++                });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+ 
+@@ -452,12 +477,7 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+ 
+                 // EX2 only takes first component exp2 and writes it to all dest components
+                 f24 ex2_res = f24::FromFloat32(std::exp2(src1[0].ToFloat32()));
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
+-                    dest[i] = ex2_res;
+-                }
++                WriteMasked(dest, decoded->dest_mask, [&](int) { return ex2_res; });
+ 
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+@@ -469,12 +489,7 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+ 
+                 // LG2 only takes the first component log2 and writes it to all dest components
+                 f24 lg2_res = f24::FromFloat32(std::log2(src1[0].ToFloat32()));
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
+-                    dest[i] = lg2_res;
+-                }
++                WriteMasked(dest, decoded->dest_mask, [&](int) { return lg2_res; });
+ 
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+@@ -492,29 +507,24 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+         }
+ 
+         case OpCode::Type::MultiplyAdd: {
+-            if ((instr.opcode.Value().EffectiveOpCode() == OpCode::Id::MAD) ||
+-                (instr.opcode.Value().EffectiveOpCode() == OpCode::Id::MADI)) {
+-                const SwizzlePattern& mad_swizzle = *reinterpret_cast<const SwizzlePattern*>(
+-                    &swizzle_data[instr.mad.operand_desc_id]);
+-
+-                bool is_inverted = (instr.opcode.Value().EffectiveOpCode() == OpCode::Id::MADI);
+-
+-                const f24* src1_ = LookupSourceRegister(instr.mad.GetSrc1(is_inverted), 0);
++            if ((decoded->effective_opcode == OpCode::Id::MAD) ||
++                (decoded->effective_opcode == OpCode::Id::MADI)) {
++                const f24* src1_ =
++                    LookupSourceRegister(decoded->sources[0], decoded->address_registers[0]);
+                 const f24* src2_ =
+-                    LookupSourceRegister(instr.mad.GetSrc2(is_inverted),
+-                                         !is_inverted * instr.mad.address_register_index);
+-                const f24* src3_ = LookupSourceRegister(
+-                    instr.mad.GetSrc3(is_inverted), is_inverted * instr.mad.address_register_index);
++                    LookupSourceRegister(decoded->sources[1], decoded->address_registers[1]);
++                const f24* src3_ =
++                    LookupSourceRegister(decoded->sources[2], decoded->address_registers[2]);
+ 
+-                const bool negate_src1 = mad_swizzle.negate_src1.Value() != 0;
+-                const bool negate_src2 = mad_swizzle.negate_src2.Value() != 0;
+-                const bool negate_src3 = mad_swizzle.negate_src3.Value() != 0;
++                const bool negate_src1 = (decoded->negate_mask & 1) != 0;
++                const bool negate_src2 = (decoded->negate_mask & 2) != 0;
++                const bool negate_src3 = (decoded->negate_mask & 4) != 0;
+ 
+                 f24 src1[4] = {
+-                    src1_[(int)mad_swizzle.src1_selector_0.Value()],
+-                    src1_[(int)mad_swizzle.src1_selector_1.Value()],
+-                    src1_[(int)mad_swizzle.src1_selector_2.Value()],
+-                    src1_[(int)mad_swizzle.src1_selector_3.Value()],
++                    src1_[decoded->selectors[0][0]],
++                    src1_[decoded->selectors[0][1]],
++                    src1_[decoded->selectors[0][2]],
++                    src1_[decoded->selectors[0][3]],
+                 };
+                 if (negate_src1) {
+                     src1[0] = -src1[0];
+@@ -523,10 +533,10 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                     src1[3] = -src1[3];
+                 }
+                 f24 src2[4] = {
+-                    src2_[(int)mad_swizzle.src2_selector_0.Value()],
+-                    src2_[(int)mad_swizzle.src2_selector_1.Value()],
+-                    src2_[(int)mad_swizzle.src2_selector_2.Value()],
+-                    src2_[(int)mad_swizzle.src2_selector_3.Value()],
++                    src2_[decoded->selectors[1][0]],
++                    src2_[decoded->selectors[1][1]],
++                    src2_[decoded->selectors[1][2]],
++                    src2_[decoded->selectors[1][3]],
+                 };
+                 if (negate_src2) {
+                     src2[0] = -src2[0];
+@@ -535,10 +545,10 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                     src2[3] = -src2[3];
+                 }
+                 f24 src3[4] = {
+-                    src3_[(int)mad_swizzle.src3_selector_0.Value()],
+-                    src3_[(int)mad_swizzle.src3_selector_1.Value()],
+-                    src3_[(int)mad_swizzle.src3_selector_2.Value()],
+-                    src3_[(int)mad_swizzle.src3_selector_3.Value()],
++                    src3_[decoded->selectors[2][0]],
++                    src3_[decoded->selectors[2][1]],
++                    src3_[decoded->selectors[2][2]],
++                    src3_[decoded->selectors[2][3]],
+                 };
+                 if (negate_src3) {
+                     src3[0] = -src3[0];
+@@ -548,22 +558,18 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                 }
+ 
+                 f24* dest =
+-                    (instr.mad.dest.Value() < 0x10)
+-                        ? &state.output[state.output_bank][instr.mad.dest.Value().GetIndex()][0]
+-                    : (instr.mad.dest.Value() < 0x20)
+-                        ? &state.temporary[instr.mad.dest.Value().GetIndex()][0]
++                    (decoded->dest < 0x10)
++                        ? &state.output[state.output_bank][decoded->dest][0]
++                    : (decoded->dest < 0x20)
++                        ? &state.temporary[decoded->dest - 0x10][0]
+                         : dummy_vec4_float24_zeros;
+ 
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::SRC2>(debug_data, iteration, src2);
+                 Record<DebugDataRecord::SRC3>(debug_data, iteration, src3);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!mad_swizzle.DestComponentEnabled(i))
+-                        continue;
+-
+-                    dest[i] = src1[i] * src2[i] + src3[i];
+-                }
++                WriteMasked(dest, decoded->dest_mask,
++                            [&](int i) { return Multiply(src1[i], src2[i]) + src3[i]; });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+             } else {
+                 LOG_ERROR(HW_GPU, "Unhandled multiply-add instruction: 0x{:02x} ({}): 0x{:08x}",
+@@ -700,38 +706,40 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+         // old_program_counter + 1 here.
+         u32 next_program_counter = old_program_counter + 1;
+         for (u32 i = 0; i < 4; i++) {
+-            if (call_stack.empty() || call_stack.back().end_address != next_program_counter)
++            if (call_stack_size == 0 ||
++                call_stack[call_stack_size - 1].end_address != next_program_counter)
+                 break;
+             // Hardware bug: when popping four CALL scopes at once, the last
+             // one doesn't update the program counter
+             if (i < 3) {
+-                program_counter = call_stack.back().return_address;
++                program_counter = call_stack[call_stack_size - 1].return_address;
+                 next_program_counter = program_counter;
+             }
+-            call_stack.pop_back();
++            --call_stack_size;
+         }
+ 
+         // The other two stacks can only pop one entry per instruction. They
+         // are checked against the original program counter before any CALL
+         // scopes were closed and they overwrite any previous program counter
+         // updates.
+-        if (!if_stack.empty() && if_stack.back().else_address == old_program_counter + 1) {
+-            program_counter = if_stack.back().end_address;
+-            if_stack.pop_back();
++        if (if_stack_size != 0 &&
++            if_stack[if_stack_size - 1].else_address == old_program_counter + 1) {
++            program_counter = if_stack[if_stack_size - 1].end_address;
++            --if_stack_size;
+         }
+ 
+-        if (!loop_stack.empty() &&
+-            (loop_stack.back().end_address == old_program_counter + 1 || is_break)) {
+-            auto& loop = loop_stack.back();
++        if (loop_stack_size != 0 &&
++            (loop_stack[loop_stack_size - 1].end_address == old_program_counter + 1 || is_break)) {
++            auto& loop = loop_stack[loop_stack_size - 1];
+             state.address_registers[2] += loop.address_increment;
+             if (!is_break && loop.loop_downcounter--) {
+                 program_counter = loop.entry_address;
+             } else {
+                 program_counter = loop.end_address;
+                 // Only restore previous value if there is a surrounding LOOP scope.
+-                if (loop_stack.size() > 1)
++                if (loop_stack_size > 1)
+                     state.address_registers[2] = loop.previous_aL;
+-                loop_stack.pop_back();
++                --loop_stack_size;
+             }
+         }
+     }
+@@ -741,6 +749,84 @@ void InterpreterEngine::SetupBatch(ShaderSetup& setup, unsigned int entry_point)
+     ASSERT(entry_point < MAX_PROGRAM_CODE_LENGTH);
+     setup.DoProgramCodeFixup();
+     setup.entry_point = entry_point;
++
++    const u64 program_hash = setup.GetProgramCodeHash();
++    const u64 swizzle_hash = setup.GetSwizzleDataHash();
++    auto& cache = interpreter_caches[&setup];
++    if (!cache.valid || cache.program_hash != program_hash || cache.swizzle_hash != swizzle_hash) {
++        const auto& program_code = setup.GetProgramCode();
++        const auto& swizzle_data = setup.GetSwizzleData();
++        for (u32 offset = 0; offset < MAX_PROGRAM_CODE_LENGTH; ++offset) {
++            auto& decoded = cache.instructions[offset];
++            decoded.instruction.hex = program_code[offset];
++            const OpCode opcode = decoded.instruction.opcode.Value();
++            const auto& info = opcode.GetInfo();
++            decoded.type = info.type;
++            decoded.effective_opcode = opcode.EffectiveOpCode();
++            decoded.sources.fill(0);
++            decoded.address_registers.fill(0);
++            decoded.dest = 0;
++            decoded.dest_mask = 0;
++            decoded.negate_mask = 0;
++            decoded.has_second_source = false;
++
++            SwizzlePattern swizzle{};
++            if (info.type == OpCode::Type::Arithmetic) {
++                swizzle.hex = swizzle_data[decoded.instruction.common.operand_desc_id];
++                const bool inverted = (info.subtype & OpCode::Info::SrcInversed) != 0;
++                decoded.sources[0] =
++                    static_cast<u8>(decoded.instruction.common.GetSrc1(inverted));
++                decoded.sources[1] =
++                    static_cast<u8>(decoded.instruction.common.GetSrc2(inverted));
++                const u8 address_register = decoded.instruction.common.address_register_index;
++                decoded.address_registers[0] = inverted ? 0 : address_register;
++                decoded.address_registers[1] = inverted ? address_register : 0;
++                decoded.dest = static_cast<u8>(decoded.instruction.common.dest.Value());
++                decoded.has_second_source = (info.subtype & OpCode::Info::Src2) != 0;
++            } else if (info.type == OpCode::Type::MultiplyAdd) {
++                swizzle.hex = swizzle_data[decoded.instruction.mad.operand_desc_id];
++                const bool inverted = decoded.effective_opcode == OpCode::Id::MADI;
++                decoded.sources[0] = static_cast<u8>(decoded.instruction.mad.GetSrc1(inverted));
++                decoded.sources[1] = static_cast<u8>(decoded.instruction.mad.GetSrc2(inverted));
++                decoded.sources[2] = static_cast<u8>(decoded.instruction.mad.GetSrc3(inverted));
++                const u8 address_register = decoded.instruction.mad.address_register_index;
++                decoded.address_registers[1] = inverted ? 0 : address_register;
++                decoded.address_registers[2] = inverted ? address_register : 0;
++                decoded.dest = static_cast<u8>(decoded.instruction.mad.dest.Value());
++                decoded.has_second_source = true;
++            }
++
++            if (info.type == OpCode::Type::Arithmetic ||
++                info.type == OpCode::Type::MultiplyAdd) {
++                decoded.dest_mask = static_cast<u8>(swizzle.dest_mask.Value());
++                decoded.negate_mask = static_cast<u8>(swizzle.negate_src1.Value()) |
++                                      (static_cast<u8>(swizzle.negate_src2.Value()) << 1) |
++                                      (static_cast<u8>(swizzle.negate_src3.Value()) << 2);
++                decoded.selectors[0] = {
++                    static_cast<u8>(swizzle.src1_selector_0.Value()),
++                    static_cast<u8>(swizzle.src1_selector_1.Value()),
++                    static_cast<u8>(swizzle.src1_selector_2.Value()),
++                    static_cast<u8>(swizzle.src1_selector_3.Value()),
++                };
++                decoded.selectors[1] = {
++                    static_cast<u8>(swizzle.src2_selector_0.Value()),
++                    static_cast<u8>(swizzle.src2_selector_1.Value()),
++                    static_cast<u8>(swizzle.src2_selector_2.Value()),
++                    static_cast<u8>(swizzle.src2_selector_3.Value()),
++                };
++                decoded.selectors[2] = {
++                    static_cast<u8>(swizzle.src3_selector_0.Value()),
++                    static_cast<u8>(swizzle.src3_selector_1.Value()),
++                    static_cast<u8>(swizzle.src3_selector_2.Value()),
++                    static_cast<u8>(swizzle.src3_selector_3.Value()),
++                };
++            }
++        }
++        cache.program_hash = program_hash;
++        cache.swizzle_hash = swizzle_hash;
++        cache.valid = true;
++    }
++    setup.cached_shader = &cache;
+ }
+ 
+ MICROPROFILE_DEFINE(GPU_Shader, "GPU", "Shader", MP_RGB(50, 50, 240));
+diff --git a/src/video_core/texture/texture_decode.cpp b/src/video_core/texture/texture_decode.cpp
+index e99e75d..73e5270 100644
+--- a/src/video_core/texture/texture_decode.cpp
++++ b/src/video_core/texture/texture_decode.cpp
+@@ -66,7 +66,11 @@ Common::Vec4<u8> LookupTexture(const u8* source, unsigned int x, unsigned int y,
+     const unsigned int fine_y = y % 8;
+ 
+     const u8* line = source + coarse_y * info.stride;
++#ifdef __EMSCRIPTEN__
++    const u8* tile = line + coarse_x * info.tile_size;
++#else
+     const u8* tile = line + coarse_x * CalculateTileSize(info.format);
++#endif
+     return LookupTexelInTile(tile, fine_x, fine_y, info, disable_alpha);
+ }
+ 
+diff --git a/src/video_core/texture/texture_decode.h b/src/video_core/texture/texture_decode.h
+index 19faba8..99010b9 100644
+--- a/src/video_core/texture/texture_decode.h
++++ b/src/video_core/texture/texture_decode.h
+@@ -18,6 +18,9 @@ struct TextureInfo {
+     u32 width;
+     u32 height;
+     ptrdiff_t stride;
++#ifdef __EMSCRIPTEN__
++    size_t tile_size{};
++#endif
+     TexturingRegs::TextureFormat format;
+     bool is_shadow_source;
+ 
+@@ -26,7 +29,11 @@ struct TextureInfo {
+ 
+     /// Calculates stride from format and width, assuming that the entire texture is contiguous.
+     void SetDefaultStride() {
+-        stride = CalculateTileSize(format) * (width / 8);
++        const size_t calculated_tile_size = CalculateTileSize(format);
++        stride = calculated_tile_size * (width / 8);
++#ifdef __EMSCRIPTEN__
++        tile_size = calculated_tile_size;
++#endif
+     }
+ };
+ 

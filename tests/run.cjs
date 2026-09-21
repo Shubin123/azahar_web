@@ -12,6 +12,7 @@
  *   node tests/run.cjs --regression         # Rendering regression only
  *   node tests/run.cjs --transition         # Cold boot, touch title, sustain gameplay
  *   node tests/run.cjs --save-states        # Persistent UI save/load/reload/delete lifecycle
+ *   node tests/run.cjs --autofallback       # Auto leaves a stalling accelerated renderer
  *   node tests/run.cjs --bench --no-state   # Benchmark from cold boot (slow)
  *   node tests/run.cjs --duration 30        # Custom benchmark duration
  *   node tests/run.cjs --warmup 10          # Custom warmup (short with save state)
@@ -31,12 +32,13 @@ const argVal = (k, d) => {
 };
 
 const explicit = argFlag('--smoke') || argFlag('--bench') || argFlag('--regression') ||
-  argFlag('--transition') || argFlag('--save-states');
+  argFlag('--transition') || argFlag('--save-states') || argFlag('--autofallback');
 const runSmoke = !explicit || argFlag('--smoke');
 const runBench = !explicit || argFlag('--bench');
 const runRegression = !explicit || argFlag('--regression');
 const runTransition = argFlag('--transition');
 const runSaveStates = argFlag('--save-states');
+const runAutoFallback = argFlag('--autofallback');
 const useState = !argFlag('--no-state');
 const artifact = argVal('--artifact', 'software');
 const duration = argVal('--duration', useState ? '15' : '15');
@@ -83,7 +85,7 @@ console.log('Azahar Web Test Runner');
 console.log(`  Chrome:     ${cfg.chromePath || '(not found)'}`);
 console.log(`  ROM:        ${cfg.romPath ? path.basename(cfg.romPath) : '(not found)'}`);
 console.log(`  Save state: ${cfg.statePath ? path.relative(cfg.ROOT, cfg.statePath) : '(none)'}`);
-console.log(`  Build dir:  ${path.relative(cfg.ROOT, cfg.buildDir)}`);
+console.log(`  Build dir:  ${cfg.buildDir ? path.relative(cfg.ROOT, cfg.buildDir) : '(none; using the checked-in artifacts)'}`);
 console.log(`  Artifact:   ${artifact}`);
 if (useState && cfg.statePath) {
   console.log(`  Mode:       save-state (warmup ${warmup}s, measure ${duration}s)`);
@@ -162,6 +164,20 @@ if (runSaveStates) {
         timeout: 240000,
         env: { AZAHAR_SAVE_STATE_UI: '1', AZAHAR_RENDERER: artifact },
       });
+  }
+}
+
+// The renderer auto-fallback test is opt-in because it cold boots a title
+// twice, once per renderer, and the switch is only observable at full length.
+if (runAutoFallback) {
+  if (!cfg.chromePath) {
+    header('Renderer Auto-fallback'); console.log('  Skipped: Chrome not found.'); skipped++;
+  } else if (!cfg.romPath) {
+    header('Renderer Auto-fallback'); console.log('  Skipped: No ROM found.'); skipped++;
+  } else {
+    run('Renderer Auto-fallback',
+      path.join(TESTS_DIR, 'renderer_autofallback.cjs'), ['--timeout-seconds', '300'],
+      { timeout: 900000 });
   }
 }
 

@@ -121,3 +121,72 @@ Fixtures captured locally on 2026-09-07 under `tmp_test/fixtures/`:
 These are local benchmark fixtures, not files shipped with GitHub Pages. Exact
 ROM/state paths and screenshots are in each scene's JSON metadata. The first-home
 Sims scene has a green portrait thumbnail, so it is also useful for visual debugging.
+
+## 2026-09-19 renderer-throughput investigation
+
+Title: `2in1 Horses 3D` (Horse & Foal), 256 MB, macOS (Apple M1), Chrome
+headless, ANGLE Metal. Method notes, because the wrong tool answers this
+question misleadingly:
+
+1. **The emulator's own counters do not see the display path.** `timeGpu`
+   measures CPU time spent emitting GL commands. It read 0.13 ms while the
+   browser was spending ~100 ms per frame, so it cannot be used to decide
+   whether graphics are the bottleneck.
+2. **`ps` cannot attribute Chrome.** A second Chrome instance (the user's own
+   browser) contributes processes of the same name, and the GPU process is not
+   reliably a child of the harness browser. `SystemInfo.getProcessInfo` over CDP
+   is scoped to the browser under test; the benchmark now samples it around the
+   measured window and prints cores per process type.
+3. **Callback timing alone is ambiguous.** 4 ms of work at 10 callbacks/s can
+   mean either a cheap frame or a starved one. `AZAHAR_FRAME_TRACE=1` records
+   long-animation-frame entries: 105 ms mean duration with 0.0 ms script and
+   0.0 ms blocking established that the main thread was idle and waiting.
+4. **Command volume was ruled out by counting.** `AZAHAR_GL_CENSUS=1` wraps the
+   WebGL2 prototype and reports calls by name: 4,337 calls/s, 139 draws/s, and
+   zero `texImage2D`/`texSubImage2D`/`compileShader` inside the window.
+5. **The backend was isolated by substitution.** `--use-angle=swiftshader` runs
+   the identical command stream on a CPU implementation and reached 60 Hz and
+   101% guest speed. A software rasterizer beating the hardware one on the same
+   commands localises the cost to ANGLE's Metal synchronization, not to the
+   emulator.
+
+Result: software 100.3% guest speed vs WebGL2/Metal 44.1% on the same scene,
+with the GPU process at 0.76 cores against the renderer's 0.05. Screenshots of
+both were compared first to confirm they draw the same frame; a renderer that
+draws nothing is trivially fast.
+
+Optimization 15 (`web/azahar_ui.js`, `checkDisplayThroughput`) acts on the
+duty cycle rather than on frame rate alone, because a low frame rate with a
+*busy* callback is CPU-bound and switching renderers would make it worse. It
+requires 12 consecutive qualifying half-second samples: a single sample fires
+during scene loads, which was observed misfiring the SwiftShader control at 90%
+speed before the run requirement was added.
+
+`tests/renderer_autofallback.cjs` drives the production UI end to end and
+carries both directions:
+
+```bash
+# Positive: ANGLE Metal stalls, Auto must leave it and reuse the verdict
+node tests/renderer_autofallback.cjs
+
+# Back-compat: an explicit WebGL2 choice survives the same stalling backend
+node tests/renderer_autofallback.cjs --pinned
+
+# Negative control: WebGL2 keeps up, Auto must stay on it
+AZAHAR_CHROME_ARGS=--use-angle=swiftshader \
+  node tests/renderer_autofallback.cjs --expect-none
+```
+
+Measured on 2026-09-19 with `2in1 Horses 3D`:
+
+| Direction | Result |
+|---|---|
+| Auto, ANGLE Metal | switched; 14 -> 60 game FPS, 23% -> 100% speed |
+| Auto, repeat visit | went straight to software in 0.1 s from the stored verdict |
+| Pinned `?renderer=webgl2` | stayed on WebGL2 (47 game FPS / 78%) as chosen |
+| Auto, ANGLE SwiftShader | stayed on WebGL2 |
+
+It uploads the ROM through the browser's real file picker. A 256 MB `File`
+constructed inside the page competes with the 768 MB emulator heap and fails
+`FileReader`, which is what `tests/browser_regression.cjs` currently hits on
+this title.
