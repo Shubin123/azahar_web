@@ -212,11 +212,15 @@
             <div class="card">
                 <h2>Renderer</h2>
                 <select id="renderer-mode" class="renderer-select" aria-label="Renderer mode">
-                    <option value="auto">Auto (best working mode)</option>
-                    <option value="webgl2">Accelerated WebGL2</option>
-                    <option value="software">Compatibility</option>
+                    <option value="auto">Auto — best for this machine</option>
+                    <option value="webgl2">Accelerated (WebGL2)</option>
+                    <option value="software">Compatibility (software)</option>
                 </select>
                 <div id="renderer-mode-help" class="mode-help"></div>
+                <button type="button" id="renderer-remeasure" class="btn btn-secondary" hidden
+                        style="margin-top:8px;padding:4px 8px;font-size:0.7rem;">
+                    Re-measure this machine
+                </button>
                 <label for="resolution-scale" class="mode-help" style="display:block;margin-top:12px;margin-bottom:4px;">
                     Internal resolution
                 </label>

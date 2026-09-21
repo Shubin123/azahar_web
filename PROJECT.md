@@ -66,6 +66,23 @@ cmake --build build-web2 --parallel 8
 
 Artifacts are generated under `build-web/bin/Release/` and automatically synchronized into `web/` by the `azahar_web_assets` CMake target. `build_web.bat` runs that target and verifies both files have matching SHA-256 hashes, so no manual copy step is needed. `node tests/web_artifact_smoke.cjs` validates the synchronized artifacts, generated API names, and WASM compilation. `tests/browser_regression.cjs`, supplied with a decrypted local `.3ds` through `AZAHAR_ROM_PATH`, verifies cross-origin isolation, initialization, ROM mounting/loading, automatic run-loop startup, canvas output, and browser errors. The accelerated display-scheduled loop detected a multi-color kiosk-demo framebuffer in about 8 seconds in Chrome. An encrypted CIA is expected to fail cleanly with the UI's encrypted-ROM status.
 
+**Recovery note (2026-09-21):** the private engine fork this depends on had gone
+untracked (see `patches/README.md`) and was recovered from a cold-storage backup.
+It now lives at [`Shubin123/azahar_emscripten`](https://github.com/Shubin123/azahar_emscripten)
+(branch `web-port-recovered`), which also carries uncommitted optimization work
+found in that backup: WASM SIMD128 codegen, `-ffast-math` on the software
+rasterizer/shader-interpreter hot paths, LibreSSL/faad2 Emscripten cross-compile
+fixes, and staged (compile-gated, execution-gated-off) scaffolding for a WebGL2
+CPU-vertex PICA path. The build was reproduced from scratch on Linux with
+Emscripten 6.0.9 + Ninja; both `azahar_web_assets` (software) and the WebGL2
+target built and passed `tests/web_artifact_smoke.cjs` for both artifacts. One
+build fix was needed and is now committed to the engine repo: `-ffast-math`
+on a per-file basis conflicts with `video_core`'s shared precompiled header
+(`__FAST_MATH__` must match between a PCH and any translation unit consuming
+it), so `sw_rasterizer.cpp`/`shader_interpreter.cpp` now set
+`SKIP_PRECOMPILE_HEADERS ON` alongside their `-ffast-math` option instead of
+forcing fast-math (and PCH incompatibility) onto the rest of the target.
+
 ## Performance & Benchmarking
 
 ### Optimization History

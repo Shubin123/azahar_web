@@ -54,6 +54,13 @@ PROJECT.md              # Detailed architecture and optimization history
 
 **To build from source:** Emscripten SDK 6.0+, CMake, Ninja, and the Azahar source tree checked out at `./azahar/`.
 
+The web-specific engine changes (the SDL/software/WebGL2 port itself — `src/citra_sdl/`,
+`src/video_core/renderer_webgl2/`, and the related CMake targets) live in a separate
+sibling repository, [`Shubin123/azahar_emscripten`](https://github.com/Shubin123/azahar_emscripten)
+(private), not upstream `azahar-emu/azahar`. Clone that in place of `./azahar/` to build.
+`patches/README.md` predates that repo and pins a commit that isn't reachable from
+upstream for the same reason — the engine's own history is the source of truth now.
+
 ## Building from Source
 
 ```bash

@@ -9,7 +9,10 @@ const cfg = require('./config.cjs');
 
 const root = path.resolve(__dirname, '..');
 const webDir = path.join(root, 'web');
-const buildDir = path.join(cfg.buildDir, 'bin', 'Release');
+// The repository ships the generated artifacts, so a fresh clone can validate
+// what it serves without a local Emscripten build. The staleness comparison
+// runs only when a build directory is actually present.
+const buildDir = cfg.buildDir ? path.join(cfg.buildDir, 'bin', 'Release') : null;
 const artifactArgument = process.argv.indexOf('--artifact');
 const artifactKind = artifactArgument >= 0 ? process.argv[artifactArgument + 1] : 'software';
 if (!['software', 'webgl2'].includes(artifactKind)) {
@@ -48,17 +51,21 @@ function requireFile(dir, name) {
     return file;
 }
 
-for (const dir of [webDir, buildDir]) {
+for (const dir of [webDir, buildDir].filter(Boolean)) {
     requireFile(dir, `${artifactName}.js`);
     requireFile(dir, `${artifactName}.wasm`);
 }
 
-for (const extension of ['js', 'wasm']) {
-    const name = `${artifactName}.${extension}`;
-    const buildHash = crypto.createHash('sha256').update(read(path.join(buildDir, name))).digest('hex');
-    const webHash = crypto.createHash('sha256').update(read(path.join(webDir, name))).digest('hex');
-    assert.equal(webHash, buildHash,
-        `served web/${name} is stale; rebuild the azahar_web_assets target`);
+if (buildDir) {
+    for (const extension of ['js', 'wasm']) {
+        const name = `${artifactName}.${extension}`;
+        const buildHash = crypto.createHash('sha256').update(read(path.join(buildDir, name))).digest('hex');
+        const webHash = crypto.createHash('sha256').update(read(path.join(webDir, name))).digest('hex');
+        assert.equal(webHash, buildHash,
+            `served web/${name} is stale; rebuild the azahar_web_assets target`);
+    }
+} else {
+    console.log('  (no local build directory; skipped the served-vs-built staleness check)');
 }
 
 const html = read(path.join(webDir, pageName)).toString('utf8');

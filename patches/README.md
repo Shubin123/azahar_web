@@ -16,3 +16,10 @@ On an otherwise compatible source checkout, check each selected patch with
 `git apply --check ../patches/<name>.patch` before applying. These are per-file
 deltas, not a replacement for the entire Emscripten port. The current local
 checkout already contains them; do not apply them again.
+
+**Update (2026-09-21):** commit `30d214dd6` does not exist in `azahar-emu/azahar`
+because the port was developed on a private fork, which is now recovered and
+published at [`Shubin123/azahar_emscripten`](https://github.com/Shubin123/azahar_emscripten)
+(private repo, branch `web-port-recovered`, with tag `web-port-base` pinning
+this exact commit). Clone that repo directly instead of reconstructing it from
+these patches against upstream.
