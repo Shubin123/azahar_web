@@ -4,11 +4,11 @@
 Azahar WebAssembly port targeting modern web browsers via Emscripten.
 - **CPU Subsystem**: Portable `dyncom` ARM11 C++ interpreter (JIT `dynarmic` disabled via `ARCHITECTURE=GENERIC`).
 - **Graphics Subsystem**: `SwRenderer::RendererSoftware` rasterizer operating on 32-bit RGBA8 framebuffers (OpenGL & Vulkan hardware renderers disabled).
-- **Frontend / Windowing**: Adapted `citra_sdl` / `EmuWindow_SDL2_SW` presenting software framebuffers to an HTML5 `<canvas id="canvas">`.
+- **Frontend / Windowing**: Repo-owned `port/src/citra_web/` overlay presenting software framebuffers through SDL2 to `<canvas id="canvas">`.
 - **Event Loop**: Main loop unrolled into Emscripten event loop / exported C per-frame step function (`azahar_step_frame`).
 - **File System / Loader**: HTML File API -> Emscripten MEMFS (`FS.writeFile` with ownership transfer) -> C++ `Core::System::Load()` via standard C file IO. The upload keeps the selected filename extension so the core chooses the correct loader.
 - **Browser Threading**: Emscripten pthreads use `SharedArrayBuffer` workers. The served page must be cross-origin isolated with COOP/COEP headers.
-- **Overlay Layer**: `azahar-webgpu/` CMake overlay cleanly linking `citra_core`.
+- **Overlay Layer**: `port/` CMake overlay cleanly links public upstream `citra_core` without modifying the pinned submodule.
 
 ## Feature Inventory
 | # | Feature | Description | Milestone | Source |
@@ -45,35 +45,52 @@ Azahar WebAssembly port targeting modern web browsers via Emscripten.
 - `azahar_shutdown()`: C++ export stopping emulation and releasing frontend resources.
 
 ### Core ↔ EmuWindow Software Presentation
-- `EmuWindow_SDL2_SW::PresentSingleFrame()`: Non-blocking function blitting current `RendererSoftware` framebuffers to SDL surface and updating HTML5 canvas.
+- `EmuWindow_Web::Present()`: Non-blocking function blitting current `RendererSoftware` framebuffers to the SDL surface and updating the HTML5 canvas.
 
 ## Code Layout
-- `azahar/CMakeLists.txt`: Root CMake configuration for Emscripten toolchain options.
+- `azahar/`: pinned public Azahar submodule (including all nested externals).
 - `azahar/src/core/`: Core emulator logic, `dyncom` CPU interpreter (`src/core/arm/dyncom`).
 - `azahar/src/video_core/`: Software rasterizer (`src/video_core/renderer_software`).
-- `azahar/src/citra_sdl/`: SDL2 software window frontend (`emu_window/emu_window_sdl2_sw.cpp`).
-- `azahar-webgpu/`: Overlay architecture and WebGPU targets.
+- `port/src/citra_web/`: reconstructed web frontend, input bridge, canvas presenter, and C API.
+- `cmake/`: Emscripten compatibility and overlay hooks for unmodified upstream source.
+- `toolchain/versions.sh`: pinned Azahar and Emscripten revisions.
 - `web/`: Web UI and generated release artifacts (`index.html`, `azahar_ui.js`, `azahar.js`, `azahar.wasm`).
 
 ## Current Build Status
 
-The Emscripten configuration and Ninja build complete on Windows with Emscripten 6.0.6 and eight parallel jobs:
+The software artifact is reproducible from this repository and public sources:
 
-```powershell
-cmake -B build-web2 -S azahar -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DENABLE_QT=OFF -DENABLE_SDL2=ON -DENABLE_SDL2_FRONTEND=ON -DENABLE_SOFTWARE_RENDERER=ON -DENABLE_OPENGL=OFF -DENABLE_VULKAN=OFF -DENABLE_OPENAL=OFF -DENABLE_LIBUSB=OFF -DENABLE_CUBEB=OFF -DENABLE_ROOM=OFF -DENABLE_WEB_SERVICE=OFF -DENABLE_SCRIPTING=OFF -DENABLE_TESTS=OFF
-cmake --build build-web2 --parallel 8
+```bash
+git clone --recurse-submodules https://github.com/Shubin123/azahar_web.git
+cd azahar_web
+./setup_web_toolchain.sh
+./build_web.sh
+./stage_web.sh /tmp/azahar-staged
+AZAHAR_WEB_DIR=/tmp/azahar-staged node tests/rebuilt_browser_smoke.cjs
 ```
 
-Artifacts are generated under `build-web/bin/Release/` and automatically synchronized into `web/` by the `azahar_web_assets` CMake target. `build_web.bat` runs that target and verifies both files have matching SHA-256 hashes, so no manual copy step is needed. `node tests/web_artifact_smoke.cjs` validates the synchronized artifacts, generated API names, and WASM compilation. `tests/browser_regression.cjs`, supplied with a decrypted local `.3ds` through `AZAHAR_ROM_PATH`, verifies cross-origin isolation, initialization, ROM mounting/loading, automatic run-loop startup, canvas output, and browser errors. The accelerated display-scheduled loop detected a multi-color kiosk-demo framebuffer in about 8 seconds in Chrome. An encrypted CIA is expected to fail cleanly with the UI's encrypted-ROM status.
+The generated files live under `build-web-sw/bin/Release/`. They are staged
+separately so a development build never overwrites the known-working artifacts
+under `web/`. The local browser smoke boots a real 256 MB title, rejects any
+startup WebSocket activity, loads the ROM, steps the core, and requires at least
+1,000 non-black software-renderer pixels. On the Horses fixture it reached
+172,627 non-black pixels after 31 callbacks.
+
+`apply_upstream_patches.sh` owns the delta against the pinned public submodule.
+It recognizes an already-applied patch, refuses unrelated source edits, and is
+called by both setup and build. The patch was verified by reverse-applying to a
+clean gitlink and applying it again before the release audit.
 
 ### Build reproducibility (2026-09-19)
 
-**The toolchain builds; the port's own sources are missing.** These are separate
-problems and were previously conflated.
+**The software port and its toolchain are now fully represented here.** The
+public upstream source is pinned as the `azahar/` submodule, the frontend lives
+under `port/`, and the exact Emscripten version is pinned in
+`toolchain/versions.sh`.
 
 *Toolchain — working, and verified end to end.* `./build_web.sh` builds the
 upstream Azahar tree for WebAssembly on macOS (Apple M1, emcc 6.0.9, CMake
-4.4.3, Ninja): 1439/1439 steps, zero errors, producing `libcitra_core.a`
+4.4.3, Ninja) from a clean build directory with zero errors, producing `libcitra_core.a`
 (71.4 MB, 242 members), `libvideo_core.a`, `libaudio_core.a`,
 `libcitra_common.a` and `libnetwork.a`. The objects are ThinLTO bitcode
 carrying the `wasm32-unknown-emscripten` triple, not host code.
@@ -104,22 +121,29 @@ Three upstream assumptions hold only on native targets and are compensated in
 Note CMake 4.4.3 only *warns* about the pre-3.10 `cmake_minimum_required` calls
 in SDL2, enet and nihstro; they are not fatal.
 
-*Port sources — absent, and not reconstructible here.* `patches/README.md` names
-base commit `30d214dd69a791dc91a024c5062b09ec33792985`, and that commit **does
-not exist in azahar-emu/azahar**: the GitHub API returns 422 for it while
-returning 200 for upstream HEAD. The port was developed against a private fork.
-Consistent with that, upstream's SDL frontend is `src/citra_cli` (gated behind
-`ENABLE_QT`), there is no `src/citra_sdl/` or `src/video_core/renderer_webgl2/`
-upstream, `ENABLE_WEBGL2_RENDERER` and `azahar_web_bundle` do not exist, and
-`emscripten-main-web.patch` *modifies* `emscripten_main.cpp` rather than
-creating it — only about 49% of that file appears as patch context.
+The unavailable private fork is no longer required for `azahar.wasm`.
+`port/src/citra_web/` reconstructs the required C API, browser-safe frame loop,
+software framebuffer presenter, keyboard/analog/touch input, default applets,
+image interface, and frontend-owned settings initialization. In particular,
+it avoids desktop `InputCommon::Init`: that path always starts Cemuhook UDP,
+which becomes an endless `ws://0.0.0.0:0/` loop when no desktop config exists.
+It also populates every LLE service entry; upstream uses
+`Settings::values.lle_modules.at()` during load and otherwise throws.
 
-Consequence: any optimization inside `azahar.wasm` / `azahar_webgl2.wasm` —
-including the CPU-side limits under "Next FPS Work" — needs that fork or the
-original build tree. Work in `web/` and `tests/` is unaffected, which is where
-optimization 15 lives. See `FORK_HANDOFF.md` for the steps to
-move the fork off the machine that holds it (per `run_build.bat`, that is
-`C:\Users\shubadub\Documents\azahar`).
+The reconstructed artifact initializes, loads the Horses ROM, steps
+successfully, and renders the same title scene. In a 120-second warmup plus
+15-second measurement, it sustained 60.8 game FPS and 101.7% guest speed, with
+89.9% non-black and 34.4% colorful visible coverage. Browser callback cadence
+is intentionally not used as a game-FPS metric because one callback can advance
+multiple guest frames. The checked-in software artifact is likewise
+display-capped at 60 FPS; no sustained guest-FPS loss was found in this scene.
+
+One source gap remains: upstream still has no
+`src/video_core/renderer_webgl2/`, so `azahar_webgl2.wasm` cannot yet be rebuilt.
+The accelerated pair under `web/` remains checked in and covered by the
+existing smoke, benchmark, renderer-selection, and fallback tests. Recovering
+the cold-stored fork would restore that source, but it no longer gates software
+WASM development or CPU/frame-loop work.
 
 ## Performance & Benchmarking
 
@@ -140,8 +164,8 @@ move the fork off the machine that holds it (per `run_build.bat`, that is
 | 11 | Float UV-to-texel conversion | Compute UV-to-texel in native float32 inside TextureColor, avoiding f24 round-trip for width/height scaling | GPU cmd 187->178 ms; game FPS 3.8->4.0 |
 | 12 | Float-native texture sampling | TextureColorFloat bypasses f24 round-trip for UV coords entirely; float32 throughout the texture sampling path | Part of Opts 12-14 batch |
 | 13 | TEV stage early-exit | Pre-compute active TEV stage count per triangle; skip pass-through stages in the inner pixel loop | Part of Opts 12-14 batch |
-| 15 | Display-path throughput fallback | Auto leaves an accelerated backend that stalls frame production instead of failing. Emulation advances once per browser frame, so a backend delivering few frames caps guest speed regardless of how cheap each frame is; the callback duty cycle separates that from being CPU-bound | 2in1 Horses 3D: 11 -> 60 game FPS (18% -> 101% speed) end to end through the UI |
 | 14 | Pre-computed TextureInfo | Hoist TextureInfo::FromPicaRegister and memory pointer lookups out of per-pixel loop to per-triangle setup; inline alpha test and hoist fog check | Part of Opts 12-14 batch |
+| 15 | Display-path throughput fallback | Auto leaves an accelerated backend that stalls frame production instead of failing. Emulation advances once per browser frame, so a backend delivering few frames caps guest speed regardless of how cheap each frame is; the callback duty cycle separates that from being CPU-bound | 2in1 Horses 3D: 11 -> 60 game FPS (18% -> 101% speed) end to end through the UI |
 
 ### Benchmark Results (2026-09-01)
 
@@ -283,14 +307,17 @@ decode/setup is only 0.5%. The larger cache did not improve FPS and was reverted
    stream at 60 Hz localises the cause to backend synchronization rather than to
    command volume, PICA work, or the emulator's own counters (`timeGpu` measures
    only CPU time spent emitting commands and reports 0.13 ms while the GPU
-   process burns 0.82 cores). Blocked on build reproducibility.
-1. **Decouple emulation from frame production.** `azahar_step_frame` stops after
-   `max_slices_per_tick = 256` slices, which on this title is ~4 ms of a 14 ms
-   budget; the deadline is never reached. Whenever the display path is slow, the
-   emulator therefore idles most of every frame (measured duty cycle 2-5%).
-   Running to the deadline instead of a fixed slice count, or advancing the guest
-   without presenting when frames are being dropped, would raise guest speed on
-   any frame-starved configuration. Blocked on build reproducibility.
+   process burns 0.82 cores). The checked-in accelerated binary remains usable,
+   but a source fix requires recovering or independently rebuilding the original
+   `renderer_webgl2/` implementation.
+1. **Decouple emulation progress from presentation without lowering display
+   FPS.** Simply removing `max_slices_per_tick = 256` failed the parity gate:
+   the light Horses scene consumed the full 14 ms work deadline and dropped
+   from 60 to 41 callbacks/s despite already sustaining 100% guest speed. The
+   reconstructed frontend retains the cap and stops at its guest-time target.
+   A deeper design should advance
+   extra guest work only when a presentation will be skipped, then be gated on
+   repeatable gameplay states.
 2. Use the new persistent save UI to capture repeatable, player-controllable states for Zelda, NSMB2, and The Sims 3. Gate every optimization on the same scenes; boot screens are too light to predict gameplay cost.
 3. Add production OpenGL counters around CPU PICA vertex translation, draw submission, display transfer, cache upload/download, and shader compilation. The existing detailed renderer counters describe the experimental backend and are zero on the default OpenGL path, leaving the current 43 ms Mario GPU-command cost insufficiently attributed.
 4. Fix the generated PICA vertex-shader path on ANGLE/D3D11. It is fast at native resolution but currently produces empty scaled framebuffers, forcing the reliable CPU-vertex path for 2x-4x. A correct generated path removes the largest avoidable CPU graphics stage without reducing visuals.

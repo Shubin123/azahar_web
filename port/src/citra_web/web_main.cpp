@@ -21,11 +21,13 @@
 
 #include "audio_core/sink_details.h"
 #include "citra_web/emu_window_web.h"
+#include "citra_web/web_input.h"
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/frontend/applets/default_applets.h"
+#include "core/frontend/image_interface.h"
 #include "core/hle/service/service.h"
-#include "input_common/main.h"
+#include "core/loader/loader.h"
 
 namespace {
 
@@ -63,13 +65,27 @@ int ReportException(const char* where, const std::exception* e) {
     return -20;
 }
 
+/// Upstream frontends populate settings from a configuration file before
+/// Core::System::Load. This frontend has no desktop config layer, so initialize
+/// the non-Setting containers that the core expects to have entries.
+void ConfigureWebDefaults() {
+    // The configuration frontends create an explicit false entry for every
+    // service module. Service::AttemptLLE intentionally uses unordered_map::at
+    // and therefore throws during System::Load when a frontend omits this
+    // initialization. The libretro frontend performs the same setup.
+    Settings::values.lle_modules.clear();
+    for (const auto& service_module : Service::service_module_map) {
+        Settings::values.lle_modules.emplace(service_module.name, false);
+    }
+}
+
 } // anonymous namespace
 
 extern "C" int azahar_init() {
     if (g_initialized) {
         return 0;
     }
-  try {
+    try {
 
     Settings::values.graphics_api.SetValue(Settings::GraphicsAPI::Software);
     // Browser WebAssembly cannot execute generated machine code.
@@ -84,21 +100,19 @@ extern "C" int azahar_init() {
     // sink is the outstanding integration task.
     Settings::values.output_type.SetValue(AudioCore::SinkType::Null);
 
-    // Registers the input device factories. Without it the HID service's
-    // device lookup throws "unordered_map::at: key not found" during Load,
-    // because the factory map is empty. The Qt frontend does this too.
-    InputCommon::Init();
-
     g_system = &Core::System::GetInstance();
     Frontend::RegisterDefaultApplets(*g_system);
     g_emu_window = std::make_unique<EmuWindow_Web>();
+    WebInput::Init();
+    ConfigureWebDefaults();
+    g_system->RegisterImageInterface(std::make_shared<Frontend::ImageInterface>());
     g_initialized = true;
     return 0;
-  } catch (const std::exception& e) {
-    return ReportException("azahar_init", &e);
-  } catch (...) {
-    return ReportException("azahar_init", nullptr);
-  }
+    } catch (const std::exception& e) {
+        return ReportException("azahar_init", &e);
+    } catch (...) {
+        return ReportException("azahar_init", nullptr);
+    }
 }
 
 /// Load a title already written into MEMFS. Loader failures use distinct codes
@@ -107,7 +121,7 @@ extern "C" int azahar_load_rom(const char* path) {
     if (!g_initialized || g_system == nullptr) {
         return -1;
     }
-  try {
+    try {
     const auto result = g_system->Load(*g_emu_window, std::string{path});
     if (result != Core::System::ResultStatus::Success) {
         switch (result) {
@@ -128,11 +142,11 @@ extern "C" int azahar_load_rom(const char* path) {
     g_speed_last_guest_us = 0.0;
 #endif
     return 0;
-  } catch (const std::exception& e) {
-    return ReportException("azahar_load_rom", &e);
-  } catch (...) {
-    return ReportException("azahar_load_rom", nullptr);
-  }
+    } catch (const std::exception& e) {
+        return ReportException("azahar_load_rom", &e);
+    } catch (...) {
+        return ReportException("azahar_load_rom", nullptr);
+    }
 }
 
 /// Advance emulation within one browser frame, then present.
@@ -142,7 +156,7 @@ extern "C" int azahar_step_frame() {
     if (!g_initialized || !g_rom_loaded || g_system == nullptr) {
         return -2;
     }
-  try {
+    try {
     g_emu_window->PollEvents();
     if (!g_emu_window->IsOpen()) {
         return 1;
@@ -151,14 +165,13 @@ extern "C" int azahar_step_frame() {
     auto result = Core::System::ResultStatus::Success;
 
 #ifdef __EMSCRIPTEN__
-    // Run many short core slices inside one callback rather than a single
-    // long one: the interpreter makes real progress while the deadline keeps
-    // the tab responsive for input and painting.
-    //
-    // The cap is a wall-clock deadline, not a slice count. A fixed count
-    // silently becomes the binding limit whenever the display path is slow —
-    // measured at ~4 ms of a 14 ms budget on a stalling backend, i.e. the
-    // emulator idling ~70% of every frame it was given.
+    // Run short core slices within one callback. The bounded slice count is
+    // important for light titles: consuming the full 14 ms deadline before
+    // presenting reduced the Horses scene from 60 to 41 callbacks/s even
+    // though 256 slices already sustained 100% guest speed. The guest-time
+    // target and slice cap bound this loop without another JS clock crossing
+    // on every batch; a GPU command can exceed a wall deadline on its own
+    // anyway, so polling between slices does not protect the long-frame case.
     const double now_ms = emscripten_get_now();
     const double guest_us = static_cast<double>(g_system->CoreTiming().GetGlobalTimeUs().count());
     const double wall_delta = now_ms - g_speed_last_wall_ms;
@@ -178,8 +191,8 @@ extern "C" int azahar_step_frame() {
                                  guest_us + max_target_lead_us);
     g_speed_last_wall_ms = now_ms;
 
-    const double deadline_ms = now_ms + 14.0;
-    while (emscripten_get_now() < deadline_ms) {
+    constexpr int max_slices_per_tick = 256;
+    for (int slice = 0; slice < max_slices_per_tick; ++slice) {
         result = g_system->RunLoop();
         if (result != Core::System::ResultStatus::Success) {
             break;
@@ -198,11 +211,11 @@ extern "C" int azahar_step_frame() {
     }
     g_emu_window->Present(*g_system);
     return 0;
-  } catch (const std::exception& e) {
-    return ReportException("azahar_step_frame", &e);
-  } catch (...) {
-    return ReportException("azahar_step_frame", nullptr);
-  }
+    } catch (const std::exception& e) {
+        return ReportException("azahar_step_frame", &e);
+    } catch (...) {
+        return ReportException("azahar_step_frame", nullptr);
+    }
 }
 
 extern "C" int azahar_shutdown() {
@@ -210,7 +223,7 @@ extern "C" int azahar_shutdown() {
         g_system->Shutdown();
     }
     g_emu_window.reset();
-    InputCommon::Shutdown();
+    WebInput::Shutdown();
     g_initialized = false;
     g_rom_loaded = false;
     return 0;
@@ -235,13 +248,29 @@ extern "C" int azahar_get_perf_stats(double* out, int count) {
     if (!g_initialized || g_system == nullptr || out == nullptr || count < 3) {
         return -1;
     }
-    const auto stats = g_system->GetLastPerfStats();
+    // The desktop frontends periodically reset these counters. A browser has
+    // no equivalent UI timer, so GetLastPerfStats would return the
+    // value-initialized/previous window forever (and, before the first reset,
+    // indeterminate values). Each JS poll defines the browser's stats window.
+    const auto stats = g_system->GetAndResetPerfStats();
     for (int i = 0; i < count; ++i) {
         out[i] = 0.0;
     }
     out[0] = stats.game_fps;
     out[1] = stats.system_fps;
     out[2] = stats.emulation_speed;
+    if (count >= 8) {
+        out[3] = stats.time_gpu;
+        out[4] = stats.time_swap;
+        out[5] = stats.time_vblank_interval;
+        out[6] = g_system->perf_stats ? g_system->perf_stats->GetMeanFrametime() : 0.0;
+        out[7] = Settings::values.frame_limit.GetValue();
+    }
+    if (count >= 11) {
+        out[8] = Settings::values.cpu_clock_percentage.GetValue();
+        out[9] = g_fast_forward_multiplier;
+        out[10] = g_rom_loaded ? g_system->CoreTiming().GetGlobalTimeUs().count() : 0.0;
+    }
     return 0;
 }
 
@@ -254,28 +283,55 @@ extern "C" int azahar_get_fast_forward() {
     return g_fast_forward_multiplier;
 }
 
-// ── Not yet reconstructed ───────────────────────────────────────────────────
-// These exist because tests/web_artifact_smoke.cjs pins the export list and
-// web/azahar_ui.js feature-detects them. They report "unsupported" rather than
-// pretending to work: a save-state stub that silently returned success would
-// make the UI show a slot that cannot be restored.
-
-extern "C" int azahar_save_state(const char* path) {
-    (void)path;
-    return -1;
+/// Queue a save-state operation for the next emulation slice. Keeping
+/// serialization inside RunLoop ensures it cannot overlap active emulation.
+extern "C" int azahar_save_state(int slot) {
+    if (!g_initialized || !g_rom_loaded || g_system == nullptr || slot < 0 || slot > 10) {
+        return -1;
+    }
+    return g_system->SendSignal(Core::System::Signal::Save, static_cast<u32>(slot)) ? 0 : -2;
 }
 
-extern "C" int azahar_load_state(const char* path) {
-    (void)path;
-    return -1;
+extern "C" int azahar_load_state(int slot) {
+    if (!g_initialized || !g_rom_loaded || g_system == nullptr || slot < 0 || slot > 10) {
+        return -1;
+    }
+#ifdef __EMSCRIPTEN__
+    g_speed_last_wall_ms = 0.0;
+#endif
+    return g_system->SendSignal(Core::System::Signal::Load, static_cast<u32>(slot)) ? 0 : -2;
 }
 
+/// State operation acknowledgement: 0 is complete/idle, 1 is saving, 2 is
+/// loading. The operation itself is driven by azahar_step_frame.
 extern "C" int azahar_get_state_operation() {
-    return 0;
+    if (!g_initialized || !g_rom_loaded || g_system == nullptr) {
+        return -1;
+    }
+    switch (g_system->GetSaveStateStatus()) {
+    case Core::System::SaveStateStatus::SAVING:
+        return 1;
+    case Core::System::SaveStateStatus::LOADING:
+        return 2;
+    case Core::System::SaveStateStatus::NONE:
+    default:
+        return 0;
+    }
 }
 
-extern "C" const char* azahar_get_program_id() {
-    return "";
+/// Return the title ID as two little-endian u32 words for JavaScript.
+extern "C" int azahar_get_program_id(u32* out_words, int word_count) {
+    if (!g_initialized || !g_rom_loaded || g_system == nullptr || out_words == nullptr ||
+        word_count < 2) {
+        return -1;
+    }
+    u64 program_id{};
+    if (g_system->GetAppLoader().ReadProgramId(program_id) != Loader::ResultStatus::Success) {
+        return -2;
+    }
+    out_words[0] = static_cast<u32>(program_id);
+    out_words[1] = static_cast<u32>(program_id >> 32);
+    return 0;
 }
 
 /// Internal resolution scaling belongs to the hardware renderers; the software

@@ -1,17 +1,21 @@
 # Web frontend overlay for the nested Azahar checkout.
 #
-# Added by cmake/emscripten-web-shims.cmake through cmake_language(DEFER), so
-# it is processed after src/ has created citra_core and video_core, and the
+# Added by cmake/emscripten-web-overlay.cmake through
+# CMAKE_PROJECT_citra_INCLUDE. Target names referenced here are resolved when
+# CMake generates the build, after upstream has created its libraries, so the
 # upstream tree needs no modification.
 #
-# This reconstructs the frontend the shipped web/*.wasm was built from. That
-# code lives in a private fork (see FORK_HANDOFF.md) and has no upstream
-# equivalent: Azahar has no SDL frontend at all.
+# This reconstructs the software frontend the shipped web/azahar.wasm was built
+# from. The original code is cold-stored and has no upstream equivalent: Azahar
+# has no SDL frontend at all. See FORK_HANDOFF.md for the optional accelerated
+# renderer recovery procedure.
 
 add_executable(azahar_web
     src/citra_web/emu_window_web.cpp
     src/citra_web/emu_window_web.h
     src/citra_web/web_main.cpp
+    src/citra_web/web_input.cpp
+    src/citra_web/web_input.h
     src/citra_web/web_stubs.cpp
     # Upstream gap: src/core/CMakeLists.txt compiles fastinterp for every
     # non-MSVC target, but only compiles the arm_tick_counts.cpp it calls for
@@ -34,7 +38,14 @@ target_compile_features(azahar_web PRIVATE cxx_std_20)
 # outside the tree has to declare its own.
 target_compile_definitions(azahar_web PRIVATE ENABLE_SOFTWARE_RENDERER)
 
-target_link_libraries(azahar_web PRIVATE citra_common citra_core video_core input_common SDL2-static)
+# Do not link input_common here. Its desktop initializer starts SDL controller,
+# motion-emulation, and Cemuhook UDP worker threads. The UDP client is always
+# constructed, even when no UDP input is configured; with value-initialized
+# settings that means sendto(0.0.0.0:0), which Emscripten translates into an
+# endless WebSocket retry loop before the module becomes ready. The web
+# frontend carries small keyboard/analog factories and uses EmuWindow's touch
+# device instead.
+target_link_libraries(azahar_web PRIVATE citra_common citra_core video_core SDL2-static)
 
 # Match the shipped artifact's runtime contract:
 #  - the exported C API that web/azahar_ui.js calls
@@ -65,6 +76,10 @@ set(AZAHAR_WEB_EXPORT_LIST
 list(JOIN AZAHAR_WEB_EXPORT_LIST "," AZAHAR_WEB_EXPORTS)
 
 target_link_options(azahar_web PRIVATE
+    # Keep a compact function-index map beside the release artifact. It does
+    # not add debug data to the Wasm, but makes production CPU profiles
+    # attributable to C++ without rebuilding a slower diagnostic binary.
+    --emit-symbol-map
     -sEXPORTED_FUNCTIONS=${AZAHAR_WEB_EXPORTS}
     -sEXPORTED_RUNTIME_METHODS=FS,ccall,cwrap,HEAPU8
     -sALLOW_MEMORY_GROWTH=1

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Configure and build the Azahar web artifacts on macOS/Linux.
 #
-# The Windows path uses build_web.bat against a pre-existing build directory.
-# This script owns configuration as well, because the Emscripten build needs
+# Windows delegates here through build_web.bat so every host uses the same
+# configuration. This script owns configuration because the Emscripten build needs
 # cache variables and a shim include that are easy to get wrong by hand (see
 # cmake/emscripten-web-shims.cmake for why each is required).
 #
@@ -15,13 +15,22 @@
 # Environment:
 #   AZAHAR_BUILD_DIR  Build directory (default: build-web-sw)
 #   AZAHAR_WEB_ASSERTIONS  ON to link -sASSERTIONS=1 (readable aborts, slower)
-#   EMSDK             Emscripten SDK root (default: $HOME/emsdk)
+#   EMSDK             Emscripten SDK root (default: repo-local, then ~/emsdk)
+#   AZAHAR_ALLOW_TOOLCHAIN_MISMATCH  1 to permit a non-pinned emcc version
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${AZAHAR_BUILD_DIR:-$ROOT/build-web-sw}"
-EMSDK_ROOT="${EMSDK:-$HOME/emsdk}"
 SOURCE_DIR="$ROOT/azahar"
+# shellcheck disable=SC1091
+source "$ROOT/toolchain/versions.sh"
+if [ -n "${EMSDK:-}" ]; then
+    EMSDK_ROOT="$EMSDK"
+elif [ -f "$ROOT/.toolchains/emsdk/emsdk_env.sh" ]; then
+    EMSDK_ROOT="$ROOT/.toolchains/emsdk"
+else
+    EMSDK_ROOT="$HOME/emsdk"
+fi
 JOBS="$(command -v nproc >/dev/null 2>&1 && nproc || sysctl -n hw.ncpu)"
 
 configure_only=0
@@ -38,21 +47,48 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-if [ ! -d "$SOURCE_DIR" ]; then
-    echo "Missing $SOURCE_DIR. Clone it first:" >&2
-    echo "  git clone --recurse-submodules https://github.com/azahar-emu/azahar.git azahar" >&2
-    exit 1
+if [ ! -f "$SOURCE_DIR/CMakeLists.txt" ]; then
+    echo "Initializing the pinned Azahar submodule ..."
+    git -C "$ROOT" submodule update --init --recursive azahar
 fi
 if [ ! -f "$EMSDK_ROOT/emsdk_env.sh" ]; then
-    echo "Emscripten SDK not found at $EMSDK_ROOT. Set EMSDK or install emsdk." >&2
+    echo "Pinned Emscripten SDK not found at $EMSDK_ROOT." >&2
+    echo "Run ./setup_web_toolchain.sh, or set EMSDK to an existing SDK root." >&2
     exit 1
 fi
+
+actual_azahar_rev="$(git -C "$SOURCE_DIR" rev-parse HEAD)"
+if [ "$actual_azahar_rev" != "$AZAHAR_UPSTREAM_REV" ]; then
+    echo "Azahar source mismatch: expected $AZAHAR_UPSTREAM_REV, got $actual_azahar_rev" >&2
+    echo "Run: git submodule update --init --recursive azahar" >&2
+    exit 1
+fi
+"$ROOT/apply_upstream_patches.sh"
 
 # shellcheck disable=SC1091
 source "$EMSDK_ROOT/emsdk_env.sh" >/dev/null 2>&1
+EMSDK_NODE_DIR="$EMSDK_ROOT/node/$EMSDK_NODE_VERSION/bin"
+if [ -d "$EMSDK_NODE_DIR" ]; then
+    export PATH="$EMSDK_NODE_DIR:$PATH"
+fi
+actual_emcc_version="$(emcc --version | sed -n '1s/.* \([0-9][0-9.]*\) .*/\1/p')"
+if [ "$actual_emcc_version" != "$EMSDK_VERSION" ] &&
+   [ "${AZAHAR_ALLOW_TOOLCHAIN_MISMATCH:-0}" != "1" ]; then
+    echo "Emscripten mismatch: expected $EMSDK_VERSION, got ${actual_emcc_version:-unknown}." >&2
+    echo "Run ./setup_web_toolchain.sh or set AZAHAR_ALLOW_TOOLCHAIN_MISMATCH=1." >&2
+    exit 1
+fi
 echo "Using $(emcc --version | head -1)"
 
-[ "$do_clean" = "1" ] && rm -rf "$BUILD_DIR"
+if [ "$do_clean" = "1" ]; then
+    case "$BUILD_DIR" in
+        /|"$HOME"|"$ROOT")
+            echo "Refusing to remove unsafe build directory: $BUILD_DIR" >&2
+            exit 1
+            ;;
+    esac
+    rm -rf "$BUILD_DIR"
+fi
 
 if [ "$do_clean" = "1" ] || [ "$configure_only" = "1" ] || [ ! -f "$BUILD_DIR/build.ninja" ]; then
     echo "Configuring into $BUILD_DIR ..."
@@ -84,16 +120,13 @@ fi
 if [ -n "$target" ]; then
     cmake --build "$BUILD_DIR" --target "$target" --parallel "$JOBS"
 else
-    # The upstream checkout has no web frontend target, so a bare build
-    # produces the emulator libraries only. See PROJECT.md, "Build
-    # reproducibility": src/citra_sdl/ and the web CMake targets are part of
-    # the port and are not in this repository.
-    cmake --build "$BUILD_DIR" --parallel "$JOBS"
+    cmake --build "$BUILD_DIR" --target azahar_web --parallel "$JOBS"
 fi
 
 if [ -f "$BUILD_DIR/bin/Release/azahar.wasm" ]; then
     echo
     echo "Built: $BUILD_DIR/bin/Release/azahar.{js,wasm}"
+    AZAHAR_BUILD_DIR="$BUILD_DIR" node "$ROOT/tests/rebuilt_artifact_smoke.cjs"
     echo
     # Deliberately NOT copied over web/. Those are the fork's artifacts, and
     # web/azahar_webgl2.* cannot be rebuilt here at all, so overwriting them

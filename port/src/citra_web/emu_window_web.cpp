@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "citra_web/emu_window_web.h"
+#include "citra_web/web_input.h"
+
+#include <algorithm>
+#include <cstring>
 
 #include "core/core.h"
 #include "video_core/gpu.h"
@@ -16,12 +20,7 @@ constexpr int kCanvasHeight = 480;
 constexpr int kBottomXOffset = 40;
 constexpr int kBottomYOffset = 240;
 
-/// Blit one software screen into the surface.
-///
-/// The renderer stores each screen rotated 90 degrees, the way the 3DS LCDs
-/// are physically mounted: `pixels` runs down a column of the displayed image.
-/// So source row `x` supplies destination column `x`, and the source is walked
-/// backwards vertically to undo the rotation.
+/// Blit one logical, row-major software screen into the surface.
 void BlitScreen(SDL_Surface* surface, const SwRenderer::ScreenInfo& screen, int dst_x, int dst_y,
                 int dst_w, int dst_h) {
     if (screen.pixels.empty() || screen.width == 0 || screen.height == 0) {
@@ -30,21 +29,12 @@ void BlitScreen(SDL_Surface* surface, const SwRenderer::ScreenInfo& screen, int 
     auto* dst_base = static_cast<u8*>(surface->pixels);
     const int pitch = surface->pitch;
 
-    for (int y = 0; y < dst_h; ++y) {
+    const int copy_width = std::min<int>(dst_w, screen.width);
+    const int copy_height = std::min<int>(dst_h, screen.height);
+    for (int y = 0; y < copy_height; ++y) {
         auto* dst = reinterpret_cast<u32*>(dst_base + (dst_y + y) * pitch) + dst_x;
-        for (int x = 0; x < dst_w; ++x) {
-            // screen.width is the rotated extent, i.e. the displayed height.
-            const u32 src_x = static_cast<u32>(screen.width - 1 - y);
-            const u32 src_y = static_cast<u32>(x);
-            const std::size_t index = (src_y * screen.width + src_x) * 4;
-            if (index + 3 >= screen.pixels.size()) {
-                continue;
-            }
-            const u8 r = screen.pixels[index + 0];
-            const u8 g = screen.pixels[index + 1];
-            const u8 b = screen.pixels[index + 2];
-            dst[x] = (0xFFu << 24) | (static_cast<u32>(b) << 16) | (static_cast<u32>(g) << 8) | r;
-        }
+        const auto* src = reinterpret_cast<const u32*>(screen.pixels.data()) + y * screen.width;
+        std::memcpy(dst, src, static_cast<std::size_t>(copy_width) * sizeof(u32));
     }
 }
 
@@ -73,8 +63,43 @@ EmuWindow_Web::~EmuWindow_Web() {
 void EmuWindow_Web::PollEvents() {
     SDL_Event event;
     while (SDL_PollEvent(&event) != 0) {
-        if (event.type == SDL_QUIT) {
+        switch (event.type) {
+        case SDL_QUIT:
             is_open = false;
+            break;
+        case SDL_KEYDOWN:
+        case SDL_KEYUP:
+            if (event.key.repeat == 0) {
+                WebInput::OnKey(event.key.keysym.sym, event.type == SDL_KEYDOWN);
+            }
+            break;
+        case SDL_MOUSEBUTTONDOWN:
+            if (event.button.button == SDL_BUTTON_LEFT) {
+                TouchPressed(static_cast<unsigned>(event.button.x),
+                             static_cast<unsigned>(event.button.y));
+            }
+            break;
+        case SDL_MOUSEBUTTONUP:
+            if (event.button.button == SDL_BUTTON_LEFT) {
+                TouchReleased();
+            }
+            break;
+        case SDL_MOUSEMOTION:
+            if ((event.motion.state & SDL_BUTTON_LMASK) != 0) {
+                TouchMoved(static_cast<unsigned>(event.motion.x),
+                           static_cast<unsigned>(event.motion.y));
+            }
+            break;
+        case SDL_FINGERDOWN:
+        case SDL_FINGERMOTION:
+            TouchPressed(static_cast<unsigned>(event.tfinger.x * kCanvasWidth),
+                         static_cast<unsigned>(event.tfinger.y * kCanvasHeight));
+            break;
+        case SDL_FINGERUP:
+            TouchReleased();
+            break;
+        default:
+            break;
         }
     }
 }

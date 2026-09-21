@@ -46,6 +46,12 @@ tests/                  # Test suite
   title_transition_regression.cjs # Cold-boot title-to-game regression
   config.cjs              # Shared test configuration
 build_web.bat           # Windows build script (requires Emscripten SDK)
+build_web.sh            # Reproducible software-WASM build (macOS/Linux/Git Bash)
+setup_web_toolchain.sh  # Pins source, Emscripten, and npm dependencies
+stage_web.sh            # Stages rebuilt software + checked-in WebGL2 artifacts
+port/                   # Reconstructed, repo-owned Emscripten frontend
+cmake/                  # Non-invasive upstream Emscripten compatibility shims
+apply_upstream_patches.sh # Idempotent public-source performance patch installer
 serve_web.bat           # Windows shortcut to start local server
 PROJECT.md              # Detailed architecture and optimization history
 ```
@@ -54,67 +60,75 @@ PROJECT.md              # Detailed architecture and optimization history
 
 **To run:** Any modern browser with WebAssembly and SharedArrayBuffer support (Chrome 91+, Firefox 79+, Safari 15.2+).
 
-**To build from source:** Emscripten SDK 6.0+, CMake, Ninja, and the Azahar source tree checked out at `./azahar/`.
+**To build from source:** Git, CMake, Ninja, and enough disk for an Emscripten
+C++ build. The setup script installs the pinned Emscripten SDK and uses its
+pinned Node 24 runtime for the browser-test dependencies; Azahar itself is a
+pinned public submodule.
 
 ## Building from Source
 
 ```bash
-# Clone with the upstream emulator source
-git clone https://github.com/Shubin123/azahar_web.git
+# Clone with the exact upstream emulator source
+git clone --recurse-submodules https://github.com/Shubin123/azahar_web.git
 cd azahar_web
-git clone https://github.com/azahar-emu/azahar.git azahar
-
-# Configure (requires Emscripten activated in your shell)
-emcmake cmake -B build-webgl2-opengl -S azahar -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_SHARED_LIBS=OFF \
-  -DENABLE_QT=OFF \
-  -DENABLE_SDL2=ON \
-  -DENABLE_SDL2_FRONTEND=ON \
-  -DENABLE_SOFTWARE_RENDERER=ON \
-  -DENABLE_OPENGL=ON \
-  -DENABLE_WEBGL2_RENDERER=ON \
-  -DENABLE_VULKAN=OFF \
-  -DENABLE_OPENAL=OFF \
-  -DENABLE_LIBUSB=OFF \
-  -DENABLE_CUBEB=OFF \
-  -DENABLE_ROOM=OFF \
-  -DENABLE_WEB_SERVICE=OFF \
-  -DENABLE_SCRIPTING=OFF \
-  -DENABLE_TESTS=OFF
-
-# Build both the fallback and accelerated artifacts
-cmake --build build-webgl2-opengl --parallel 8 --target azahar_web_bundle
+./setup_web_toolchain.sh
+./build_web.sh
+./stage_web.sh /tmp/azahar-staged
 ```
 
-The `azahar_web_bundle` target builds both renderers and copies their artifacts into `web/` automatically.
+`build_web.sh` produces `build-web-sw/bin/Release/azahar.{js,wasm}` and validates
+the result. It intentionally does not overwrite `web/`. `stage_web.sh` creates
+a servable directory containing the rebuilt software artifact and the
+checked-in accelerated artifact.
+
+The build verifies the pinned submodule revision and idempotently applies
+`patches/public-upstream-web-performance.patch`. It refuses to patch over
+unrelated edits, so a locally modified emulator checkout cannot silently enter
+a supposedly reproducible artifact.
 
 ### macOS / Linux
 
-`./build_web.sh` configures and builds in one step, injecting the shims in
-`cmake/` that the Emscripten build needs (see `PROJECT.md` → "Build
-reproducibility" for what each compensates for):
+`./build_web.sh` configures and builds in one step, injecting the repo-owned
+frontend under `port/` and the Emscripten shims under `cmake/`:
 
 ```bash
-git clone --recurse-submodules https://github.com/azahar-emu/azahar.git azahar
 ./build_web.sh                      # configure (if needed) and build
 ./build_web.sh --target citra_core  # one target
 ./build_web.sh --clean              # start from scratch
 ```
 
-Requires the Emscripten SDK at `$EMSDK` (default `~/emsdk`).
+The build uses the exact Azahar submodule revision and Emscripten 6.0.9. It
+prefers `.toolchains/emsdk`, then `$HOME/emsdk`; set `$EMSDK` to override.
+`AZAHAR_WEB_ASSERTIONS=ON ./build_web.sh --configure` enables readable runtime
+assertions for diagnostics.
 
-> **Note:** the upstream checkout alone cannot produce the shipped `.wasm`
-> artifacts. `src/citra_sdl/`, `src/video_core/renderer_webgl2/` and the web
-> CMake targets belong to a private Azahar fork that `patches/` was cut
-> against, so `build_web.sh` builds the emulator libraries but no web frontend.
-> See `PROJECT.md` → "Build reproducibility".
+The repository now rebuilds the software renderer from public upstream sources
+without the unavailable private fork. The original `renderer_webgl2/` source is
+still unavailable, so `web/azahar_webgl2.{js,wasm}` remains a checked-in,
+tested binary artifact rather than a locally reproducible target.
+
+On the 2in1 Horses title-select fixture, the rebuilt release artifact sustains
+about 60 game FPS and 100% guest speed after warmup on this Apple M1 Mac. Browser
+callback cadence is deliberately not used as an FPS claim: the frame loop may
+advance more than one guest frame per callback when the browser presents at a
+lower cadence. The checked-in software artifact reaches the same 60 FPS cap.
 
 ## Testing
 
 ```bash
 # Smoke test (no browser needed)
 node tests/web_artifact_smoke.cjs
+
+# Validate the locally rebuilt software artifact
+npm run smoke:rebuilt
+
+# Stage it and boot a real ROM without touching web/
+./stage_web.sh /tmp/azahar-staged
+AZAHAR_WEB_DIR=/tmp/azahar-staged npm run smoke:rebuilt-browser
+
+# Include a native save/load round-trip in the rebuilt artifact audit
+AZAHAR_WEB_DIR=/tmp/azahar-staged \
+  node tests/rebuilt_browser_smoke.cjs --save-state
 
 # Performance benchmark (requires Chrome)
 AZAHAR_CHROME_ARGS=--use-angle=vulkan node tests/benchmark_browser.cjs --artifact webgl2 --duration-seconds 15 --warmup-seconds 5

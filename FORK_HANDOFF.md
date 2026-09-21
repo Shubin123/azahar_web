@@ -1,24 +1,29 @@
-# Getting the port fork onto another machine
+# Optional recovery of the original accelerated-renderer fork
 
-This repository is only the wrapper: the web UI, the test harness, and the
-generated `web/*.wasm` artifacts. The Emscripten/C++ port itself — the SDL
-frontend, the WebGL2 renderer, and the web CMake targets — lives in a private
-Azahar fork that is not here and is not upstream.
+This repository now contains a reproducible software-renderer port under
+`port/`, a pinned public Azahar submodule, and the pinned Emscripten setup. It
+can build `azahar.js` and `azahar.wasm` without the old fork.
+
+The cold-stored fork is still valuable because it contains the original
+`renderer_webgl2/` implementation. Recover it when possible to make the
+accelerated `azahar_webgl2.js` / `azahar_webgl2.wasm` pair source-reproducible
+too; it is no longer required for ordinary software-WASM development.
 
 Run these on the machine that has the fork. On the Windows box referenced by
 `run_build.bat` that is `C:\Users\shubadub\Documents\azahar`; commands below use
 PowerShell.
 
-## Why this is needed
+## Why recovery is still useful
 
 `patches/` records deltas against Azahar commit
 `30d214dd69a791dc91a024c5062b09ec33792985`, which does not exist in
 `azahar-emu/azahar` (the GitHub API returns 422 for it, and 200 for upstream
 HEAD). Upstream has no `src/citra_sdl/`, no `src/video_core/renderer_webgl2/`,
-and no `ENABLE_WEBGL2_RENDERER` or `azahar_web_bundle` targets. Without the
-fork, nothing inside `azahar.wasm` / `azahar_webgl2.wasm` can be rebuilt, which
-blocks the two largest remaining FPS wins (see PROJECT.md → "Next FPS Work",
-items 0 and 1).
+and no `ENABLE_WEBGL2_RENDERER` or `azahar_web_bundle` targets. The repo-owned
+overlay replaces the missing SDL/software frontend and makes CPU/frame-loop
+work buildable. The WebGL2 renderer itself cannot be reconstructed from those
+patches, so diagnosing its ANGLE/Metal synchronization stall still benefits
+from recovering the original tree.
 
 ## 1. Confirm it is the right tree
 
@@ -115,21 +120,20 @@ Get-ChildItem build-webgl2-opengl\bin\Release\*.html.symbols
 
 ## 6. On the Mac afterwards
 
-The fork replaces the upstream checkout at `azahar/`:
+Keep the reproducible public `azahar/` submodule intact. Clone the recovered
+fork beside it for comparison and for extracting the WebGL2 renderer into a
+reviewable overlay:
 
 ```bash
 # Option A
-rm -rf azahar && gh repo clone Shubin123/azahar-web-port azahar
-cd azahar && git submodule update --init --recursive && cd ..
+gh repo clone Shubin123/azahar-web-port ../azahar-web-port-original
+git -C ../azahar-web-port-original submodule update --init --recursive
 
 # Option B
-rm -rf azahar && git clone /path/to/azahar-port.bundle azahar
-cd azahar && git submodule update --init --recursive && cd ..
-
-./build_web.sh --clean
+git clone /path/to/azahar-port.bundle ../azahar-web-port-original
+git -C ../azahar-web-port-original submodule update --init --recursive
 ```
 
-`cmake/emscripten-web-shims.cmake` and `cmake/emscripten-libressl.cmake` fix two
-upstream assumptions that break under Emscripten (see PROJECT.md → "Build
-reproducibility"). If the fork already handles them, the shims no-op — both are
-guarded by `if (NOT TARGET ...)` / `if (EMSCRIPTEN)`.
+Do not point `build_web.sh` at that checkout or replace the pinned gitlink. The
+recovered code should first be diffed against `port/` and moved into this
+repository so future builds remain self-contained.

@@ -26,8 +26,8 @@ public:
     EmuWindow_Web();
     ~EmuWindow_Web() override;
 
-    /// Drains SDL's queue. Emscripten needs this pumped for the canvas to stay
-    /// responsive even though input is not wired up yet.
+    /// Drains SDL's queue and forwards keyboard/touch input to the web devices.
+    /// Emscripten also needs this pumped for the canvas to stay responsive.
     void PollEvents() override;
 
     void MakeCurrent() override {}

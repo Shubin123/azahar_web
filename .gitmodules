@@ -1,0 +1,3 @@
+[submodule "azahar"]
+	path = azahar
+	url = https://github.com/azahar-emu/azahar.git

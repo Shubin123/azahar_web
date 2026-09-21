@@ -5,12 +5,16 @@ const {listen: listenWeb} = require('../web/server.cjs');
 const cfg = require('./config.cjs');
 
 const root = path.resolve(__dirname, '..');
+const webDir = path.resolve(process.env.AZAHAR_WEB_DIR || path.join(root, 'web'));
 const romPath = process.env.AZAHAR_ROM_PATH || path.join(root, 'test_games',
     'Super Mario 3D Land (Europe) (En,Fr,De,Es,It) (Demo) (Kiosk).3ds');
 const titleWaitMs = Number.parseInt(process.env.AZAHAR_TITLE_WAIT_MS || '18000', 10);
 const transitionWaitMs = Number.parseInt(process.env.AZAHAR_TRANSITION_WAIT_MS || '45000', 10);
+const transitionGuestSeconds = Number.parseFloat(process.env.AZAHAR_TRANSITION_GUEST_SECONDS || '0');
+const transitionMaxWaitMs = Number.parseInt(process.env.AZAHAR_TRANSITION_MAX_WAIT_MS || '180000', 10);
 const heartbeatLimitMs = Number.parseInt(process.env.AZAHAR_HEARTBEAT_LIMIT_MS || '5000', 10);
 const captureDir = process.env.AZAHAR_CAPTURE_DIR || path.join(root, 'tmp_test', 'title-transition');
+const profilePath = process.env.AZAHAR_TRANSITION_PROFILE || '';
 const extraChromeArgs = (process.env.AZAHAR_CHROME_ARGS || '').split(/\s+/).filter(Boolean);
 
 function sleep(ms) {
@@ -21,14 +25,15 @@ async function readRuntimeState(page) {
     return page.evaluate(() => {
         let perf = null;
         if (Module._azahar_get_perf_stats) {
-            const buffer = Module._malloc(64);
-            if (Module._azahar_get_perf_stats(buffer, 8) === 0) {
-                const values = new Float64Array(Module.HEAPU8.buffer, buffer, 8);
+            const buffer = Module._malloc(88);
+            if (Module._azahar_get_perf_stats(buffer, 11) === 0) {
+                const values = new Float64Array(Module.HEAPU8.buffer, buffer, 11);
                 perf = {
                     gameFps: values[0],
                     systemFps: values[1],
                     emulationSpeed: values[2],
                     gpuSeconds: values[3],
+                    guestTimeUs: values[10],
                 };
             }
             Module._free(buffer);
@@ -47,7 +52,7 @@ async function readRuntimeState(page) {
 async function main() {
     if (!fs.existsSync(romPath)) throw new Error(`ROM fixture not found: ${romPath}`);
     fs.mkdirSync(captureDir, {recursive: true});
-    const server = await listenWeb(0, '127.0.0.1');
+    const server = await listenWeb(0, '127.0.0.1', {root: webDir});
     const browser = await puppeteer.launch({
         headless: process.env.AZAHAR_HEADLESS === '0' ? false : 'new',
         executablePath: process.env.CHROME_PATH || cfg.chromePath || 'chrome',
@@ -56,6 +61,7 @@ async function main() {
         defaultViewport: {width: 1280, height: 1200},
     });
     const page = await browser.newPage();
+    const profilerSessions = [];
     const consoleMessages = [];
     const pageErrors = [];
     page.on('console', message => {
@@ -125,12 +131,14 @@ async function main() {
     }
 
     try {
-        const url = `http://127.0.0.1:${server.address().port}/index.html`;
+        const renderer = process.env.AZAHAR_RENDERER;
+        const query = renderer ? `?renderer=${encodeURIComponent(renderer)}` : '';
+        const url = `http://127.0.0.1:${server.address().port}/index.html${query}`;
         console.log(`phase: navigate ${url}`);
         await page.goto(url, {waitUntil: 'networkidle0', timeout: 120000});
         await page.waitForFunction(() => document.querySelector('#status')?.textContent.includes('Emulator ready'),
             {timeout: 120000});
-        const renderer = await page.evaluate(() => window.AzaharWebConfig?.renderer);
+        const activeRenderer = await page.evaluate(() => window.AzaharWebConfig?.renderer);
         const adapter = consoleMessages.find(message => message.includes('WebGL2 adapter:')) || '';
 
         console.log('phase: load ROM and cold-boot title');
@@ -141,6 +149,19 @@ async function main() {
         await sleep(titleWaitMs);
         const before = await readRuntimeState(page);
         await page.screenshot({path: path.join(captureDir, 'before-touch.png'), fullPage: true});
+
+        if (profilePath) {
+            for (const target of browser.targets()) {
+                if (!['page', 'worker', 'other'].includes(target.type())) continue;
+                try {
+                    const session = await target.createCDPSession();
+                    await session.send('Profiler.enable');
+                    await session.send('Profiler.setSamplingInterval', {interval: 100});
+                    await session.send('Profiler.start');
+                    profilerSessions.push({session, type: target.type(), url: target.url()});
+                } catch (_) {}
+            }
+        }
 
         console.log('phase: click center of emulated lower touch screen');
         const touchPoint = await page.$eval('#canvas', canvas => {
@@ -155,11 +176,38 @@ async function main() {
         await sleep(120);
         await page.mouse.up();
 
-        await sleep(transitionWaitMs);
+        let after;
+        if (transitionGuestSeconds > 0) {
+            const guestTarget = before.perf.guestTimeUs + transitionGuestSeconds * 1e6;
+            const deadline = Date.now() + transitionMaxWaitMs;
+            do {
+                await sleep(1000);
+                after = await readRuntimeState(page);
+            } while (after.perf.guestTimeUs < guestTarget && Date.now() < deadline);
+            if (after.perf.guestTimeUs < guestTarget) {
+                throw new Error(`Guest advanced only ${((after.perf.guestTimeUs -
+                    before.perf.guestTimeUs) / 1e6).toFixed(1)}s before the transition timeout`);
+            }
+        } else {
+            await sleep(transitionWaitMs);
+            after = await readRuntimeState(page);
+        }
         const heartbeatStarted = Date.now();
-        const after = await readRuntimeState(page);
+        // Reuse the last guest-time sample so its perf window is not reset just
+        // before reporting it.
+        await page.evaluate(() => performance.now());
         const heartbeatMs = Date.now() - heartbeatStarted;
         await page.screenshot({path: path.join(captureDir, 'after-touch.png'), fullPage: true});
+        if (profilePath) {
+            const profiles = [];
+            for (const entry of profilerSessions) {
+                try {
+                    const {profile} = await entry.session.send('Profiler.stop');
+                    profiles.push({type: entry.type, url: entry.url, profile});
+                } catch (_) {}
+            }
+            fs.writeFileSync(profilePath, JSON.stringify(profiles));
+        }
         if (heartbeatMs > heartbeatLimitMs) {
             throw new Error(`Browser main thread stalled for ${heartbeatMs} ms after title touch`);
         }
@@ -179,7 +227,7 @@ async function main() {
 
         console.log(JSON.stringify({
             ok: true,
-            renderer,
+            renderer: activeRenderer,
             adapter,
             titleWaitMs,
             transitionWaitMs,

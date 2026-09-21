@@ -19,14 +19,11 @@ fi
 mkdir -p "$DEST"
 # UI, server and support scripts come from web/; the emulator does not.
 for f in index.html index_webgl2.html azahar_ui.js azahar_savestates.js \
-         azahar_scheduler.js coi-serviceworker.js server.cjs; do
+         azahar_scheduler.js coi-serviceworker.js server.cjs \
+         azahar_webgl2.js azahar_webgl2.wasm; do
     [ -f "$ROOT/web/$f" ] && cp "$ROOT/web/$f" "$DEST/"
 done
 cp "$BIN/azahar.js" "$BIN/azahar.wasm" "$DEST/"
-# The UI offers a WebGL2 mode; without an artifact behind it the page would
-# fail rather than fall back, so point it at the software build.
-cp "$BIN/azahar.js" "$DEST/azahar_webgl2.js"
-cp "$BIN/azahar.wasm" "$DEST/azahar_webgl2.wasm"
 
 echo "Staged $DEST"
 ls -la "$DEST" | awk 'NR>3 {printf "  %-28s %10s\n", $9, $5}'
