@@ -57,20 +57,21 @@ PROJECT.md              # Detailed architecture and optimization history
 The web-specific engine changes (the SDL/software/WebGL2 port itself — `src/citra_sdl/`,
 `src/video_core/renderer_webgl2/`, and the related CMake targets) live in a separate
 sibling repository, [`Shubin123/azahar_emscripten`](https://github.com/Shubin123/azahar_emscripten)
-(private), not upstream `azahar-emu/azahar`. Clone that in place of `./azahar/` to build.
-`patches/README.md` predates that repo and pins a commit that isn't reachable from
-upstream for the same reason — the engine's own history is the source of truth now.
+(private), not upstream `azahar-emu/azahar`. Clone it as an independent sibling checkout
+(not nested inside this repo) — see Building from Source below for why that needs one
+extra CMake variable. `patches/README.md` predates that repo and pins a commit that
+isn't reachable from upstream for the same reason — the engine's own history is the
+source of truth now.
 
 ## Building from Source
 
 ```bash
-# Clone with the upstream emulator source
+# Clone both as siblings, not one inside the other
 git clone https://github.com/Shubin123/azahar_web.git
-cd azahar_web
-git clone https://github.com/azahar-emu/azahar.git azahar
+git clone https://github.com/Shubin123/azahar_emscripten.git
 
 # Configure (requires Emscripten activated in your shell)
-emcmake cmake -B build-webgl2-opengl -S azahar -G Ninja \
+emcmake cmake -B build-webgl2-opengl -S azahar_emscripten -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_SHARED_LIBS=OFF \
   -DENABLE_QT=OFF \
@@ -86,13 +87,20 @@ emcmake cmake -B build-webgl2-opengl -S azahar -G Ninja \
   -DENABLE_ROOM=OFF \
   -DENABLE_WEB_SERVICE=OFF \
   -DENABLE_SCRIPTING=OFF \
-  -DENABLE_TESTS=OFF
+  -DENABLE_TESTS=OFF \
+  -DAZAHAR_WEB_ASSET_DIR=$(pwd)/azahar_web/web
 
 # Build both the fallback and accelerated artifacts
 cmake --build build-webgl2-opengl --parallel 8 --target azahar_web_bundle
 ```
 
-The `azahar_web_bundle` target builds both renderers and copies their artifacts into `web/` automatically.
+The `azahar_web_bundle` target builds both renderers and copies their artifacts into
+`web/` automatically. Its destination (`src/citra_sdl/CMakeLists.txt`'s
+`AZAHAR_WEB_ASSET_DIR` cache variable) defaults to `../web` relative to the engine's
+own source directory, which only lands in the right place if `azahar_emscripten` is
+checked out *inside* this repo as `./azahar/` — pass it explicitly (as above) when
+cloning the two repos as siblings instead, or the sync silently writes into whatever
+`../web` resolves to next to wherever you cloned the engine.
 
 ## Testing
 
