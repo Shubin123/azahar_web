@@ -170,6 +170,22 @@ Raw local results are written under `tmp_test/*_benchmark.json` so routine profi
 
 Fast-forward no longer changes the emulated CPU clock. It requests up to 4x guest-time progress within the normal browser work budget and caps missed-time backlog, so slow gameplay cannot make a later 1x scene run too fast. On the NSMB2 boot workload, the 1x setting measured 69.8 game FPS / 117% speed and the 4x target measured 127.4 game FPS / 213% speed. Mario W1-1 remains GPU/CPU-vertex bound, so it cannot meet the requested target until that renderer bottleneck is removed.
 
+### Post-recovery gameplay verification (2026-09-21)
+
+Real title-screen-to-gameplay measurements against the rebuilt artifacts (Emscripten 6.0.9, engine recovered at `Shubin123/azahar_emscripten`), using `tests/title_transition_regression.cjs` against legally-owned decrypted dumps on Chrome 153 with no real GPU (Chrome falls back to ANGLE/SwiftShader, a CPU Vulkan implementation). WebGL2 numbers here are not a reliable proxy for real-GPU performance — SwiftShader's per-title characteristics differ substantially from hardware ANGLE backends — but they are valid for correctness (does the title render at all, does it regress).
+
+| Title | Software: title → gameplay | WebGL2: title → gameplay |
+|---|---:|---:|
+| 2in1 Horses 3D (boot/demo) | 60 FPS / 100% | 60 FPS / 100% |
+| Adventure Time: Explore the Dungeon | 60 → 37 FPS / 101% → 62% | 60 → 56 FPS / 101% → 94% |
+| Animal Crossing: New Leaf | 27 → 24 FPS / 45% → 40% | previously crashed (shader compile failure); now renders correctly |
+| Cubic Ninja | 17 → 18 FPS / 55% → 60% | 7 → 11 FPS / 27% → 38% (SwiftShader-limited; rendering verified correct) |
+
+Two real bugs were found and fixed this pass:
+
+- **WebGL2 fragment shader compile failure on the `MultiplyThenAdd` TEV op**: `fma()` has no GLSL ES 3.00 overloads (added only in GLSL ES 3.20), so any title using that PICA combiner operation failed WebGL2 shader compilation outright — it only ever worked on the desktop OpenGL renderer's GLSL profile. Found via Animal Crossing collapsing to ~1 FPS with repeated `LoadShader`/`LoadProgram` console errors; fixed in `azahar_emscripten` by replacing `fma(a, b, c)` with `(a * b + c)` in both the color and alpha combiner code paths (`src/video_core/shader/generator/glsl_fs_shader_gen.cpp`). Verified fixed on both Animal Crossing and Adventure Time, the latter showing WebGL2 is actually the *faster* path once it can compile (56 vs. 37 game FPS in gameplay).
+- **Large-ROM upload failure**: Chrome's Blob/FileReader has an internal ceiling around 2.145 GB for a single whole-file read (`NotReadableError`, not a clean power-of-two boundary, not this machine's available memory). Fixed in `web/azahar_ui.js` by reading uploads in bounded 256 MB chunks via `file.slice(...).arrayBuffer()`, which resolves ROMs up to just under 2 GiB. A second, harder ceiling remains open: this Chrome build also refuses a plain `ArrayBuffer` at exactly 2^31 bytes or more (reproduced in a blank page, so not memory pressure), and Emscripten's MEMFS explicitly refuses to let a file alias a view into the WASM heap (its `canOwn` guard against `ALLOW_MEMORY_GROWTH` invalidating that view), falling back to the same full-size allocation. Fixing that needs a lazy, on-demand FS backend instead of MEMFS's one-buffer-per-file model — out of scope this pass. **Known limitation: ROMs at or above exactly 2 GiB (e.g. Fire Emblem Awakening, 2,147,483,648 bytes) cannot currently be loaded.**
+
 ### Next FPS Work
 
 See `tests/PERFORMANCE.md` for the 2026-09-07 gameplay-only CPU trace, rejected
