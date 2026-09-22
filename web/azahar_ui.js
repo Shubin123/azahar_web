@@ -751,6 +751,30 @@ void main() { frag_color = vec4(1.0); }`);
         return `/rom${match ? match[0].toLowerCase() : '.bin'}`;
     }
 
+    // Chrome's Blob/FileReader read pipeline fails on a single whole-file
+    // read somewhere around 2.1-2.15 GB -- verified against a real 2 GiB
+    // decrypted title (not a clean power-of-two boundary, so it's an
+    // internal cap in Blink's own file-reading path, not a fixed constant
+    // we can special-case, and not this machine's available memory: the
+    // WASM heap already holds > 2 GB fine via MAXIMUM_MEMORY). Reading in
+    // bounded chunks keeps every individual Blob read well under that
+    // ceiling while still producing one contiguous Uint8Array for
+    // FS.writeFile, and doubles as natural progress reporting.
+    const ROM_READ_CHUNK_BYTES = 256 * 1024 * 1024;
+
+    async function readFileInChunks(file) {
+        const bytes = new Uint8Array(file.size);
+        for (let offset = 0; offset < file.size; offset += ROM_READ_CHUNK_BYTES) {
+            const end = Math.min(offset + ROM_READ_CHUNK_BYTES, file.size);
+            const chunk = await file.slice(offset, end).arrayBuffer();
+            bytes.set(new Uint8Array(chunk), offset);
+            const percent = Math.round(end / file.size * 100);
+            showProgress(percent);
+            setStatus(`Reading ROM... ${percent}%`);
+        }
+        return bytes;
+    }
+
     // ── File picker ───────────────────────────────────────────────
     romInput.addEventListener('change', function (e) {
         const file = e.target.files[0];
@@ -760,22 +784,11 @@ void main() { frag_color = vec4(1.0); }`);
         romPath = memfsRomPath(romName);
         fileLabel.textContent = `📄 ${romName} (${(file.size / 1024 / 1024).toFixed(1)} MB)`;
 
-        const reader = new FileReader();
         btnLoad.disabled = true;
         showProgress(0);
         setStatus('Reading ROM... 0%');
-        reader.onprogress = function (event) {
-            if (!event.lengthComputable) {
-                showProgress(null);
-                setStatus(`Reading ROM... ${(event.loaded / 1024 / 1024).toFixed(1)} MB`);
-                return;
-            }
-            const percent = Math.round(event.loaded / event.total * 100);
-            showProgress(percent);
-            setStatus(`Reading ROM... ${percent}%`);
-        };
-        reader.onload = function () {
-            romData = new Uint8Array(reader.result);
+        readFileInChunks(file).then(function (bytes) {
+            romData = bytes;
             romMounted = false;
             log(`File loaded: ${romName} (${romData.length} bytes)`);
             showProgress(100);
@@ -783,13 +796,11 @@ void main() { frag_color = vec4(1.0); }`);
                 `ROM ready; starting emulator...`, 'ok');
             btnLoad.disabled = !initialized;
             window.setTimeout(hideProgress, 250);
-        };
-        reader.onerror = function () {
+        }).catch(function (err) {
             hideProgress();
             setStatus('Failed to read file!', 'error');
-            log('ERROR: FileReader failed');
-        };
-        reader.readAsArrayBuffer(file);
+            log(`ERROR: file read failed: ${err && err.message ? err.message : err}`);
+        });
     });
 
     // ── WASM Module Loading ──────────────────────────────────────
