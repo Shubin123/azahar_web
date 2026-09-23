@@ -5,7 +5,7 @@ const {listen: listenWeb} = require('../web/server.cjs');
 const cfg = require('./config.cjs');
 
 const root = path.resolve(__dirname, '..');
-const romPath = process.env.AZAHAR_ROM_PATH ||
+const romPath = process.env.AZAHAR_ROM_PATH || cfg.romPath ||
     path.join(root, 'test_games', 'Super Mario 3D Land (Europe) (En,Fr,De,Es,It) (Demo) (Kiosk).3ds');
 // The visible-frame gate is deliberately enabled by default. Set this to 0
 // only when running a fast, loader-only diagnostic with another fixture.

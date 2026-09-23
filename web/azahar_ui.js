@@ -1266,6 +1266,43 @@ void main() { frag_color = vec4(1.0); }`);
         }
     }
 
+    async function loadRomBytes(bytes, name, shouldAutoStart = true) {
+        if (!initialized) {
+            setStatus('Initializing emulator for ROM...', 'ok');
+            await initializeEmulator();
+        }
+        if (running) {
+            stopRunning();
+        }
+        romName = name;
+        romPath = memfsRomPath(name);
+        if (fileLabel) {
+            fileLabel.textContent = `📄 ${romName} (${(bytes.length / 1024 / 1024).toFixed(1)} MB)`;
+        }
+        romData = bytes;
+        romMounted = false;
+        log(`Loading ROM: ${romName} (${bytes.length} bytes)`);
+        await loadAndRunRom();
+        if (shouldAutoStart && romLoaded && !running) {
+            startRunning();
+        }
+    }
+
+    // ── Public API for Shared Library & External Integration ─────
+    window.AzaharUI = {
+        loadRomBytes,
+        initializeEmulator,
+        isInitialized: () => initialized,
+        isRunning: () => running,
+        stopRunning,
+        startRunning,
+        setStatus,
+        showProgress,
+        hideProgress,
+        log,
+        getCanvas: () => canvas
+    };
+
     // ── Auto-init on page load ───────────────────────────────────
     log('Azahar Web UI ready.');
     setStatus('Loading WASM module...');

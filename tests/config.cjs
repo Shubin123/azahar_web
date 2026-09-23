@@ -28,6 +28,7 @@ const CHROME_CANDIDATES = process.platform === 'win32'
   : [
       process.env.CHROME_PATH,
       '/usr/bin/google-chrome',
+      '/usr/bin/google-chrome-stable',
       '/usr/bin/chromium-browser',
       '/usr/bin/chromium',
     ];

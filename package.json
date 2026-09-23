@@ -6,6 +6,8 @@
   "type": "commonjs",
   "scripts": {
     "test": "node tests/run.cjs",
+    "test:library": "node tests/game_library.test.cjs",
+    "library:generate": "python3 scripts/generate_games_library.py",
     "smoke": "node tests/web_artifact_smoke.cjs",
     "bench": "node tests/benchmark_browser.cjs"
   },

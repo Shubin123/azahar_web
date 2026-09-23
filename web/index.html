@@ -191,6 +191,302 @@
             white-space: pre-wrap;
             word-break: break-all;
         }
+
+        /* ── Game Library Section ────────────────────────────────── */
+        .library-section {
+            max-width: 1100px;
+            width: 100%;
+            margin-top: 20px;
+            margin-bottom: 30px;
+        }
+        .library-header {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            align-items: baseline;
+            gap: 8px;
+            margin-bottom: 12px;
+            border-bottom: 1px solid #0f3460;
+            padding-bottom: 8px;
+        }
+        .library-title-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .library-header h2 {
+            font-size: 1.15rem;
+            color: #ff6b6b;
+            margin: 0;
+            border: none;
+            padding: 0;
+        }
+        .library-badge {
+            background: #0f3460;
+            color: #89b4fa;
+            font-size: 0.72rem;
+            font-weight: 600;
+            padding: 3px 8px;
+            border-radius: 12px;
+            border: 1px solid #254b77;
+        }
+        .library-subtitle {
+            font-size: 0.75rem;
+            color: #888;
+            margin-top: 4px;
+            width: 100%;
+        }
+
+        /* Active download banner */
+        .active-download-card {
+            background: #0f2b48;
+            border: 1px solid #1a5688;
+            border-radius: 6px;
+            padding: 12px;
+            margin-bottom: 14px;
+        }
+        .active-download-info {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.82rem;
+            font-weight: 600;
+            margin-bottom: 6px;
+            color: #e0e0e0;
+        }
+        .active-download-stats {
+            color: #6bff6b;
+            font-family: monospace;
+        }
+        .progress-bar-container {
+            background: #091a2c;
+            border-radius: 4px;
+            height: 10px;
+            overflow: hidden;
+            margin-bottom: 6px;
+            border: 1px solid #1a426b;
+        }
+        .progress-bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #e94560, #ff8a7a);
+            width: 0%;
+            transition: width 0.15s ease-out;
+        }
+        .active-download-actions {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.72rem;
+            color: #8ab4f8;
+        }
+
+        /* Toolbar */
+        .library-toolbar {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            margin-bottom: 14px;
+        }
+        .search-wrap {
+            position: relative;
+            width: 100%;
+        }
+        .library-input {
+            width: 100%;
+            padding: 10px 36px 10px 14px;
+            border: 1px solid #0f3460;
+            border-radius: 6px;
+            background: #0a0a1a;
+            color: #e0e0e0;
+            font-size: 0.88rem;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        .library-input:focus {
+            border-color: #e94560;
+        }
+        .search-clear-btn {
+            position: absolute;
+            right: 10px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: none;
+            border: none;
+            color: #888;
+            font-size: 1.1rem;
+            cursor: pointer;
+            padding: 4px;
+            line-height: 1;
+        }
+        .search-clear-btn:hover { color: #fff; }
+
+        .filter-row {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+        }
+        .region-filters {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .filter-pill {
+            background: #0f3460;
+            color: #ccc;
+            border: 1px solid #1a4b80;
+            border-radius: 14px;
+            padding: 4px 12px;
+            font-size: 0.75rem;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .filter-pill:hover {
+            background: #1a4b80;
+            color: #fff;
+        }
+        .filter-pill.active {
+            background: #e94560;
+            border-color: #ff6b6b;
+            color: #fff;
+            font-weight: 600;
+        }
+        .sort-controls {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .sort-label {
+            font-size: 0.75rem;
+            color: #888;
+        }
+        .library-select {
+            padding: 5px 8px;
+            border: 1px solid #0f3460;
+            border-radius: 4px;
+            background: #0a0a1a;
+            color: #e0e0e0;
+            font-size: 0.75rem;
+        }
+
+        /* Table */
+        .library-table-container {
+            width: 100%;
+            overflow-x: auto;
+            border: 1px solid #0f3460;
+            border-radius: 6px;
+            background: #0d1730;
+            max-height: 520px;
+            overflow-y: auto;
+        }
+        .library-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.8rem;
+            text-align: left;
+        }
+        .library-table th {
+            position: sticky;
+            top: 0;
+            background: #0a1124;
+            color: #8899aa;
+            font-weight: 600;
+            padding: 9px 12px;
+            border-bottom: 1px solid #1a3359;
+            z-index: 1;
+        }
+        .library-table td {
+            padding: 8px 12px;
+            border-bottom: 1px solid #142340;
+            vertical-align: middle;
+        }
+        .library-table tr:hover {
+            background: #13203f;
+        }
+        .game-title-col {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+        .game-name {
+            font-weight: 600;
+            color: #f0f0f0;
+            word-break: break-word;
+        }
+        .game-filename {
+            font-size: 0.68rem;
+            color: #72849e;
+            font-family: monospace;
+            word-break: break-all;
+        }
+        .region-badge {
+            display: inline-block;
+            padding: 2px 7px;
+            border-radius: 4px;
+            font-size: 0.68rem;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .badge-usa { background: #1a3359; color: #8ab4f8; border: 1px solid #2d4f80; }
+        .badge-europe { background: #123828; color: #81c995; border: 1px solid #1d523b; }
+        .badge-japan { background: #3d1c24; color: #f28b82; border: 1px solid #5a2935; }
+        .badge-other { background: #262933; color: #bdc1c6; border: 1px solid #3c4043; }
+
+        .size-badge {
+            font-family: monospace;
+            color: #a0aec0;
+            font-size: 0.72rem;
+            white-space: nowrap;
+        }
+        .game-actions-col {
+            display: flex;
+            gap: 5px;
+            justify-content: flex-end;
+            align-items: center;
+        }
+        .btn-sm {
+            padding: 4px 9px;
+            font-size: 0.72rem;
+            border-radius: 4px;
+            width: auto;
+            margin-bottom: 0;
+            text-decoration: none;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .icon-btn {
+            background: #0f3460;
+            color: #99b8db;
+            border: 1px solid #1b497b;
+        }
+        .icon-btn:hover {
+            background: #174274;
+            color: #fff;
+        }
+        .library-empty {
+            text-align: center;
+            color: #888;
+            padding: 30px;
+            font-size: 0.85rem;
+        }
+
+        /* Pagination */
+        .library-pagination {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            align-items: center;
+            gap: 8px;
+            margin-top: 10px;
+            padding: 4px 0;
+        }
+        .page-info {
+            font-size: 0.75rem;
+            color: #aaa;
+        }
+        .page-size-select {
+            margin-left: auto;
+        }
     </style>
 </head>
 <body>
@@ -234,9 +530,12 @@
             </div>
             <div class="card">
                 <h2>📂 ROM File</h2>
+                <button type="button" class="btn btn-secondary" id="btn-browse-library" style="margin-bottom:8px;">
+                    📚 Browse Shared Library (1,945 Games)
+                </button>
                 <input type="file" id="rom-file" accept=".3ds,.3dsx,.cia,.elf,.cxi,.app,.cci">
                 <label for="rom-file" class="file-label" id="file-label">
-                    Choose a 3DS ROM file...
+                    Or choose a local 3DS ROM file...
                 </label>
                 <button class="btn btn-primary" id="btn-load" disabled>Load &amp; Run</button>
                 <div id="status">Ready. Load a ROM to begin.</div>
@@ -291,6 +590,87 @@
         </div>
     </div>
 
+    <!-- ── Shared Game Library (Internet Archive 3DS Romset) ──────── -->
+    <section class="card library-section" id="library-section">
+        <div class="library-header">
+            <div class="library-title-group">
+                <h2>🎮 Shared Game Library</h2>
+                <span class="library-badge" id="library-count-badge">Loading games...</span>
+            </div>
+            <p class="library-subtitle">
+                Over 1,900 decrypted Nintendo 3DS games streamed directly from Internet Archive into Azahar Web.
+            </p>
+        </div>
+
+        <div id="library-active-download" class="active-download-card" hidden>
+            <div class="active-download-info">
+                <span id="active-download-title">Downloading Game...</span>
+                <span id="active-download-stats" class="active-download-stats">0%</span>
+            </div>
+            <div class="progress-bar-container">
+                <div id="active-download-bar" class="progress-bar-fill"></div>
+            </div>
+            <div class="active-download-actions">
+                <span id="active-download-speed">Connecting...</span>
+                <button type="button" id="active-download-cancel" class="btn btn-secondary btn-sm">Cancel</button>
+            </div>
+        </div>
+
+        <div class="library-toolbar">
+            <div class="search-wrap">
+                <input type="text" id="library-search" class="library-input" placeholder="🔍 Search games by title (e.g. Mario, Zelda, Pokemon, Pascal)..." autocomplete="off">
+                <button type="button" id="library-search-clear" class="search-clear-btn" title="Clear search" hidden>×</button>
+            </div>
+
+            <div class="filter-row">
+                <div class="region-filters" id="region-filters">
+                    <button type="button" class="filter-pill active" data-region="all">All</button>
+                    <button type="button" class="filter-pill" data-region="USA">🇺🇸 USA</button>
+                    <button type="button" class="filter-pill" data-region="Europe">🇪🇺 Europe</button>
+                    <button type="button" class="filter-pill" data-region="Japan">🇯🇵 Japan</button>
+                    <button type="button" class="filter-pill" data-region="other">🌐 Other</button>
+                </div>
+
+                <div class="sort-controls">
+                    <label for="library-sort" class="sort-label">Sort:</label>
+                    <select id="library-sort" class="renderer-select library-select">
+                        <option value="title-asc">Title (A → Z)</option>
+                        <option value="title-desc">Title (Z → A)</option>
+                        <option value="size-asc">Size (Smallest)</option>
+                        <option value="size-desc">Size (Largest)</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <div class="library-table-container">
+            <table class="library-table" id="library-table">
+                <thead>
+                    <tr>
+                        <th style="width: 50%;">Game Title</th>
+                        <th style="width: 15%;">Region</th>
+                        <th style="width: 15%;">Size</th>
+                        <th style="width: 20%; text-align: right;">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="library-list">
+                </tbody>
+            </table>
+            <div id="library-empty" class="library-empty" hidden>No matching games found.</div>
+        </div>
+
+        <div class="library-pagination" id="library-pagination">
+            <button type="button" id="library-prev-page" class="btn btn-secondary btn-sm" disabled>&laquo; Previous</button>
+            <span id="library-page-info" class="page-info">Loading...</span>
+            <button type="button" id="library-next-page" class="btn btn-secondary btn-sm">Next &raquo;</button>
+            <select id="library-page-size" class="library-select page-size-select">
+                <option value="25">25 per page</option>
+                <option value="50" selected>50 per page</option>
+                <option value="100">100 per page</option>
+            </select>
+        </div>
+    </section>
+
     <script>
         // Start with the fastest renderer. A fresh-document software mode is
         // retained for automatic recovery and explicit compatibility use.
@@ -303,5 +683,15 @@
     <script src="azahar_savestates.js"></script>
     <script src="azahar_scheduler.js"></script>
     <script src="azahar_ui.js"></script>
+    <script src="azahar_library.js"></script>
+    <script>
+        document.getElementById('btn-browse-library')?.addEventListener('click', () => {
+            const lib = document.getElementById('library-section');
+            if (lib) {
+                lib.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                document.getElementById('library-search')?.focus();
+            }
+        });
+    </script>
 </body>
 </html>
