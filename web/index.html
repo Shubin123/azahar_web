@@ -308,6 +308,25 @@
             gap: 10px;
             margin-bottom: 14px;
         }
+        .library-source-controls {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px;
+            padding: 9px 11px;
+            border: 1px solid #0f3460;
+            border-radius: 6px;
+            background: #101a32;
+            box-shadow: inset 1px 1px 0 rgba(183,207,255,.12), inset -1px -1px 0 rgba(0,0,0,.38);
+        }
+        .library-source-label { color: #aab8cc; font-size: .76rem; font-weight: 600; }
+        .library-source-link {
+            min-width: 0;
+            color: #89b4fa;
+            font-size: .72rem;
+            overflow-wrap: anywhere;
+        }
+        .library-source-link:hover { color: #c2dcff; }
         .search-wrap {
             position: relative;
             width: 100%;
@@ -622,7 +641,7 @@
                 <span class="library-badge" id="library-count-badge">Loading games...</span>
             </div>
             <p class="library-subtitle">
-                Over 1,900 decrypted Nintendo 3DS games streamed directly from Internet Archive into Azahar Web.
+                Search Nintendo 3DS databases on Internet Archive. Compressed archive files must be extracted before loading.
             </p>
         </div>
 
@@ -641,6 +660,18 @@
         </div>
 
         <div class="library-toolbar">
+            <div class="library-source-controls">
+                <label class="library-source-label" for="library-source">Database:</label>
+                <select id="library-source" class="library-select" aria-label="Game database">
+                    <option value="decrypted">Decrypted 3DS ROM set</option>
+                    <option value="eshop">3DS CIA eShop archive</option>
+                </select>
+                <span class="library-source-label">Internet Archive:</span>
+                <a id="library-source-link" class="library-source-link"
+                   href="https://archive.org/download/3ds-decrypted-roms321com/all/"
+                   target="_blank" rel="noopener">https://archive.org/download/3ds-decrypted-roms321com/all/</a>
+            </div>
+
             <div class="search-wrap">
                 <input type="text" id="library-search" class="library-input" placeholder="🔍 Search games by title (e.g. Mario, Zelda, Pokemon, Pascal)..." autocomplete="off">
                 <button type="button" id="library-search-clear" class="search-clear-btn" title="Clear search" hidden>×</button>

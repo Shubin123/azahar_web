@@ -25,6 +25,20 @@
         'Other': '🌐'
     };
 
+    const LIBRARY_SOURCES = {
+        decrypted: {
+            label: 'Decrypted 3DS ROM set',
+            baseUrl: 'https://archive.org/download/3ds-decrypted-roms321com/all/',
+            catalogUrl: 'games_library.json'
+        },
+        eshop: {
+            label: '3DS CIA eShop archive',
+            baseUrl: 'https://archive.org/download/3ds-cia-eshop/',
+            metadataUrl: 'https://archive.org/metadata/3ds-cia-eshop',
+            identifier: '3ds-cia-eshop'
+        }
+    };
+
     let allGames = [];
     let filteredGames = [];
     let currentRegion = 'all';
@@ -35,10 +49,15 @@
 
     let activeDownload = null; // { controller, game, startTime, loadedBytes, totalBytes }
     let searchDebounceTimer = null;
+    let currentSourceId = 'decrypted';
+    const catalogCache = new Map();
+    let catalogRequestId = 0;
 
     // DOM Elements
     let containerEl = null;
     let countBadgeEl = null;
+    let sourceSelectEl = null;
+    let sourceLinkEl = null;
     let searchInputEl = null;
     let searchClearEl = null;
     let regionFiltersEl = null;
@@ -67,6 +86,55 @@
         if (!bytesPerSec || bytesPerSec <= 0) return '0 KB/s';
         if (bytesPerSec < 1024 * 1024) return (bytesPerSec / 1024).toFixed(1) + ' KB/s';
         return (bytesPerSec / (1024 * 1024)).toFixed(1) + ' MB/s';
+    }
+
+    function parseArchiveGame(file, index, source) {
+        const filename = String(file.name || '');
+        const title = filename.replace(/\.[^.]+$/, '').replace(/^\d+\s*-\s*/, '').trim();
+        const regionMatch = title.match(/\((USA|Europe|Japan|World|Korea|Taiwan|China|Australia|Germany|France|Spain|Italy|Netherlands|Russia)\)/i);
+        const region = regionMatch ? regionMatch[1] : 'Other';
+        const extension = filename.match(/\.([^.]+)$/)?.[1]?.toLowerCase() || 'file';
+        const encodedName = filename.split('/').map(encodeURIComponent).join('/');
+        const canPlayDirectly = ['3ds', 'cia'].includes(extension);
+
+        return {
+            id: index + 1,
+            title,
+            fullName: title,
+            region,
+            languages: [],
+            romName: filename,
+            zipName: filename,
+            size: Number(file.size) || 0,
+            sizeFormatted: formatBytes(Number(file.size) || 0),
+            downloadUrl: `${source.baseUrl}${encodedName}`,
+            viewArchiveUrl: `https://archive.org/details/${source.identifier}`,
+            downloadOnly: !canPlayDirectly
+        };
+    }
+
+    async function loadSourceCatalog(sourceId) {
+        const source = LIBRARY_SOURCES[sourceId] || LIBRARY_SOURCES.decrypted;
+        if (catalogCache.has(sourceId)) return catalogCache.get(sourceId);
+
+        if (source.catalogUrl) {
+            const response = await fetch(source.catalogUrl);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const data = await response.json();
+            const games = Array.isArray(data.games) ? data.games : [];
+            catalogCache.set(sourceId, games);
+            return games;
+        }
+
+        const response = await fetch(source.metadataUrl);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const metadata = await response.json();
+        const files = Array.isArray(metadata.files) ? metadata.files : [];
+        const games = files
+            .filter(file => /\.(?:rar|cia|3ds|zip)$/i.test(file.name || ''))
+            .map((file, index) => parseArchiveGame(file, index, source));
+        catalogCache.set(sourceId, games);
+        return games;
     }
 
     function getRegionFlag(region) {
@@ -208,14 +276,17 @@
             const tdActions = document.createElement('td');
             tdActions.className = 'game-actions-col';
 
-            const playBtn = document.createElement('button');
-            playBtn.type = 'button';
-            playBtn.className = 'btn btn-primary btn-sm play-btn';
-            playBtn.dataset.action = 'play';
-            playBtn.dataset.id = game.id;
-            playBtn.textContent = isDownloading ? '⏳ Loading...' : '▶ Play';
-            playBtn.disabled = Boolean(activeDownload && !isDownloading);
-            playBtn.title = 'Stream and play this 3DS game directly in Azahar Web';
+            if (!game.downloadOnly) {
+                const playBtn = document.createElement('button');
+                playBtn.type = 'button';
+                playBtn.className = 'btn btn-primary btn-sm play-btn';
+                playBtn.dataset.action = 'play';
+                playBtn.dataset.id = game.id;
+                playBtn.textContent = isDownloading ? '⏳ Loading...' : '▶ Play';
+                playBtn.disabled = Boolean(activeDownload && !isDownloading);
+                playBtn.title = 'Stream and play this game directly in Azahar Web';
+                tdActions.appendChild(playBtn);
+            }
 
             const downloadLink = document.createElement('a');
             downloadLink.href = game.downloadUrl;
@@ -223,8 +294,9 @@
             downloadLink.target = '_blank';
             downloadLink.rel = 'noopener';
             downloadLink.download = game.romName;
-            downloadLink.textContent = '⬇ .3ds';
-            downloadLink.title = 'Download decrypted .3ds file from Internet Archive';
+            const fileExtension = String(game.romName || '').match(/\.([^.]+)$/)?.[1] || 'file';
+            downloadLink.textContent = `⬇ .${fileExtension}`;
+            downloadLink.title = `Open ${game.romName} on Internet Archive`;
 
             const archiveLink = document.createElement('a');
             archiveLink.href = game.viewArchiveUrl;
@@ -234,7 +306,7 @@
             archiveLink.textContent = '📁 Archive';
             archiveLink.title = 'View zip contents on Internet Archive';
 
-            tdActions.append(playBtn, downloadLink, archiveLink);
+            tdActions.append(downloadLink, archiveLink);
 
             tr.append(tdTitle, tdRegion, tdSize, tdActions);
             fragment.appendChild(tr);
@@ -403,28 +475,36 @@
         renderCurrentPage();
     }
 
-    async function loadCatalog() {
+    async function loadCatalog(sourceId = currentSourceId) {
+        const requestId = ++catalogRequestId;
+        currentSourceId = LIBRARY_SOURCES[sourceId] ? sourceId : 'decrypted';
+        const source = LIBRARY_SOURCES[currentSourceId];
+        if (sourceSelectEl && sourceSelectEl.value !== currentSourceId) sourceSelectEl.value = currentSourceId;
+        if (sourceLinkEl) {
+            sourceLinkEl.href = source.baseUrl;
+            sourceLinkEl.textContent = source.baseUrl;
+        }
+        if (listEl) listEl.replaceChildren();
+        if (emptyEl) {
+            emptyEl.textContent = 'Loading games from Internet Archive...';
+            emptyEl.hidden = false;
+        }
         if (countBadgeEl) countBadgeEl.textContent = 'Loading catalog...';
 
         try {
-            // Try games_library.json first, fall back to /api/games
-            let resp = await fetch('games_library.json');
-            if (!resp.ok) {
-                resp = await fetch('/api/games');
-            }
-            if (!resp.ok) {
-                throw new Error(`HTTP ${resp.status}`);
-            }
-
-            const data = await resp.json();
-            allGames = data.games || [];
+            const games = await loadSourceCatalog(currentSourceId);
+            if (requestId !== catalogRequestId) return;
+            allGames = games;
 
             if (countBadgeEl) {
-                countBadgeEl.textContent = `${allGames.length.toLocaleString()} games available`;
+                const noun = currentSourceId === 'decrypted' ? 'games' : 'files';
+                countBadgeEl.textContent = `${allGames.length.toLocaleString()} ${noun} available`;
             }
+            if (emptyEl) emptyEl.textContent = 'No matching files found.';
 
             applyFilterAndSort();
         } catch (err) {
+            if (requestId !== catalogRequestId) return;
             console.error('Failed to load games library catalog:', err);
             if (countBadgeEl) countBadgeEl.textContent = 'Catalog error';
             if (emptyEl) {
@@ -437,6 +517,8 @@
     function init() {
         containerEl = document.getElementById('library-section');
         countBadgeEl = document.getElementById('library-count-badge');
+        sourceSelectEl = document.getElementById('library-source');
+        sourceLinkEl = document.getElementById('library-source-link');
         searchInputEl = document.getElementById('library-search');
         searchClearEl = document.getElementById('library-search-clear');
         regionFiltersEl = document.getElementById('region-filters');
@@ -455,6 +537,17 @@
         downloadCancelEl = document.getElementById('active-download-cancel');
 
         if (!containerEl) return;
+
+        if (sourceSelectEl) {
+            sourceSelectEl.addEventListener('change', () => {
+                currentRegion = 'all';
+                if (regionFiltersEl) {
+                    regionFiltersEl.querySelectorAll('.filter-pill').forEach(p => p.classList.remove('active'));
+                    regionFiltersEl.querySelector('.filter-pill[data-region="all"]')?.classList.add('active');
+                }
+                void loadCatalog(sourceSelectEl.value);
+            });
+        }
 
         // Search input
         if (searchInputEl) {

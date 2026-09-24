@@ -190,6 +190,52 @@ async function runTests() {
         assert.ok(hasApi.hasAzaharLibrary, 'AzaharLibrary must exist on window');
         assert.strictEqual(hasApi.totalGamesInLib, 1945, 'AzaharLibrary should hold all 1,945 games');
 
+        // Switching to an Internet Archive metadata database loads its files
+        // into the same searchable table. Use a local response fixture so the
+        // test does not depend on Archive availability.
+        await page.setRequestInterception(true);
+        page.on('request', request => {
+            if (request.url() === 'https://archive.org/metadata/3ds-cia-eshop') {
+                request.respond({
+                    status: 200,
+                    contentType: 'application/json',
+                    headers: { 'Access-Control-Allow-Origin': '*' },
+                    body: JSON.stringify({ files: [
+                        { name: '0023 - Picross e (Japan) (eShop).rar', size: '123456', format: 'RAR' },
+                        { name: 'Homebrew Demo (USA).cia', size: '654321', format: 'Nintendo 3DS Content' },
+                        { name: 'item_meta.xml', size: '20', format: 'Metadata' }
+                    ] })
+                });
+            } else {
+                request.continue();
+            }
+        });
+        await page.select('#library-source', 'eshop');
+        await page.waitForFunction(() => document.getElementById('library-count-badge')?.textContent === '2 files available');
+        await page.$eval('#library-search', el => {
+            el.value = 'Picross';
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        await page.waitForFunction(() => document.querySelectorAll('#library-list tr').length === 1);
+        assert.ok((await page.$eval('#library-list .game-name', el => el.textContent)).includes('Picross e'),
+            'Search should work against the selected Archive database');
+        await page.click('#library-search-clear');
+        await page.waitForFunction(() => document.querySelectorAll('#library-list tr').length === 2);
+        assert.strictEqual(await page.$$eval('#library-list tr', rows => rows.length), 2,
+            'The selected archive database should populate the library');
+        const archiveRows = await page.$$eval('#library-list tr', rows => rows.map(row => ({
+            title: row.querySelector('.game-name')?.textContent,
+            href: row.querySelector('a[download]')?.href,
+            canPlay: Boolean(row.querySelector('.play-btn'))
+        })));
+        const rarEntry = archiveRows.find(row => row.href.endsWith('.rar'));
+        const ciaEntry = archiveRows.find(row => row.href.endsWith('.cia'));
+        assert.ok(rarEntry?.title.includes('Picross e'), 'Archive metadata filename should become a searchable title');
+        assert.strictEqual(rarEntry.canPlay, false, 'RAR files should not show the direct play action');
+        assert.ok(ciaEntry?.canPlay, 'Direct CIA files should retain the play action');
+        const sourceHref = await page.$eval('#library-source-link', link => link.href);
+        assert.strictEqual(sourceHref, 'https://archive.org/download/3ds-cia-eshop/');
+
         console.log('\n--- ALL GAME LIBRARY TESTS PASSED! ---');
     } finally {
         await browser.close();
