@@ -50,11 +50,8 @@ async function runTests() {
 
         // 3. Test Search for "Pascal"
         console.log('Test 3: Searching for "Pascal"...');
-        await page.evaluate(() => {
-            const input = document.getElementById('library-search');
-            input.value = 'Pascal';
-            input.dispatchEvent(new Event('input', { bubbles: true }));
-        });
+        await page.click('#library-search');
+        await page.type('#library-search', 'Pascal');
         await page.waitForFunction(() => {
             const rows = document.querySelectorAll('#library-list tr');
             return rows.length === 1;
@@ -117,6 +114,27 @@ async function runTests() {
         const japanPageInfo = await page.$eval('#library-page-info', el => el.textContent);
         console.log(`  ✓ Japan Filter Page Info: "${japanPageInfo}"`);
         assert.ok(japanPageInfo.includes('728 games'), 'Should show 728 Japan games');
+
+        // Search and region filters must compose, and clearing search must
+        // preserve the currently selected region.
+        await page.$eval('#library-search', el => {
+            el.value = 'Pascal';
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        await page.waitForFunction(() => document.querySelectorAll('#library-list tr').length === 1);
+        assert.ok((await page.$eval('#library-list .region-badge', el => el.textContent)).includes('Japan'),
+            'Search results must still obey the selected Japan region filter');
+        await page.$eval('#library-search', el => {
+            el.value = 'no game should match this string';
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        await page.waitForFunction(() => !document.getElementById('library-empty').hidden);
+        assert.strictEqual(await page.$$eval('#library-list tr', rows => rows.length), 0,
+            'Unmatched search must clear stale rows');
+        await page.click('#library-search-clear');
+        await page.waitForFunction(() => document.querySelectorAll('#library-list tr').length === 50);
+        assert.ok((await page.$eval('#library-page-info', el => el.textContent)).includes('728 games'),
+            'Clearing search should retain the Japan filter');
 
         // Restore to All
         await page.click('.filter-pill[data-region="all"]');

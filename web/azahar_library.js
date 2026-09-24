@@ -99,8 +99,17 @@
         return true;
     }
 
+    // Catalog data can contain optional or legacy fields. Normalize searchable
+    // values here so one incomplete entry cannot abort an entire search.
+    function normalizeSearchText(value) {
+        return String(value == null ? '' : value)
+            .normalize('NFKD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLocaleLowerCase();
+    }
+
     function applyFilterAndSort() {
-        const query = searchQuery.trim().toLowerCase();
+        const query = normalizeSearchText(searchQuery.trim());
 
         filteredGames = allGames.filter(game => {
             if (!matchesRegion(game.region, currentRegion)) {
@@ -108,20 +117,17 @@
             }
             if (!query) return true;
 
-            return (
-                (game.title && game.title.toLowerCase().includes(query)) ||
-                (game.fullName && game.fullName.toLowerCase().includes(query)) ||
-                (game.region && game.region.toLowerCase().includes(query)) ||
-                (game.languages && game.languages.some(l => l.toLowerCase().includes(query)))
-            );
+            const languages = Array.isArray(game.languages) ? game.languages : [];
+            return [game.title, game.fullName, game.region, game.romName, game.zipName,
+                ...languages].some(value => normalizeSearchText(value).includes(query));
         });
 
         filteredGames.sort((a, b) => {
             switch (sortMode) {
                 case 'title-asc':
-                    return a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: 'base' });
+                    return String(a.title || '').localeCompare(String(b.title || ''), undefined, { numeric: true, sensitivity: 'base' });
                 case 'title-desc':
-                    return b.title.localeCompare(a.title, undefined, { numeric: true, sensitivity: 'base' });
+                    return String(b.title || '').localeCompare(String(a.title || ''), undefined, { numeric: true, sensitivity: 'base' });
                 case 'size-asc':
                     return (a.size || 0) - (b.size || 0);
                 case 'size-desc':
@@ -452,14 +458,50 @@
 
         // Search input
         if (searchInputEl) {
-            searchInputEl.addEventListener('keydown', e => e.stopPropagation());
+            searchInputEl.addEventListener('keydown', e => {
+                e.stopPropagation();
+                if (e.isComposing || e.ctrlKey || e.metaKey || e.altKey) return;
+
+                const value = searchInputEl.value;
+                const start = searchInputEl.selectionStart ?? value.length;
+                const end = searchInputEl.selectionEnd ?? value.length;
+                let nextValue = value;
+                let cursor = start;
+
+                if (e.key.length === 1) {
+                    nextValue = value.slice(0, start) + e.key + value.slice(end);
+                    cursor = start + e.key.length;
+                } else if (e.key === 'Backspace') {
+                    if (start !== end) nextValue = value.slice(0, start) + value.slice(end);
+                    else if (start > 0) {
+                        nextValue = value.slice(0, start - 1) + value.slice(end);
+                        cursor = start - 1;
+                    } else return;
+                } else if (e.key === 'Delete') {
+                    if (start !== end) nextValue = value.slice(0, start) + value.slice(end);
+                    else if (end < value.length) nextValue = value.slice(0, start) + value.slice(end + 1);
+                    else return;
+                } else {
+                    return;
+                }
+
+                // Handle text keys here so they still work when the emulator's
+                // keyboard capture prevents the browser from editing the field.
+                e.preventDefault();
+                searchInputEl.value = nextValue;
+                searchInputEl.setSelectionRange(cursor, cursor);
+                searchInputEl.dispatchEvent(new Event('input', { bubbles: true }));
+            });
             searchInputEl.addEventListener('keyup', e => e.stopPropagation());
             searchInputEl.addEventListener('input', () => {
                 searchQuery = searchInputEl.value;
-                if (searchClearEl) searchClearEl.hidden = !searchQuery;
+                if (searchClearEl) searchClearEl.hidden = !searchQuery.trim();
 
                 clearTimeout(searchDebounceTimer);
-                searchDebounceTimer = setTimeout(applyFilterAndSort, 150);
+                searchDebounceTimer = null;
+                // The catalog is small enough to filter synchronously. Updating
+                // on each input event avoids a delay that feels like a dead field.
+                applyFilterAndSort();
             });
         }
 
@@ -467,6 +509,8 @@
         if (searchClearEl) {
             searchClearEl.addEventListener('click', () => {
                 if (searchInputEl) {
+                    clearTimeout(searchDebounceTimer);
+                    searchDebounceTimer = null;
                     searchInputEl.value = '';
                     searchQuery = '';
                     searchClearEl.hidden = true;
@@ -479,7 +523,7 @@
         // Region filters
         if (regionFiltersEl) {
             regionFiltersEl.addEventListener('click', event => {
-                const btn = event.target.closest('.filter-pill');
+                const btn = event.target instanceof Element ? event.target.closest('.filter-pill') : null;
                 if (!btn) return;
 
                 regionFiltersEl.querySelectorAll('.filter-pill').forEach(p => p.classList.remove('active'));

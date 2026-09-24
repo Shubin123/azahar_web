@@ -16,6 +16,19 @@
             align-items: center;
             min-height: 100vh;
             padding: 16px;
+            position: relative;
+            isolation: isolate;
+        }
+        body::before {
+            content: "";
+            position: fixed;
+            inset: 0;
+            z-index: -1;
+            pointer-events: none;
+            opacity: .18;
+            background-image: repeating-linear-gradient(45deg, rgba(137,180,250,.12) 0 1px, transparent 1px 4px),
+                              repeating-linear-gradient(-45deg, rgba(0,0,0,.18) 0 1px, transparent 1px 4px);
+            background-size: 4px 4px;
         }
         header {
             text-align: center;
@@ -61,6 +74,15 @@
             border: 1px solid #0f3460;
             border-radius: 8px;
             padding: 16px;
+            box-shadow: inset 1px 1px 0 rgba(183,207,255,.12),
+                        inset -1px -1px 0 rgba(0,0,0,.45), 0 5px 14px rgba(0,0,0,.2);
+        }
+        /* Reusable raised surface treatment for the app's mixed widgets. */
+        .active-download-card, .library-section, .library-table-container,
+        .save-entry, .log-box, .renderer-select, .library-select, .library-input,
+        .filter-pill, .btn, .file-label, canvas {
+            box-shadow: inset 1px 1px 0 rgba(183,207,255,.12),
+                        inset -1px -1px 0 rgba(0,0,0,.38);
         }
         .card h2 {
             font-size: 1rem;
@@ -303,6 +325,7 @@
         }
         .library-input:focus {
             border-color: #e94560;
+            box-shadow: inset 1px 1px 0 rgba(183,207,255,.14), 0 0 0 2px rgba(233,69,96,.18);
         }
         .search-clear-btn {
             position: absolute;
@@ -350,6 +373,7 @@
             border-color: #ff6b6b;
             color: #fff;
             font-weight: 600;
+            box-shadow: inset 1px 1px 0 rgba(255,255,255,.2), inset -1px -1px 0 rgba(60,0,10,.32);
         }
         .sort-controls {
             display: flex;
