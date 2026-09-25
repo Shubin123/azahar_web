@@ -301,6 +301,26 @@
             color: #8ab4f8;
         }
 
+        /* Downloaded games ready to play from the local cache */
+        .ready-card {
+            background: #0f2b1f;
+            border: 1px solid #1a6b44;
+            border-radius: 6px;
+            padding: 10px 12px;
+            margin-bottom: 14px;
+        }
+        .ready-header { font-size: .82rem; font-weight: 600; color: #6bff6b; margin-bottom: 6px; }
+        .ready-list { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow-y: auto; }
+        .ready-game {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 0;
+            border-top: 1px solid rgba(107,255,107,.12);
+        }
+        .ready-game:first-child { border-top: none; }
+        .ready-game-info { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+
         /* Toolbar */
         .library-toolbar {
             display: flex;
@@ -659,12 +679,17 @@
             </div>
         </div>
 
+        <div id="library-ready" class="ready-card" hidden>
+            <div class="ready-header">✅ Downloaded &amp; ready to play</div>
+            <ul id="library-ready-list" class="ready-list"></ul>
+        </div>
+
         <div class="library-toolbar">
             <div class="library-source-controls">
                 <label class="library-source-label" for="library-source">Database:</label>
                 <select id="library-source" class="library-select" aria-label="Game database">
                     <option value="decrypted">Decrypted 3DS ROM set</option>
-                    <option value="eshop">3DS CIA eShop archive</option>
+                    <option value="cia">3DS CIA files archive</option>
                 </select>
                 <span class="library-source-label">Internet Archive:</span>
                 <a id="library-source-link" class="library-source-link"

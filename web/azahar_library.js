@@ -31,11 +31,11 @@
             baseUrl: 'https://archive.org/download/3ds-decrypted-roms321com/all/',
             catalogUrl: 'games_library.json'
         },
-        eshop: {
-            label: '3DS CIA eShop archive',
-            baseUrl: 'https://archive.org/download/3ds-cia-eshop/',
-            metadataUrl: 'https://archive.org/metadata/3ds-cia-eshop',
-            identifier: '3ds-cia-eshop'
+        cia: {
+            label: '3DS CIA files archive',
+            baseUrl: 'https://archive.org/download/3ds-cia-files/',
+            metadataUrl: 'https://archive.org/metadata/3ds-cia-files',
+            identifier: '3ds-cia-files'
         }
     };
     const CATALOG_CACHE_NAME = 'azahar-library-catalog-v1';
@@ -77,6 +77,8 @@
     let downloadBarEl = null;
     let downloadSpeedEl = null;
     let downloadCancelEl = null;
+    let readyCardEl = null;
+    let readyListEl = null;
 
     function formatBytes(bytes) {
         if (!bytes || bytes <= 0) return '0 B';
@@ -119,6 +121,85 @@
         }
     }
 
+    // Titles already downloaded (and extracted) that can start without another
+    // network request. Legacy cache entries lack a source URL and are skipped.
+    async function listReadyPlayables() {
+        const ready = new Map();
+        if (cachedPlayableDownload) {
+            const { url, name, title, bytes } = cachedPlayableDownload;
+            ready.set(url, { url, name, title: title || name, size: bytes.length });
+        }
+        try {
+            if (!window.caches) return [...ready.values()];
+            const cache = await window.caches.open(PLAYABLE_CACHE_NAME);
+            for (const request of await cache.keys()) {
+                const response = await cache.match(request);
+                const url = decodeURIComponent(response?.headers.get('X-Azahar-Source-Url') || '');
+                if (!url || ready.has(url)) continue;
+                const name = decodeURIComponent(response.headers.get('X-Azahar-Rom-Name') || '');
+                ready.set(url, {
+                    url,
+                    name,
+                    title: decodeURIComponent(response.headers.get('X-Azahar-Title') || '') || name,
+                    size: Number.parseInt(response.headers.get('Content-Length') || '0', 10)
+                });
+            }
+        } catch (error) {
+            console.warn('Could not list locally cached games:', error);
+        }
+        return [...ready.values()];
+    }
+
+    async function forgetPlayable(url) {
+        if (cachedPlayableDownload?.url === url) cachedPlayableDownload = null;
+        try {
+            const request = await getPlayableCacheRequest(url);
+            if (request) await (await window.caches.open(PLAYABLE_CACHE_NAME)).delete(request);
+        } catch (error) {
+            console.warn('Could not remove the locally cached game:', error);
+        }
+        await renderReadyList();
+    }
+
+    async function renderReadyList() {
+        if (!readyListEl) return;
+        const ready = await listReadyPlayables();
+        ready.sort((a, b) => a.title.localeCompare(b.title));
+        const fragment = document.createDocumentFragment();
+        for (const entry of ready) {
+            const li = document.createElement('li');
+            li.className = 'ready-game';
+            const info = document.createElement('div');
+            info.className = 'ready-game-info';
+            const nameDiv = document.createElement('div');
+            nameDiv.className = 'game-name';
+            nameDiv.textContent = entry.title;
+            const fileDiv = document.createElement('div');
+            fileDiv.className = 'game-filename';
+            fileDiv.textContent = `${entry.name} • ${formatBytes(entry.size)}`;
+            info.append(nameDiv, fileDiv);
+
+            const playBtn = document.createElement('button');
+            playBtn.type = 'button';
+            playBtn.className = 'btn btn-primary btn-sm';
+            playBtn.dataset.action = 'play-ready';
+            playBtn.dataset.url = entry.url;
+            playBtn.textContent = '▶ Play';
+            playBtn.disabled = Boolean(activeDownload);
+            const removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'btn btn-secondary btn-sm';
+            removeBtn.dataset.action = 'remove-ready';
+            removeBtn.dataset.url = entry.url;
+            removeBtn.textContent = '✕';
+            removeBtn.title = 'Remove from local cache';
+            li.append(info, playBtn, removeBtn);
+            fragment.appendChild(li);
+        }
+        readyListEl.replaceChildren(fragment);
+        if (readyCardEl) readyCardEl.hidden = ready.length === 0;
+    }
+
     async function fetchCatalogJson(url) {
         const request = new Request(new URL(url, window.location.href));
         let cache = null;
@@ -138,8 +219,9 @@
         }
     }
 
-    function rememberPlayable(url, bytes, name) {
-        cachedPlayableDownload = { url, bytes, name };
+    function rememberPlayable(url, bytes, name, title) {
+        cachedPlayableDownload = { url, bytes, name, title };
+        void renderReadyList();
         // Keep a browser-managed copy so played titles are available after a
         // reload. Storage quota failures leave the in-memory replay cache intact.
         void (async () => {
@@ -150,9 +232,13 @@
                 await cache.put(request, new Response(bytes, {
                     headers: {
                         'Content-Type': 'application/octet-stream',
-                        'X-Azahar-Rom-Name': encodeURIComponent(name)
+                        'X-Azahar-Rom-Name': encodeURIComponent(name),
+                        'X-Azahar-Title': encodeURIComponent(title || name),
+                        'X-Azahar-Source-Url': encodeURIComponent(url),
+                        'Content-Length': String(bytes.length)
                     }
                 }));
+                void renderReadyList();
             } catch (error) {
                 console.warn('Could not persist the played game in the local cache:', error);
             }
@@ -292,6 +378,8 @@
     }
 
     function renderCurrentPage() {
+        readyListEl?.querySelectorAll('button[data-action="play-ready"]')
+            .forEach(btn => { btn.disabled = Boolean(activeDownload); });
         if (!listEl) return;
 
         const total = filteredGames.length;
@@ -557,7 +645,7 @@
                 }
             }
 
-            rememberPlayable(directUrl, playableBytes, playableName);
+            rememberPlayable(directUrl, playableBytes, playableName, game.title);
 
             if (controller.signal.aborted) throw new DOMException('The operation was aborted', 'AbortError');
 
@@ -653,6 +741,8 @@
         downloadBarEl = document.getElementById('active-download-bar');
         downloadSpeedEl = document.getElementById('active-download-speed');
         downloadCancelEl = document.getElementById('active-download-cancel');
+        readyCardEl = document.getElementById('library-ready');
+        readyListEl = document.getElementById('library-ready-list');
 
         if (!containerEl) return;
 
@@ -807,8 +897,29 @@
             });
         }
 
+        if (readyListEl) {
+            readyListEl.addEventListener('click', event => {
+                const btn = event.target.closest('button[data-action]');
+                if (!btn || btn.disabled) return;
+                const url = btn.dataset.url;
+                if (btn.dataset.action === 'remove-ready') {
+                    void forgetPlayable(url);
+                    return;
+                }
+                const game = allGames.find(g => g.downloadUrl === url) || {
+                    id: `ready:${url}`,
+                    title: btn.closest('li')?.querySelector('.game-name')?.textContent || url,
+                    romName: '',
+                    downloadUrl: url,
+                    size: 0
+                };
+                void streamRom(game);
+            });
+        }
+
         // Load catalog
         void loadCatalog();
+        void renderReadyList();
     }
 
     // Export API
@@ -818,6 +929,7 @@
         streamRom,
         cancelDownload,
         getAllGames: () => allGames,
+        listReadyPlayables,
         getFilteredGames: () => filteredGames
     };
 
