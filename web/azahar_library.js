@@ -456,14 +456,17 @@
                 if (window.AzaharUI) window.AzaharUI.setStatus(`Extracting ${game.title}...`);
                 const rarModule = window.AzaharRarReady || import('./vendor/rars/index.js');
                 const { RarArchive } = await rarModule;
+                if (downloadSpeedEl) downloadSpeedEl.textContent = 'Opening RAR archive...';
                 const rarArchive = await RarArchive.open(combined);
                 try {
+                    if (downloadSpeedEl) downloadSpeedEl.textContent = 'Finding a playable game in the archive...';
                     const supportedEntry = rarArchive.entries.find(entry =>
                         !entry.isDirectory && /\.(?:cia|3ds|cci|cxi|app|3dsx|elf)$/i.test(entry.name)
                     );
                     if (!supportedEntry) {
                         throw new Error('This RAR archive does not contain a supported 3DS game file.');
                     }
+                    if (downloadSpeedEl) downloadSpeedEl.textContent = `Extracting ${supportedEntry.name}...`;
                     playableBytes = await supportedEntry.bytes();
                     playableName = supportedEntry.name;
                 } finally {

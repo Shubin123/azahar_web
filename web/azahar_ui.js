@@ -806,7 +806,6 @@ void main() { frag_color = vec4(1.0); }`);
     // ── WASM Module Loading ──────────────────────────────────────
     async function loadWasmModule() {
         await ensureCrossOriginIsolated();
-        if (window.prepareAzaharRar) await window.prepareAzaharRar();
         if (!preflightWebGL2()) {
             // restartInSoftware has scheduled a navigation to a fresh canvas.
             return new Promise(() => {});

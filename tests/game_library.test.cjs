@@ -192,9 +192,6 @@ async function runTests() {
         assert.ok(hasApi.hasLoadRomBytes, 'AzaharUI.loadRomBytes must be a function');
         assert.ok(hasApi.hasAzaharLibrary, 'AzaharLibrary must exist on window');
         assert.strictEqual(hasApi.totalGamesInLib, 1945, 'AzaharLibrary should hold all 1,945 games');
-        assert.ok(await page.evaluate(() => window.AzaharRarReady?.then(Boolean)),
-            'The RAR extraction worker must finish initialization before the emulator starts');
-
         // Switching to an Internet Archive metadata database loads its files
         // into the same searchable table. Use a local response fixture so the
         // test does not depend on Archive availability.
@@ -264,7 +261,13 @@ async function runTests() {
                 .find(candidate => candidate.querySelector('a[download]')?.href.endsWith('.rar'));
             row.querySelector('.play-btn').click();
         });
-        await page.waitForFunction(() => window.__loadedArchiveRom !== null, { timeout: 15000 });
+        await page.waitForFunction(() => window.__loadedArchiveRom !== null, { timeout: 15000 }).catch(async error => {
+            console.error('RAR play did not finish:', await page.evaluate(() => ({
+                status: document.getElementById('active-download-speed')?.textContent,
+                loaded: window.__loadedArchiveRom
+            })));
+            throw error;
+        });
         const loadedArchiveRom = await page.evaluate(() => window.__loadedArchiveRom);
         assert.strictEqual(loadedArchiveRom.name, 'Sample eShop title.cia', 'RAR play must pass the extracted CIA filename to Azahar');
         assert.strictEqual(loadedArchiveRom.length, 7, 'RAR play must pass extracted CIA bytes to Azahar');
