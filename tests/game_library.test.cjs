@@ -40,6 +40,13 @@ async function runTests() {
             const badge = document.getElementById('library-count-badge');
             return badge && badge.textContent.includes('1,945 games available');
         }, { timeout: 10000 });
+        await page.waitForFunction(async () => {
+            if (!window.caches) return false;
+            const names = await window.caches.keys();
+            if (!names.includes('azahar-library-catalog-v1')) return false;
+            const cache = await window.caches.open('azahar-library-catalog-v1');
+            return (await cache.keys()).some(request => request.url.endsWith('/games_library.json'));
+        }, { timeout: 5000 });
 
         const badgeText = await page.$eval('#library-count-badge', el => el.textContent);
         console.log(`  ✓ Badge text: "${badgeText}"`);
@@ -221,9 +228,30 @@ async function runTests() {
                 }
                 return originalFetch(input, options);
             };
+            window.__rarOpenCount = 0;
+            window.AzaharRarReady = Promise.resolve({
+                RarArchive: {
+                    open: async bytes => {
+                        window.__rarOpenCount++;
+                        if (!bytes.byteLength) throw new Error('RAR archive fixture should not be empty');
+                        return {
+                            entries: [{
+                                name: 'Sample eShop title.cia',
+                                isDirectory: false,
+                                bytes: async () => new Uint8Array([1, 2, 3, 4, 5, 6, 7])
+                            }],
+                            close() {}
+                        };
+                    }
+                }
+            });
         }, [...rarFixture]);
         await page.select('#library-source', 'eshop');
         await page.waitForFunction(() => document.getElementById('library-count-badge')?.textContent === '2 files available');
+        await page.waitForFunction(async () => {
+            const cache = await window.caches?.open('azahar-library-catalog-v1');
+            return cache && (await cache.keys()).some(request => request.url.includes('/metadata/3ds-cia-eshop'));
+        }, { timeout: 5000 });
         await page.$eval('#library-search', el => {
             el.value = 'Picross';
             el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -248,12 +276,19 @@ async function runTests() {
         assert.ok(rarEntry.playText.includes('Extract & Play'), 'RAR play action should explain it extracts the game first');
         assert.ok(ciaEntry?.canPlay, 'Direct CIA files should retain the play action');
 
-        // A RAR play action downloads the archive, extracts its CIA in the
-        // browser worker, and passes the extracted file to the emulator loader.
+        // A RAR play action fetches the archive, extracts a CIA, and passes
+        // the playable bytes to the emulator loader.
         await page.evaluate(() => {
             window.__loadedArchiveRom = null;
+            window.__loadCount = 0;
             window.AzaharUI.loadRomBytes = async (bytes, name, shouldAutoStart) => {
-                window.__loadedArchiveRom = { name, length: bytes.length, shouldAutoStart };
+                window.__loadCount++;
+                window.__loadedArchiveRom = {
+                    name,
+                    length: bytes.length,
+                    shouldAutoStart,
+                    cacheMessage: document.getElementById('active-download-speed')?.textContent
+                };
             };
         });
         await page.evaluate(() => {
@@ -272,6 +307,13 @@ async function runTests() {
         assert.strictEqual(loadedArchiveRom.name, 'Sample eShop title.cia', 'RAR play must pass the extracted CIA filename to Azahar');
         assert.strictEqual(loadedArchiveRom.length, 7, 'RAR play must pass extracted CIA bytes to Azahar');
         assert.strictEqual(loadedArchiveRom.shouldAutoStart, true, 'RAR play should auto-start the extracted title');
+        await page.waitForFunction(async () => {
+            if (!window.caches) return false;
+            const names = await window.caches.keys();
+            if (!names.includes('azahar-playable-library-v1')) return false;
+            const cache = await window.caches.open('azahar-playable-library-v1');
+            return (await cache.keys()).length === 1;
+        }, { timeout: 5000 });
 
         await page.evaluate(() => { window.__loadedArchiveRom = null; });
         await page.evaluate(() => {
@@ -282,6 +324,66 @@ async function runTests() {
         await page.waitForFunction(() => window.__loadedArchiveRom !== null, { timeout: 15000 });
         assert.strictEqual(await page.evaluate(() => window.__archiveDownloadCount), 1,
             'Playing the same eShop title again must reuse its cached archive instead of downloading it again');
+        const replay = await page.evaluate(() => window.__loadedArchiveRom);
+        assert.strictEqual(await page.evaluate(() => window.__loadCount), 2,
+            'Replaying a cached eShop title must load it immediately a second time');
+        assert.ok(replay.cacheMessage.includes('local game cache'),
+            'Replaying a cached eShop title must skip archive download and extraction');
+        assert.strictEqual(await page.evaluate(() => window.__rarOpenCount), 1,
+            'Replaying a cached eShop title must skip RAR parsing as well');
+
+        // A fresh document has no in-memory cache. It should load the stored
+        // playable CIA from CacheStorage without requesting the RAR again.
+        await page.evaluateOnNewDocument(rarBytes => {
+            const originalFetch = window.fetch.bind(window);
+            const files = [
+                { name: '0023 - Picross e (Japan) (eShop).rar', size: '123456', format: 'RAR' },
+                { name: 'Homebrew Demo (USA).cia', size: '654321', format: 'Nintendo 3DS Content' },
+                { name: 'item_meta.xml', size: '20', format: 'Metadata' }
+            ];
+            window.__archiveDownloadCount = 0;
+            window.fetch = (input, options) => {
+                const url = input instanceof Request ? input.url : String(input);
+                if (url === 'https://archive.org/metadata/3ds-cia-eshop') {
+                    return Promise.resolve(new Response(JSON.stringify({ files }), {
+                        status: 200,
+                        headers: { 'Content-Type': 'application/json' }
+                    }));
+                }
+                if (url === 'https://archive.org/download/3ds-cia-eshop/0023%20-%20Picross%20e%20(Japan)%20(eShop).rar') {
+                    window.__archiveDownloadCount++;
+                    return Promise.resolve(new Response(new Uint8Array(rarBytes), {
+                        status: 200,
+                        headers: { 'Content-Type': 'application/vnd.rar' }
+                    }));
+                }
+                return originalFetch(input, options);
+            };
+        }, [...rarFixture]);
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await page.waitForFunction(() => document.getElementById('library-count-badge')?.textContent.includes('1,945 games available'));
+        await page.select('#library-source', 'eshop');
+        await page.waitForFunction(() => document.getElementById('library-count-badge')?.textContent === '2 files available');
+        await page.evaluate(() => {
+            window.__loadedArchiveRom = null;
+            window.AzaharUI.loadRomBytes = async (bytes, name, shouldAutoStart) => {
+                window.__loadedArchiveRom = {
+                    name,
+                    length: bytes.length,
+                    shouldAutoStart,
+                    cacheMessage: document.getElementById('active-download-speed')?.textContent
+                };
+            };
+            const row = [...document.querySelectorAll('#library-list tr')]
+                .find(candidate => candidate.querySelector('a[download]')?.href.endsWith('.rar'));
+            row.querySelector('.play-btn').click();
+        });
+        await page.waitForFunction(() => window.__loadedArchiveRom !== null, { timeout: 10000 });
+        const persistentReplay = await page.evaluate(() => window.__loadedArchiveRom);
+        assert.strictEqual(await page.evaluate(() => window.__archiveDownloadCount), 0,
+            'Playing a previously cached game after reload must not request its archive again');
+        assert.ok(persistentReplay.cacheMessage.includes('local game cache'),
+            'The persistent library cache should supply the game after reload');
 
         const sourceHref = await page.$eval('#library-source-link', link => link.href);
         assert.strictEqual(sourceHref, 'https://archive.org/download/3ds-cia-eshop/');

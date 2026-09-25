@@ -38,6 +38,7 @@
             identifier: '3ds-cia-eshop'
         }
     };
+    const CATALOG_CACHE_NAME = 'azahar-library-catalog-v1';
 
     let allGames = [];
     let filteredGames = [];
@@ -48,7 +49,8 @@
     let pageSize = 50;
 
     let activeDownload = null; // { controller, game, startTime, loadedBytes, totalBytes }
-    let cachedArchiveDownload = null; // one in-memory RAR avoids repeat downloads without unbounded growth
+    let cachedPlayableDownload = null; // keep the last played game ready in memory
+    const PLAYABLE_CACHE_NAME = 'azahar-playable-library-v1';
     let searchDebounceTimer = null;
     let currentSourceId = 'decrypted';
     const catalogCache = new Map();
@@ -89,6 +91,74 @@
         return (bytesPerSec / (1024 * 1024)).toFixed(1) + ' MB/s';
     }
 
+    async function getPlayableCacheRequest(url) {
+        if (!window.crypto?.subtle || !window.caches) return null;
+        const digest = await window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(url));
+        const key = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+        return new Request(new URL(`/__azahar_playable_cache__/${key}`, window.location.origin));
+    }
+
+    async function readCachedPlayable(url) {
+        if (cachedPlayableDownload?.url === url) return cachedPlayableDownload;
+        try {
+            const request = await getPlayableCacheRequest(url);
+            if (!request) return null;
+            const cache = await window.caches.open(PLAYABLE_CACHE_NAME);
+            const response = await cache.match(request);
+            if (!response) return null;
+            const playable = {
+                url,
+                bytes: new Uint8Array(await response.arrayBuffer()),
+                name: decodeURIComponent(response.headers.get('X-Azahar-Rom-Name') || '')
+            };
+            cachedPlayableDownload = playable;
+            return playable;
+        } catch (error) {
+            console.warn('Could not read the locally cached game:', error);
+            return null;
+        }
+    }
+
+    async function fetchCatalogJson(url) {
+        const request = new Request(new URL(url, window.location.href));
+        let cache = null;
+        try { cache = await window.caches?.open(CATALOG_CACHE_NAME) || null; } catch (_) {}
+        try {
+            const response = await fetch(url);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            if (cache) void cache.put(request, response.clone()).catch(error =>
+                console.warn('Could not persist the library catalog:', error));
+            return await response.json();
+        } catch (networkError) {
+            if (cache) {
+                const stored = await cache.match(request).catch(() => null);
+                if (stored) return stored.json();
+            }
+            throw networkError;
+        }
+    }
+
+    function rememberPlayable(url, bytes, name) {
+        cachedPlayableDownload = { url, bytes, name };
+        // Keep a browser-managed copy so played titles are available after a
+        // reload. Storage quota failures leave the in-memory replay cache intact.
+        void (async () => {
+            try {
+                const request = await getPlayableCacheRequest(url);
+                if (!request) return;
+                const cache = await window.caches.open(PLAYABLE_CACHE_NAME);
+                await cache.put(request, new Response(bytes, {
+                    headers: {
+                        'Content-Type': 'application/octet-stream',
+                        'X-Azahar-Rom-Name': encodeURIComponent(name)
+                    }
+                }));
+            } catch (error) {
+                console.warn('Could not persist the played game in the local cache:', error);
+            }
+        })();
+    }
+
     function parseArchiveGame(file, index, source) {
         const filename = String(file.name || '');
         const title = filename.replace(/\.[^.]+$/, '').replace(/^\d+\s*-\s*/, '').trim();
@@ -121,17 +191,13 @@
         if (catalogCache.has(sourceId)) return catalogCache.get(sourceId);
 
         if (source.catalogUrl) {
-            const response = await fetch(source.catalogUrl);
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            const data = await response.json();
+            const data = await fetchCatalogJson(source.catalogUrl);
             const games = Array.isArray(data.games) ? data.games : [];
             catalogCache.set(sourceId, games);
             return games;
         }
 
-        const response = await fetch(source.metadataUrl);
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const metadata = await response.json();
+        const metadata = await fetchCatalogJson(source.metadataUrl);
         const files = Array.isArray(metadata.files) ? metadata.files : [];
         const games = files
             .filter(file => /\.(?:rar|cia|3ds|zip)$/i.test(file.name || ''))
@@ -320,6 +386,18 @@
         listEl.replaceChildren(fragment);
     }
 
+    async function loadPlayableBytes(bytes, name) {
+        if (downloadCardEl) downloadCardEl.hidden = true;
+        activeDownload = null;
+        renderCurrentPage();
+        if (!window.AzaharUI?.loadRomBytes) {
+            throw new Error('Azahar UI is not ready to accept ROM bytes.');
+        }
+        await window.AzaharUI.loadRomBytes(bytes, name, true);
+        const canvas = window.AzaharUI.getCanvas ? window.AzaharUI.getCanvas() : document.getElementById('canvas');
+        if (canvas) canvas.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
     async function streamRom(game) {
         if (activeDownload) {
             cancelDownload();
@@ -355,15 +433,22 @@
 
         let response = null;
         let usedProxy = false;
-        if (isRarArchive && cachedArchiveDownload?.url === directUrl) {
-            response = new Response(cachedArchiveDownload.bytes);
-            if (downloadTitleEl) downloadTitleEl.textContent = `Preparing ${game.title} from downloaded archive...`;
-            if (downloadSpeedEl) downloadSpeedEl.textContent = 'Using previously downloaded RAR archive...';
-            if (downloadStatsEl) downloadStatsEl.textContent = `${formatBytes(cachedArchiveDownload.bytes.length)} cached`;
-            if (downloadBarEl) downloadBarEl.style.width = '100%';
-        }
-
         try {
+            const cachedPlayable = await readCachedPlayable(directUrl);
+            if (cachedPlayable) {
+                if (controller.signal.aborted) throw new DOMException('The operation was aborted', 'AbortError');
+                if (downloadTitleEl) downloadTitleEl.textContent = `Loading cached ${game.title}...`;
+                if (downloadStatsEl) downloadStatsEl.textContent = `${formatBytes(cachedPlayable.bytes.length)} cached locally`;
+                if (downloadBarEl) downloadBarEl.style.width = '100%';
+                if (downloadSpeedEl) downloadSpeedEl.textContent = 'Using the local game cache; no download or extraction needed.';
+                if (window.AzaharUI) {
+                    window.AzaharUI.setStatus(`Loading cached ${game.title}...`);
+                    window.AzaharUI.showProgress(100);
+                }
+                await loadPlayableBytes(cachedPlayable.bytes, cachedPlayable.name);
+                return;
+            }
+
             if (!response) {
                 try {
                     response = await fetch(directUrl, {
@@ -445,8 +530,6 @@
                 combined.set(chunk, offset);
                 offset += chunk.length;
             }
-            if (isRarArchive) cachedArchiveDownload = { url: directUrl, bytes: combined };
-
             // eShop items are RAR archives containing a playable CIA. Extract
             // the game in a worker so decompression does not block the UI.
             let playableBytes = combined;
@@ -474,21 +557,12 @@
                 }
             }
 
+            rememberPlayable(directUrl, playableBytes, playableName);
+
             if (controller.signal.aborted) throw new DOMException('The operation was aborted', 'AbortError');
 
             // Load into Azahar
-            if (downloadCardEl) downloadCardEl.hidden = true;
-            activeDownload = null;
-            renderCurrentPage();
-            if (window.AzaharUI && window.AzaharUI.loadRomBytes) {
-                await window.AzaharUI.loadRomBytes(playableBytes, playableName, true);
-                const canvas = window.AzaharUI.getCanvas ? window.AzaharUI.getCanvas() : document.getElementById('canvas');
-                if (canvas) {
-                    canvas.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                }
-            } else {
-                throw new Error('Azahar UI is not ready to accept ROM bytes.');
-            }
+            await loadPlayableBytes(playableBytes, playableName);
 
         } catch (err) {
             if (controller.signal.aborted) {
