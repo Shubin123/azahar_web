@@ -86,7 +86,7 @@ function findRom() {
 // ── Combined server: web/ + ROM endpoint ──────────────────────────
 function createBenchServer(romPath, statePath) {
     const webServer = createWebServer(webDir);
-    const romBuffer = fs.readFileSync(romPath);
+    const romSize = fs.statSync(romPath).size;
     const romName = path.basename(romPath);
     const stateBuffer = statePath ? fs.readFileSync(statePath) : null;
     const stateName = statePath ? path.basename(statePath) : null;
@@ -97,13 +97,18 @@ function createBenchServer(romPath, statePath) {
             // Serve the ROM file for fetch() from the browser
             res.writeHead(200, {
                 'Content-Type': 'application/octet-stream',
-                'Content-Length': romBuffer.length,
+                'Content-Length': romSize,
                 'Cross-Origin-Opener-Policy': 'same-origin',
                 'Cross-Origin-Embedder-Policy': 'require-corp',
                 'Cross-Origin-Resource-Policy': 'cross-origin',
                 'Cache-Control': 'no-store',
             });
-            res.end(romBuffer);
+            const stream = fs.createReadStream(romPath);
+            stream.on('error', error => {
+                if (!res.headersSent) res.writeHead(500);
+                res.destroy(error);
+            });
+            stream.pipe(res);
             return;
         }
         if (url.pathname === '/bench_state' && stateBuffer) {
@@ -150,7 +155,8 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
         // Fetch ROM from the server
         const response = await fetch('/bench_rom');
         if (!response.ok) throw new Error('Failed to fetch ROM: ' + response.status);
-        const romBytes = new Uint8Array(await response.arrayBuffer());
+        const romReader = response.body.getReader();
+        let romBytesReceived = 0;
 
         function readPerfStats() {
             if (!Module._azahar_get_perf_stats) return null;
@@ -447,13 +453,40 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
                 throw new Error('Native WebGL2 initialization did not claim the production canvas');
             }
 
-            // Write ROM to MEMFS
-            Module.FS.writeFile(memfsPath, romBytes, { canOwn: false });
+            // Stream directly into MEMFS so large library entries do not need
+            // a second whole-ROM buffer in Node or the browser main thread.
+            const romFile = Module.FS.open(memfsPath, 'w+');
+            try {
+                while (true) {
+                    const {done, value} = await romReader.read();
+                    if (done) break;
+                    romBytesReceived += value.byteLength;
+                    let offset = 0;
+                    while (offset < value.byteLength) {
+                        offset += Module.FS.write(
+                            romFile, value, offset, value.byteLength - offset,
+                            romBytesReceived - value.byteLength + offset);
+                    }
+                }
+            } finally {
+                Module.FS.close(romFile);
+            }
             const heapAfterWrite = Module.HEAPU8 ? Module.HEAPU8.length : 0;
+            const romSizeInMemfs = Module.FS.stat(memfsPath).size;
+            if (romSizeInMemfs !== romBytesReceived) {
+                throw new Error(`ROM stream wrote ${romSizeInMemfs} of ${romBytesReceived} received bytes`);
+            }
 
             // Load ROM using ccall for proper string → C pointer marshaling
             const t1 = perf.now();
-            const loadResult = Module.ccall('azahar_load_rom', 'number', ['string'], [memfsPath]);
+            let loadResult;
+            try {
+                loadResult = Module.ccall('azahar_load_rom', 'number', ['string'], [memfsPath]);
+            } catch (error) {
+                throw new Error(`azahar_load_rom threw after ${romSizeInMemfs} bytes `
+                    + `(received ${romBytesReceived} bytes, WASM heap ${Module.HEAPU8.byteLength} bytes): ${String(error)} `
+                    + `details=${JSON.stringify(error, Object.getOwnPropertyNames(error))}`);
+            }
             if (loadResult !== 0) throw new Error(`azahar_load_rom returned ${loadResult}`);
             const loadMs = perf.now() - t1;
 
