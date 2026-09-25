@@ -48,6 +48,7 @@
     let pageSize = 50;
 
     let activeDownload = null; // { controller, game, startTime, loadedBytes, totalBytes }
+    let cachedArchiveDownload = null; // one in-memory RAR avoids repeat downloads without unbounded growth
     let searchDebounceTimer = null;
     let currentSourceId = 'decrypted';
     const catalogCache = new Map();
@@ -96,6 +97,7 @@
         const extension = filename.match(/\.([^.]+)$/)?.[1]?.toLowerCase() || 'file';
         const encodedName = filename.split('/').map(encodeURIComponent).join('/');
         const canPlayDirectly = ['3ds', 'cia'].includes(extension);
+        const canExtractAndPlay = extension === 'rar';
 
         return {
             id: index + 1,
@@ -109,7 +111,8 @@
             sizeFormatted: formatBytes(Number(file.size) || 0),
             downloadUrl: `${source.baseUrl}${encodedName}`,
             viewArchiveUrl: `https://archive.org/details/${source.identifier}`,
-            downloadOnly: !canPlayDirectly
+            downloadOnly: !canPlayDirectly && !canExtractAndPlay,
+            extractBeforePlay: canExtractAndPlay
         };
     }
 
@@ -282,9 +285,11 @@
                 playBtn.className = 'btn btn-primary btn-sm play-btn';
                 playBtn.dataset.action = 'play';
                 playBtn.dataset.id = game.id;
-                playBtn.textContent = isDownloading ? '⏳ Loading...' : '▶ Play';
+                playBtn.textContent = isDownloading ? '⏳ Loading...' : (game.extractBeforePlay ? '▶ Extract & Play' : '▶ Play');
                 playBtn.disabled = Boolean(activeDownload && !isDownloading);
-                playBtn.title = 'Stream and play this game directly in Azahar Web';
+                playBtn.title = game.extractBeforePlay
+                    ? 'Stream this RAR archive, extract its 3DS game, and load it into Azahar Web'
+                    : 'Stream and play this game directly in Azahar Web';
                 tdActions.appendChild(playBtn);
             }
 
@@ -346,28 +351,38 @@
         // Try direct download URL first, fall back to server proxy if CORS or network fails
         const directUrl = game.downloadUrl;
         const proxyUrl = `/api/rom-proxy?url=${encodeURIComponent(directUrl)}`;
+        const isRarArchive = /\.rar$/i.test(game.romName || '');
 
         let response = null;
         let usedProxy = false;
+        if (isRarArchive && cachedArchiveDownload?.url === directUrl) {
+            response = new Response(cachedArchiveDownload.bytes);
+            if (downloadTitleEl) downloadTitleEl.textContent = `Preparing ${game.title} from downloaded archive...`;
+            if (downloadSpeedEl) downloadSpeedEl.textContent = 'Using previously downloaded RAR archive...';
+            if (downloadStatsEl) downloadStatsEl.textContent = `${formatBytes(cachedArchiveDownload.bytes.length)} cached`;
+            if (downloadBarEl) downloadBarEl.style.width = '100%';
+        }
 
         try {
-            try {
-                response = await fetch(directUrl, {
-                    signal: controller.signal,
-                    headers: { 'Accept-Encoding': 'identity' }
-                });
-                if (!response.ok) {
-                    throw new Error(`Direct download returned HTTP ${response.status}`);
+            if (!response) {
+                try {
+                    response = await fetch(directUrl, {
+                        signal: controller.signal,
+                        headers: { 'Accept-Encoding': 'identity' }
+                    });
+                    if (!response.ok) {
+                        throw new Error(`Direct download returned HTTP ${response.status}`);
+                    }
+                } catch (directErr) {
+                    if (controller.signal.aborted) throw directErr;
+                    console.warn('Direct fetch from archive.org failed, trying local proxy:', directErr.message);
+                    if (downloadSpeedEl) downloadSpeedEl.textContent = 'Connecting via proxy...';
+                    response = await fetch(proxyUrl, { signal: controller.signal });
+                    if (!response.ok) {
+                        throw new Error(`Proxy download returned HTTP ${response.status}`);
+                    }
+                    usedProxy = true;
                 }
-            } catch (directErr) {
-                if (controller.signal.aborted) throw directErr;
-                console.warn('Direct fetch from archive.org failed, trying local proxy:', directErr.message);
-                if (downloadSpeedEl) downloadSpeedEl.textContent = 'Connecting via proxy...';
-                response = await fetch(proxyUrl, { signal: controller.signal });
-                if (!response.ok) {
-                    throw new Error(`Proxy download returned HTTP ${response.status}`);
-                }
-                usedProxy = true;
             }
 
             const contentLengthHeader = response.headers.get('content-length');
@@ -430,14 +445,40 @@
                 combined.set(chunk, offset);
                 offset += chunk.length;
             }
+            if (isRarArchive) cachedArchiveDownload = { url: directUrl, bytes: combined };
 
+            // eShop items are RAR archives containing a playable CIA. Extract
+            // the game in a worker so decompression does not block the UI.
+            let playableBytes = combined;
+            let playableName = game.romName;
+            if (isRarArchive) {
+                if (downloadSpeedEl) downloadSpeedEl.textContent = 'Extracting game from RAR archive...';
+                if (window.AzaharUI) window.AzaharUI.setStatus(`Extracting ${game.title}...`);
+                const rarModule = window.AzaharRarReady || import('./vendor/rars/index.js');
+                const { RarArchive } = await rarModule;
+                const rarArchive = await RarArchive.open(combined);
+                try {
+                    const supportedEntry = rarArchive.entries.find(entry =>
+                        !entry.isDirectory && /\.(?:cia|3ds|cci|cxi|app|3dsx|elf)$/i.test(entry.name)
+                    );
+                    if (!supportedEntry) {
+                        throw new Error('This RAR archive does not contain a supported 3DS game file.');
+                    }
+                    playableBytes = await supportedEntry.bytes();
+                    playableName = supportedEntry.name;
+                } finally {
+                    rarArchive.close();
+                }
+            }
+
+            if (controller.signal.aborted) throw new DOMException('The operation was aborted', 'AbortError');
+
+            // Load into Azahar
             if (downloadCardEl) downloadCardEl.hidden = true;
             activeDownload = null;
             renderCurrentPage();
-
-            // Load into Azahar
             if (window.AzaharUI && window.AzaharUI.loadRomBytes) {
-                await window.AzaharUI.loadRomBytes(combined, game.romName, true);
+                await window.AzaharUI.loadRomBytes(playableBytes, playableName, true);
                 const canvas = window.AzaharUI.getCanvas ? window.AzaharUI.getCanvas() : document.getElementById('canvas');
                 if (canvas) {
                     canvas.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -458,7 +499,7 @@
                     window.AzaharUI.setStatus(`Failed to stream ROM: ${err.message}`, 'error');
                     window.AzaharUI.hideProgress();
                 }
-                alert(`Could not stream game: ${err.message}\n\nYou can still download the .3ds file directly using the "⬇ .3ds" button.`);
+                alert(`Could not stream game: ${err.message}\n\nYou can still download the original file from Internet Archive.`);
             }
             if (downloadCardEl) downloadCardEl.hidden = true;
             activeDownload = null;

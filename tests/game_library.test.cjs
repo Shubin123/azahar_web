@@ -8,6 +8,8 @@ const puppeteer = require('puppeteer-core');
 const { listen } = require('../web/server.cjs');
 const cfg = require('./config.cjs');
 const assert = require('node:assert');
+const fs = require('node:fs');
+const path = require('node:path');
 
 async function runTests() {
     console.log('--- Starting Game Library Tests ---');
@@ -28,6 +30,7 @@ async function runTests() {
 
     try {
         const page = await browser.newPage();
+        page.on('console', msg => { if (msg.type() === 'error') console.error('Browser console error:', msg.text()); });
         await page.goto(`http://127.0.0.1:${port}/index.html`, { waitUntil: 'domcontentloaded' });
         console.log('Page loaded successfully.');
 
@@ -189,27 +192,39 @@ async function runTests() {
         assert.ok(hasApi.hasLoadRomBytes, 'AzaharUI.loadRomBytes must be a function');
         assert.ok(hasApi.hasAzaharLibrary, 'AzaharLibrary must exist on window');
         assert.strictEqual(hasApi.totalGamesInLib, 1945, 'AzaharLibrary should hold all 1,945 games');
+        assert.ok(await page.evaluate(() => window.AzaharRarReady?.then(Boolean)),
+            'The RAR extraction worker must finish initialization before the emulator starts');
 
         // Switching to an Internet Archive metadata database loads its files
         // into the same searchable table. Use a local response fixture so the
         // test does not depend on Archive availability.
-        await page.setRequestInterception(true);
-        page.on('request', request => {
-            if (request.url() === 'https://archive.org/metadata/3ds-cia-eshop') {
-                request.respond({
-                    status: 200,
-                    contentType: 'application/json',
-                    headers: { 'Access-Control-Allow-Origin': '*' },
-                    body: JSON.stringify({ files: [
-                        { name: '0023 - Picross e (Japan) (eShop).rar', size: '123456', format: 'RAR' },
-                        { name: 'Homebrew Demo (USA).cia', size: '654321', format: 'Nintendo 3DS Content' },
-                        { name: 'item_meta.xml', size: '20', format: 'Metadata' }
-                    ] })
-                });
-            } else {
-                request.continue();
-            }
-        });
+        const rarFixture = fs.readFileSync(path.join(__dirname, 'fixtures', 'sample-eshop-title.rar'));
+        await page.evaluate(rarBytes => {
+            const originalFetch = window.fetch.bind(window);
+            window.__archiveDownloadCount = 0;
+            const files = [
+                { name: '0023 - Picross e (Japan) (eShop).rar', size: '123456', format: 'RAR' },
+                { name: 'Homebrew Demo (USA).cia', size: '654321', format: 'Nintendo 3DS Content' },
+                { name: 'item_meta.xml', size: '20', format: 'Metadata' }
+            ];
+            window.fetch = (input, options) => {
+                const url = input instanceof Request ? input.url : String(input);
+                if (url === 'https://archive.org/metadata/3ds-cia-eshop') {
+                    return Promise.resolve(new Response(JSON.stringify({ files }), {
+                        status: 200,
+                        headers: { 'Content-Type': 'application/json' }
+                    }));
+                }
+                if (url === 'https://archive.org/download/3ds-cia-eshop/0023%20-%20Picross%20e%20(Japan)%20(eShop).rar') {
+                    window.__archiveDownloadCount++;
+                    return Promise.resolve(new Response(new Uint8Array(rarBytes), {
+                        status: 200,
+                        headers: { 'Content-Type': 'application/vnd.rar' }
+                    }));
+                }
+                return originalFetch(input, options);
+            };
+        }, [...rarFixture]);
         await page.select('#library-source', 'eshop');
         await page.waitForFunction(() => document.getElementById('library-count-badge')?.textContent === '2 files available');
         await page.$eval('#library-search', el => {
@@ -226,13 +241,45 @@ async function runTests() {
         const archiveRows = await page.$$eval('#library-list tr', rows => rows.map(row => ({
             title: row.querySelector('.game-name')?.textContent,
             href: row.querySelector('a[download]')?.href,
-            canPlay: Boolean(row.querySelector('.play-btn'))
+            canPlay: Boolean(row.querySelector('.play-btn')),
+            playText: row.querySelector('.play-btn')?.textContent
         })));
         const rarEntry = archiveRows.find(row => row.href.endsWith('.rar'));
         const ciaEntry = archiveRows.find(row => row.href.endsWith('.cia'));
         assert.ok(rarEntry?.title.includes('Picross e'), 'Archive metadata filename should become a searchable title');
-        assert.strictEqual(rarEntry.canPlay, false, 'RAR files should not show the direct play action');
+        assert.ok(rarEntry.canPlay, 'RAR archives containing CIA files should show a play action');
+        assert.ok(rarEntry.playText.includes('Extract & Play'), 'RAR play action should explain it extracts the game first');
         assert.ok(ciaEntry?.canPlay, 'Direct CIA files should retain the play action');
+
+        // A RAR play action downloads the archive, extracts its CIA in the
+        // browser worker, and passes the extracted file to the emulator loader.
+        await page.evaluate(() => {
+            window.__loadedArchiveRom = null;
+            window.AzaharUI.loadRomBytes = async (bytes, name, shouldAutoStart) => {
+                window.__loadedArchiveRom = { name, length: bytes.length, shouldAutoStart };
+            };
+        });
+        await page.evaluate(() => {
+            const row = [...document.querySelectorAll('#library-list tr')]
+                .find(candidate => candidate.querySelector('a[download]')?.href.endsWith('.rar'));
+            row.querySelector('.play-btn').click();
+        });
+        await page.waitForFunction(() => window.__loadedArchiveRom !== null, { timeout: 15000 });
+        const loadedArchiveRom = await page.evaluate(() => window.__loadedArchiveRom);
+        assert.strictEqual(loadedArchiveRom.name, 'Sample eShop title.cia', 'RAR play must pass the extracted CIA filename to Azahar');
+        assert.strictEqual(loadedArchiveRom.length, 7, 'RAR play must pass extracted CIA bytes to Azahar');
+        assert.strictEqual(loadedArchiveRom.shouldAutoStart, true, 'RAR play should auto-start the extracted title');
+
+        await page.evaluate(() => { window.__loadedArchiveRom = null; });
+        await page.evaluate(() => {
+            const row = [...document.querySelectorAll('#library-list tr')]
+                .find(candidate => candidate.querySelector('a[download]')?.href.endsWith('.rar'));
+            row.querySelector('.play-btn').click();
+        });
+        await page.waitForFunction(() => window.__loadedArchiveRom !== null, { timeout: 15000 });
+        assert.strictEqual(await page.evaluate(() => window.__archiveDownloadCount), 1,
+            'Playing the same eShop title again must reuse its cached archive instead of downloading it again');
+
         const sourceHref = await page.$eval('#library-source-link', link => link.href);
         assert.strictEqual(sourceHref, 'https://archive.org/download/3ds-cia-eshop/');
 
