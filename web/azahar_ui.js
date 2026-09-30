@@ -798,7 +798,20 @@ void main() { frag_color = vec4(1.0); }`);
     });
 
     // ── WASM Module Loading ──────────────────────────────────────
-    async function loadWasmModule() {
+    // Page start-up and a library play request (?play=) can both ask for the
+    // module. Injecting the Emscripten glue twice throws ("Identifier
+    // 'EmscriptenEH' has already been declared") and stalls start-up, so all
+    // callers share one load.
+    let wasmModuleLoad = null;
+    function loadWasmModule() {
+        wasmModuleLoad ||= loadWasmModuleOnce().catch(error => {
+            wasmModuleLoad = null;
+            throw error;
+        });
+        return wasmModuleLoad;
+    }
+
+    async function loadWasmModuleOnce() {
         await ensureCrossOriginIsolated();
         if (!preflightWebGL2()) {
             // restartInSoftware has scheduled a navigation to a fresh canvas.
