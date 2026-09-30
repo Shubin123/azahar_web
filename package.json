@@ -10,7 +10,8 @@
     "test:input": "node tests/input_ui.test.cjs",
     "library:generate": "python3 scripts/generate_games_library.py",
     "smoke": "node tests/web_artifact_smoke.cjs",
-    "bench": "node tests/benchmark_browser.cjs"
+    "bench": "node tests/benchmark_browser.cjs",
+    "test:audio": "node tests/audio.test.cjs"
   },
   "repository": {
     "type": "git",

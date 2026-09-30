@@ -30,6 +30,7 @@
     const btnStep = document.getElementById('btn-step');
     const btnRun = document.getElementById('btn-run');
     const btnStop = document.getElementById('btn-stop');
+    const btnSound = document.getElementById('btn-sound');
     const statusEl = document.getElementById('status');
     const progressEl = document.getElementById('progress');
     const fpsEl = document.getElementById('fps');
@@ -1011,6 +1012,11 @@ void main() { frag_color = vec4(1.0); }`);
             const result = wasmModule.ccall('azahar_load_rom', 'number', ['string'], [romPath]);
             if (result === 0) {
                 romLoaded = true;
+                // The engine's audio ring exists from init; start draining it
+                // now that the title will produce sound.
+                void window.AzaharAudio?.attach(wasmModule).then(attached => {
+                    if (attached) log('Game audio started.');
+                });
                 currentProgramId = readCurrentProgramId();
                 if (!currentProgramId) {
                     log('WARNING: Could not determine the loaded title ID; browser saves are disabled.');
@@ -1244,6 +1250,21 @@ void main() { frag_color = vec4(1.0); }`);
     }
 
     btnRun.addEventListener('click', startRunning);
+
+    if (btnSound && window.AzaharAudio) {
+        window.AzaharAudio.onChange(function (state) {
+            const icon = btnSound.textContent.startsWith('🔊') || btnSound.textContent.startsWith('🔇');
+            const label = state.muted ? 'Sound: Off' : 'Sound: On';
+            btnSound.textContent = icon ? `${state.muted ? '🔇' : '🔊'} ${label}` : label;
+            btnSound.setAttribute('aria-pressed', String(state.muted));
+            btnSound.title = state.attached && !state.running && !state.muted
+                ? 'Audio starts after you click or press a key on the page.'
+                : '';
+        });
+        btnSound.addEventListener('click', function () {
+            window.AzaharAudio.setMuted(!window.AzaharAudio.isMuted());
+        });
+    }
 
     btnStop.addEventListener('click', function () {
         stopRunning();

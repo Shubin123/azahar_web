@@ -43,6 +43,8 @@ Azahar WebAssembly port targeting modern web browsers via Emscripten.
 - `azahar_step_frame()`: C++ export stepping 1 emulation frame, executing CPU ticks and blitting framebuffer to canvas.
 - `azahar_run_loop()`: C++ export starting the browser-friendly Emscripten main loop.
 - `azahar_shutdown()`: C++ export stopping emulation and releasing frontend resources.
+- `azahar_audio_ring()`: C++ export returning the address of the game-audio ring buffer in shared WASM memory (header of u32 frames written, u32 frames read, u32 capacity, u32 sample rate; interleaved stereo s16 samples from byte 16). `azahar_step_frame()` keeps it filled; `web/azahar_audio.js` drains it from an AudioWorklet.
+- `AzaharRomFS.mount(FS, path, blob)` (`web/azahar_romfs.js`): mounts a File/Blob as a read-only MEMFS file read on demand, so multi-GiB images never occupy browser memory. Downloads and played titles are stored in the Origin Private File System.
 
 ### Core ↔ EmuWindow Software Presentation
 - `EmuWindow_SDL2_SW::PresentSingleFrame()`: Non-blocking function blitting current `RendererSoftware` framebuffers to SDL surface and updating HTML5 canvas.
