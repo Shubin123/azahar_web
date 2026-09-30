@@ -118,6 +118,81 @@ async function runTests() {
         await page.waitForFunction(() => !document.getElementById('keymap-dialog').open);
         assert.strictEqual(await page.$$eval('#keymap-dialog', els => els.length), 1, 'The menu is reused, not duplicated');
 
+        console.log('Test 5: keymap lists gamepad bindings...');
+        const padLabels = await page.$$eval('#keymap-dialog tbody tr[data-control]', trs => Object.fromEntries(
+            trs.map(tr => [tr.dataset.control, tr.querySelector('.keymap-pad').textContent])));
+        assert.match(padLabels['Face buttons:A'], /Right face button/);
+        assert.match(padLabels['Circle Pad:Up'], /Left stick/);
+        assert.match(padLabels['C-Stick:Right'], /Right stick/);
+        assert.match(padLabels['Shoulders:ZR'], /Right trigger/);
+        assert.match(await page.$eval('#btn-keymap + .gamepad-status', el => el.textContent), /No gamepad connected/);
+
+        console.log('Test 6: gamepad input reaches the game as key events...');
+        await page.evaluate(() => {
+            const buttons = Array.from({ length: 17 }, () => ({ pressed: false, value: 0 }));
+            window.__pad = { id: 'Test Pad (STANDARD GAMEPAD)', connected: true, index: 0, mapping: 'standard',
+                buttons, axes: [0, 0, 0, 0] };
+            window.__pads = [window.__pad];
+            navigator.getGamepads = () => window.__pads;
+            window.__keyLog = [];
+            const record = event => window.__keyLog.push({ type: event.type, code: event.code, keyCode: event.keyCode });
+            window.addEventListener('keydown', record);
+            window.addEventListener('keyup', record);
+            window.dispatchEvent(new Event('gamepadconnected'));
+        });
+        await page.waitForFunction(() => document.querySelector('#btn-keymap + .gamepad-status').textContent.includes('Test Pad connected'));
+        const pressed = () => page.evaluate(() => window.AzaharInput.getPressedCodes().sort());
+        const waitPressed = async (codes, label) => {
+            await page.waitForFunction(expected => JSON.stringify(window.AzaharInput.getPressedCodes().sort()) === expected,
+                { timeout: 2000 }, JSON.stringify([...codes].sort())).catch(async error => {
+                console.error(`${label}: pressed`, await pressed());
+                throw error;
+            });
+        };
+
+        await page.evaluate(() => { window.__pad.buttons[1] = { pressed: true, value: 1 }; });
+        await waitPressed(['KeyA'], 'right face button');
+        assert.deepStrictEqual(await page.evaluate(() => window.__keyLog.at(-1)),
+            { type: 'keydown', code: 'KeyA', keyCode: 65 }, 'The 3DS A key must be sent with SDL\'s keyCode');
+        await page.evaluate(() => { window.__pad.buttons[1] = { pressed: false, value: 0 }; });
+        await waitPressed([], 'released face button');
+        assert.deepStrictEqual(await page.evaluate(() => window.__keyLog.at(-1)),
+            { type: 'keyup', code: 'KeyA', keyCode: 65 });
+
+        await page.evaluate(() => { window.__pad.buttons[7] = { pressed: false, value: 0.8 }; });
+        await waitPressed(['Digit2'], 'analog trigger');
+        await page.evaluate(() => { window.__pad.buttons[7] = { pressed: false, value: 0 }; window.__pad.axes = [1, 0, 0, -1]; });
+        await waitPressed(['ArrowRight', 'KeyI'], 'full stick tilt');
+        await page.evaluate(() => { window.__pad.axes = [0.5, 0, 0, 0]; });
+        await waitPressed(['ArrowRight', 'KeyD'], 'half stick tilt');
+        await page.evaluate(() => { window.__pad.axes = [0.1, -0.1, 0.2, 0]; });
+        await waitPressed([], 'stick in dead zone');
+        await page.evaluate(() => { window.__pad.buttons[12] = { pressed: true, value: 1 }; window.__pad.buttons[9] = { pressed: true, value: 1 }; });
+        await waitPressed(['KeyM', 'KeyT'], 'D-pad and Start together');
+
+        console.log('Test 7: disconnecting the pad releases held keys...');
+        await page.evaluate(() => {
+            window.__pads = [];
+            window.dispatchEvent(new Event('gamepaddisconnected'));
+        });
+        await waitPressed([], 'disconnected pad');
+        const lastUps = await page.evaluate(() => window.__keyLog.slice(-2).map(e => `${e.type}:${e.code}`).sort());
+        assert.deepStrictEqual(lastUps, ['keyup:KeyM', 'keyup:KeyT'], 'Held keys must be released on disconnect');
+        await page.waitForFunction(() => document.querySelector('#btn-keymap + .gamepad-status').textContent.includes('No gamepad'));
+
+        console.log('Test 8: the emulator listens for keys on window...');
+        await page.waitForFunction(() => document.getElementById('status')?.textContent.includes('Emulator ready'),
+            { timeout: 60000 });
+        const session = await page.createCDPSession();
+        const { result } = await session.send('Runtime.evaluate', { expression: 'window' });
+        const { listeners } = await session.send('DOMDebugger.getEventListeners', { objectId: result.objectId });
+        const scripts = new Map();
+        session.on('Debugger.scriptParsed', event => scripts.set(event.scriptId, event.url));
+        await session.send('Debugger.enable');
+        const keyListenerScripts = listeners.filter(l => l.type === 'keydown').map(l => scripts.get(l.scriptId) || '');
+        assert.ok(keyListenerScripts.some(url => /azahar(_webgl2)?\.js$/.test(url)),
+            `SDL keydown listener must be on window, found: ${JSON.stringify(keyListenerScripts)}`);
+
         console.log('\n--- ALL INPUT UI TESTS PASSED! ---');
     } finally {
         await browser.close();
