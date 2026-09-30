@@ -190,3 +190,54 @@ It uploads the ROM through the browser's real file picker. A 256 MB `File`
 constructed inside the page competes with the 768 MB emulator heap and fails
 `FileReader`, which is what `tests/browser_regression.cjs` currently hits on
 this title.
+
+## 2026-09-30 emulation-thread parallelism
+
+Engine commits `2e80ec649`..`694ea43b0` on `azahar_emscripten`
+(`web-port-recovered`). Software renderer, headless Chrome, 16 logical CPUs,
+unprofiled 15-second windows. Each row pair ran back to back, pre-change build
+first, and the table shows the mean of two pairs.
+
+| Scene | Build | Game FPS | Guest speed | GPU ms/frame |
+|---|---|---:|---:|---:|
+| Mario 3D Land demo, `mario-moving` state | before | 16.4 | 28% | 50.6 |
+| | after | 32.9 | 55% | 21.3 |
+| Cubic Ninja title, 20 s boot warmup | before | 20.7 | 69% | 10.3 |
+| | after | 30.0 (cap) | 101% | 5.1 |
+| Animal Crossing boot, 20 s warmup | before | 26.3 | 44% | 29.4 |
+| | after | 41.7 | 70% | 15.1 |
+
+Boot-path scenes are time-based, so a faster build reaches a later scene in
+the window; use the save-state row for decisions.
+
+What changed, in order of impact:
+
+1. **Per-SVC clock reads removed on the web.** `PerfStats` timed every SVC
+   and IPC request with `steady_clock::now()`, a JavaScript import in WASM.
+   That was ~22% of the emulation thread. The web UI never reported those
+   spans.
+2. **Vertex shading on the worker pool.** For draws of at least 96 vertices
+   without a geometry shader, distinct vertices are shaded in 32-vertex tasks
+   through `RasterizerInterface::RunParallel`. Primitive assembly stays serial
+   and in order. The shader interpreter had been ~42% of the emulation thread.
+3. **One raster barrier per draw.** Triangles queue until `DrawTriangles()`.
+   Threads then claim slices of framebuffer-global row bands (aligned to the
+   3x3 sample blocks) and walk the whole draw in submission order, so pixel
+   ordering is unchanged. Before this, each triangle was its own fork/join,
+   and the main thread busy-waited (~26% in Animal Crossing).
+4. **Display transfers split into 16-row tasks** (~5% of the emulation thread).
+
+The calling thread takes work in every parallel region: a pool wait on the
+browser main thread is a spin loop. No threads were added; the existing
+six-worker pool cap stands.
+
+Remaining main-thread profile (Mario state): ARM interpreter ~24%, the main
+thread's share of parallel shading/raster ~48%, serial PICA bookkeeping
+(clipping, register writes, shader setup) ~20%. The next structural step would
+be an asynchronous GPU thread overlapping command lists with ARM execution.
+That changes when guests observe P3D/PPF interrupts relative to guest time, so
+it needs its own validation plan.
+
+`AZAHAR_SCENE_SCREENSHOT=path.png` makes `benchmark_browser.cjs` save the
+frame it sampled for the scene statistics, so two builds can be compared
+visually on the same state.
