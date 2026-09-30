@@ -183,6 +183,9 @@
             margin-bottom: 4px;
         }
         .speed-control input { width: 100%; accent-color: #e94560; }
+        .audio-toggle { display: flex; gap: 6px; align-items: flex-start; margin-top: 10px; cursor: pointer; }
+        .audio-toggle input { accent-color: #e94560; margin-top: 2px; }
+        #audio-status { margin-top: 8px; }
 
         #status {
             font-size: 0.8rem;
@@ -651,7 +654,6 @@
                 <button class="btn btn-secondary" id="btn-run" disabled>▶ Run / Resume</button>
                 <button class="btn btn-secondary" id="btn-stop" disabled>⏹ Stop</button>
                 <button type="button" class="btn btn-secondary" id="btn-keymap">⌨ Keymap</button>
-                <button type="button" class="btn btn-secondary" id="btn-sound" aria-pressed="false">🔊 Sound: On</button>
                 <div class="speed-control">
                     <label for="fast-forward">
                         <span>Fast-forward</span><output id="fast-forward-value">1x</output>
@@ -660,6 +662,32 @@
                            aria-label="Fast-forward multiplier">
                     <div class="mode-help">Target speed for cutscenes: 1x normal, up to 4x fast-forward. Actual speed depends on your device and the game.</div>
                 </div>
+            </div>
+
+            <div class="card" id="audio-card">
+                <h2>🔊 Audio</h2>
+                <button type="button" class="btn btn-secondary" id="btn-sound" aria-pressed="false">🔊 Sound: On</button>
+                <div class="speed-control">
+                    <label for="audio-volume">
+                        <span>Volume</span><output id="audio-volume-value">80%</output>
+                    </label>
+                    <input id="audio-volume" type="range" min="0" max="100" step="1" value="80"
+                           aria-label="Volume">
+                </div>
+                <label for="audio-latency" class="mode-help" style="display:block;margin-top:10px;margin-bottom:4px;">
+                    Audio buffer (pacing)
+                </label>
+                <select id="audio-latency" class="renderer-select" aria-label="Audio buffer">
+                    <option value="50">50 ms — lowest latency</option>
+                    <option value="100">100 ms — balanced</option>
+                    <option value="150">150 ms — fewer dropouts</option>
+                    <option value="200">200 ms — smoothest on slow machines</option>
+                </select>
+                <label class="mode-help audio-toggle">
+                    <input type="checkbox" id="audio-stretching" checked>
+                    Time stretching: when the game runs slow, slow the sound down with it instead of letting it crackle
+                </label>
+                <div id="audio-status" class="mode-help" aria-live="polite">Audio starts when a game loads.</div>
             </div>
 
             <div class="card" id="save-state-card">

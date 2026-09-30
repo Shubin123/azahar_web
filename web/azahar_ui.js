@@ -940,6 +940,8 @@ void main() { frag_color = vec4(1.0); }`);
             if (!wasmModule) await loadWasmModule();
             await yieldToBrowser();
             const result = wasmModule._azahar_init();
+            // Apply saved buffer and stretching choices before a title loads.
+            window.AzaharAudio?.bindModule(wasmModule);
             if (result !== 0) {
                 if (isWebGL2Artifact && result === -7) {
                     restartInSoftware('native WebGL2 context setup failed');
@@ -1251,20 +1253,55 @@ void main() { frag_color = vec4(1.0); }`);
 
     btnRun.addEventListener('click', startRunning);
 
-    if (btnSound && window.AzaharAudio) {
-        window.AzaharAudio.onChange(function (state) {
-            const icon = btnSound.textContent.startsWith('🔊') || btnSound.textContent.startsWith('🔇');
+    // ── Audio widget ─────────────────────────────────────────────
+    function setupAudioControls() {
+        const audio = window.AzaharAudio;
+        if (!audio || !btnSound) return;
+        const volumeInput = document.getElementById('audio-volume');
+        const volumeValue = document.getElementById('audio-volume-value');
+        const latencySelect = document.getElementById('audio-latency');
+        const stretchingInput = document.getElementById('audio-stretching');
+        const statusText = document.getElementById('audio-status');
+        const hasIcon = /^[🔊🔇]/u.test(btnSound.textContent);
+
+        function describe(state) {
+            if (!state.attached) return 'Audio starts when a game loads.';
+            if (state.muted) return 'Muted.';
+            if (!state.running) {
+                return 'Click or press a key on the page to start audio; browsers block sound until then.';
+            }
+            const rate = state.resampling ? ` · resampled to ${state.contextRate} Hz` : '';
+            return `Playing · ${Math.round(state.bufferedMs)} ms buffered · `
+                + `${state.underruns} dropout${state.underruns === 1 ? '' : 's'}${rate}`;
+        }
+
+        audio.onChange(function (state) {
             const label = state.muted ? 'Sound: Off' : 'Sound: On';
-            btnSound.textContent = icon ? `${state.muted ? '🔇' : '🔊'} ${label}` : label;
+            btnSound.textContent = hasIcon ? `${state.muted ? '🔇' : '🔊'} ${label}` : label;
             btnSound.setAttribute('aria-pressed', String(state.muted));
-            btnSound.title = state.attached && !state.running && !state.muted
-                ? 'Audio starts after you click or press a key on the page.'
-                : '';
+            const percent = Math.round(state.volume * 100);
+            if (volumeInput && document.activeElement !== volumeInput) volumeInput.value = String(percent);
+            if (volumeValue) volumeValue.textContent = `${percent}%`;
+            if (latencySelect) latencySelect.value = String(state.latencyMs);
+            if (stretchingInput) stretchingInput.checked = state.stretching;
+            if (statusText) statusText.textContent = describe(state);
         });
-        btnSound.addEventListener('click', function () {
-            window.AzaharAudio.setMuted(!window.AzaharAudio.isMuted());
+
+        btnSound.addEventListener('click', () => audio.setMuted(!audio.isMuted()));
+        volumeInput?.addEventListener('input', () => {
+            audio.setVolume(Number(volumeInput.value) / 100);
+            // Raising the volume is an obvious request to hear the game.
+            if (audio.isMuted() && Number(volumeInput.value) > 0) audio.setMuted(false);
         });
+        latencySelect?.addEventListener('change', () => audio.setLatencyMs(Number(latencySelect.value)));
+        stretchingInput?.addEventListener('change', () => audio.setStretching(stretchingInput.checked));
+        // Buffer level and dropouts change continuously while playing.
+        window.setInterval(() => {
+            if (statusText) statusText.textContent = describe(audio.getState());
+        }, 500);
     }
+
+    setupAudioControls();
 
     btnStop.addEventListener('click', function () {
         stopRunning();

@@ -62,7 +62,25 @@
                 <button id="btn-run" disabled>Run / Resume</button>
                 <button id="btn-stop" disabled>Stop</button>
                 <button type="button" id="btn-keymap">Keymap</button>
+            </section>
+            <section id="audio-card">
+                <h2>Audio</h2>
                 <button type="button" id="btn-sound" aria-pressed="false">Sound: On</button>
+                <p>
+                    <label for="audio-volume">Volume <output id="audio-volume-value">80%</output></label>
+                    <input id="audio-volume" type="range" min="0" max="100" step="1" value="80" aria-label="Volume">
+                </p>
+                <p>
+                    <label for="audio-latency">Audio buffer (pacing)</label>
+                    <select id="audio-latency" aria-label="Audio buffer">
+                        <option value="50">50 ms — lowest latency</option>
+                        <option value="100">100 ms — balanced</option>
+                        <option value="150">150 ms — fewer dropouts</option>
+                        <option value="200">200 ms — smoothest on slow machines</option>
+                    </select>
+                </p>
+                <label><input type="checkbox" id="audio-stretching" checked> Time stretching when the game runs slow</label>
+                <div id="audio-status" aria-live="polite">Audio starts when a game loads.</div>
             </section>
             <section>
                 <h2>Log</h2>
