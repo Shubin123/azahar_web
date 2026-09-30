@@ -14,6 +14,7 @@
  *   node tests/run.cjs --save-states        # Persistent UI save/load/reload/delete lifecycle
  *   node tests/run.cjs --autofallback       # Auto leaves a stalling accelerated renderer
  *   node tests/run.cjs --library            # Library catalog, cache, and replay flows
+ *   node tests/run.cjs --input              # Keymap menu and input bindings
  *   node tests/run.cjs --bench --no-state   # Benchmark from cold boot (slow)
  *   node tests/run.cjs --duration 30        # Custom benchmark duration
  *   node tests/run.cjs --warmup 10          # Custom warmup (short with save state)
@@ -34,7 +35,7 @@ const argVal = (k, d) => {
 
 const explicit = argFlag('--smoke') || argFlag('--bench') || argFlag('--regression') ||
   argFlag('--transition') || argFlag('--save-states') || argFlag('--autofallback') ||
-  argFlag('--library');
+  argFlag('--library') || argFlag('--input');
 const runSmoke = !explicit || argFlag('--smoke');
 const runBench = !explicit || argFlag('--bench');
 const runRegression = !explicit || argFlag('--regression');
@@ -42,6 +43,7 @@ const runTransition = argFlag('--transition');
 const runSaveStates = argFlag('--save-states');
 const runAutoFallback = argFlag('--autofallback');
 const runLibrary = argFlag('--library');
+const runInput = !explicit || argFlag('--input');
 const useState = !argFlag('--no-state');
 const artifact = argVal('--artifact', 'software');
 const duration = argVal('--duration', useState ? '15' : '15');
@@ -193,6 +195,14 @@ if (runLibrary) {
     run('Game Library UI', path.join(TESTS_DIR, 'game_library.test.cjs'), [], { timeout: 120000 });
     run('Game Library Replay (real emulator)',
       path.join(TESTS_DIR, 'library_replay.test.cjs'), [], { timeout: 900000 });
+  }
+}
+
+if (runInput) {
+  if (!cfg.chromePath) {
+    header('Input UI'); console.log('  Skipped: Chrome not found.'); skipped++;
+  } else {
+    run('Input UI', path.join(TESTS_DIR, 'input_ui.test.cjs'), [], { timeout: 120000 });
   }
 }
 
