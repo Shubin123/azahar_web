@@ -288,6 +288,8 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
                 if (high - Math.min(r, g, b) > 24) colorful++;
                 samples++;
             }
+            // Keep the sampled frame so the runner can save it on request.
+            globalThis.__azaharLastScenePng = sample.toDataURL('image/png');
             return {samples, nonBlackCoverage: nonBlack / samples,
                 colorfulCoverage: colorful / samples,
                 rendererNonblackPixels: Module._azahar_framebuffer_nonblack_pixels?.() ?? -1,
@@ -1034,6 +1036,16 @@ async function main() {
                     console.log(`   Scene: nonBlack ${(run.visual.nonBlackCoverage * 100).toFixed(1)}% `
                         + `colorful ${(run.visual.colorfulCoverage * 100).toFixed(1)}% `
                         + `(sampled ${run.visual.samples} px)`);
+                }
+                // Capture the live page, while emulation is still presenting,
+                // so renderer changes can be compared frame-for-frame.
+                if (process.env.AZAHAR_SCENE_SCREENSHOT) {
+                    const scenePath = REPEAT > 1
+                        ? process.env.AZAHAR_SCENE_SCREENSHOT.replace(/(\.png)?$/, `-${rep + 1}.png`)
+                        : process.env.AZAHAR_SCENE_SCREENSHOT;
+                    const dataUrl = await page.evaluate(() => globalThis.__azaharLastScenePng);
+                    fs.writeFileSync(scenePath, Buffer.from(dataUrl.split(',')[1], 'base64'));
+                    console.log(`   Scene screenshot: ${scenePath}`);
                 }
                 if (processCpuSamples.start && processCpuSamples.end) {
                     const wall = (processCpuSamples.end.at - processCpuSamples.start.at) / 1000;
