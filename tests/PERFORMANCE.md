@@ -241,3 +241,61 @@ it needs its own validation plan.
 `AZAHAR_SCENE_SCREENSHOT=path.png` makes `benchmark_browser.cjs` save the
 frame it sampled for the scene statistics, so two builds can be compared
 visually on the same state.
+
+## 2026-09-30 asynchronous GPU thread
+
+Engine commits `028a4b7dd`..`1839c21ba` on `azahar_emscripten`
+(`perf/macro-fps`). Software renderer, headless Chrome, 16 logical CPUs
+(8 physical), unprofiled 15-second windows. A background VM kept one core
+busy during these runs, so single runs varied by up to ±3 game FPS; the
+Mario row is the mean of five interleaved before/after pairs.
+
+| Scene | Build | Game FPS | Guest speed | GPU ms/frame |
+|---|---|---:|---:|---:|
+| Mario 3D Land demo, `mario-moving` state | before (`63b5dd429`) | 30.9 | 51% | 22.6 |
+| | after | 41.1 | 69% | 21.0 |
+| Animal Crossing boot, 20 s warmup | before | 43.8 | 72% | 14.5 |
+| | after | 60.9 | 103% | 13.4 |
+| Cubic Ninja title, 20 s warmup | before | 30.4 (cap) | 101% | 5.2 |
+| | after | 30.5 (cap) | 101% | 4.7 |
+
+What changed:
+
+1. **GSP commands run on a GPU thread.** The emulation thread (the
+   browser main thread) used to process every PICA command list itself,
+   about two thirds of its time. `GPU::Execute` now queues GSP commands to
+   a dedicated thread. The interrupts they raise are delivered to the guest
+   by the emulation thread at the start of each `RunLoop`. The emulation
+   thread waits for the GPU thread only when every guest thread is idle,
+   at VBlank, on GPU register access, and before saving state. The guest's
+   ARM code now overlaps GPU work instead of alternating with it.
+2. **Spinning fork-join pool.** Parallel shading and rasterization regions
+   used a mutex/condvar queue, so each region paid a futex wake per worker
+   plus one at the join. That cost matters now that the join is on a worker
+   thread, where waits really block. `SwThreadPool` publishes a region
+   through one atomic and spins briefly before sleeping.
+3. **Finer work items** (16-vertex shading tasks, three raster slices per
+   thread) cut load imbalance at the joins.
+
+The pthread pool has one more worker for the GPU thread. Hardware renderers
+still execute GSP commands synchronously.
+
+After the change, the GPU thread is the critical path in Mario (about 85%
+busy). The main thread waits for it roughly 60% of the time, almost all of
+that because the guest is waiting on a P3D interrupt. Letting the waiting
+main thread take raster/shading items was tried and made Animal Crossing
+slower (60.8 -> 49.9 FPS): on 8 physical cores it only adds contention.
+Clipping triangles in parallel chunks at draw time made no measurable
+difference, since most draws are small.
+
+Remaining GPU-thread profile (Mario state): vertex shader interpreter ~22%
+(plus ~16% on each worker), its share of rasterization ~22%, triangle
+clipping/setup ~9%, PICA register writes ~5%, idle ~13%.
+
+`AZAHAR_WORKER_PROFILE=1` makes `benchmark_browser.cjs` also write one
+`.worker<N>.cpuprofile` per pthread next to `AZAHAR_CPU_PROFILE`. The GPU
+thread's profile is the one with `ProcessCmdList` under it.
+
+`tests/title_transition_regression.cjs` fails at the title touch step with
+both the old and new engine builds, so it is not a regression from this
+change.

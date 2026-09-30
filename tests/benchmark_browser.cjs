@@ -742,11 +742,31 @@ async function main() {
             CPU_PROFILE_PATH.replace(/(\.cpuprofile)?$/, `.run${profileNumber}.cpuprofile`);
         fs.writeFileSync(output, JSON.stringify(profile), 'utf-8');
         console.log(`   Measured gameplay CPU profile: ${output}`);
+        for (const [index, session] of workerProfilers.splice(0).entries()) {
+            try {
+                const {profile: workerProfile} = await session.send('Profiler.stop');
+                const workerOutput = output.replace(/(\.cpuprofile)?$/, `.worker${index}.cpuprofile`);
+                fs.writeFileSync(workerOutput, JSON.stringify(workerProfile), 'utf-8');
+            } catch (_) {}
+        }
     };
+    // AZAHAR_WORKER_PROFILE=1 also profiles every pthread worker, written
+    // next to the main profile as <name>.worker<N>.cpuprofile.
+    const workerProfilers = [];
     if (profiler) {
         await page.exposeFunction('azaharProfileStart', async () => {
             if (profilerRunning) throw new Error('CPU profiler already running');
             await profiler.send('Profiler.start');
+            if (process.env.AZAHAR_WORKER_PROFILE) {
+                for (const worker of page.workers()) {
+                    try {
+                        await worker.client.send('Profiler.enable');
+                        await worker.client.send('Profiler.setSamplingInterval', {interval: 100});
+                        await worker.client.send('Profiler.start');
+                        workerProfilers.push(worker.client);
+                    } catch (_) {}
+                }
+            }
             profilerRunning = true;
             profileNumber++;
         });
