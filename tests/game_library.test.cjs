@@ -307,12 +307,10 @@ async function runTests() {
         assert.strictEqual(loadedArchiveRom.name, 'Sample eShop title.cia', 'RAR play must pass the extracted CIA filename to Azahar');
         assert.strictEqual(loadedArchiveRom.length, 7, 'RAR play must pass extracted CIA bytes to Azahar');
         assert.strictEqual(loadedArchiveRom.shouldAutoStart, true, 'RAR play should auto-start the extracted title');
+        // Played titles persist on disk in the Origin Private File System.
         await page.waitForFunction(async () => {
-            if (!window.caches) return false;
-            const names = await window.caches.keys();
-            if (!names.includes('azahar-playable-library-v1')) return false;
-            const cache = await window.caches.open('azahar-playable-library-v1');
-            return (await cache.keys()).length === 1;
+            const entries = await window.AzaharRomFS.store.list();
+            return entries.length === 1 && entries[0].name === 'Sample eShop title.cia';
         }, { timeout: 5000 });
 
         await page.evaluate(() => { window.__loadedArchiveRom = null; });

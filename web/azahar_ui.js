@@ -747,6 +747,10 @@ void main() { frag_color = vec4(1.0); }`);
         return true;
     }
 
+    function romSize(data) {
+        return data instanceof Blob ? data.size : data.length;
+    }
+
     function memfsRomPath(filename) {
         // Loader::GetLoader uses an extension as a fallback when a container
         // (notably CIA) cannot be identified from its header. Keep only the
@@ -754,30 +758,6 @@ void main() { frag_color = vec4(1.0); }`);
         // need not become filesystem paths in MEMFS.
         const match = /\.[a-z0-9]+$/i.exec(filename);
         return `/rom${match ? match[0].toLowerCase() : '.bin'}`;
-    }
-
-    // Chrome's Blob/FileReader read pipeline fails on a single whole-file
-    // read somewhere around 2.1-2.15 GB -- verified against a real 2 GiB
-    // decrypted title (not a clean power-of-two boundary, so it's an
-    // internal cap in Blink's own file-reading path, not a fixed constant
-    // we can special-case, and not this machine's available memory: the
-    // WASM heap already holds > 2 GB fine via MAXIMUM_MEMORY). Reading in
-    // bounded chunks keeps every individual Blob read well under that
-    // ceiling while still producing one contiguous Uint8Array for
-    // FS.writeFile, and doubles as natural progress reporting.
-    const ROM_READ_CHUNK_BYTES = 256 * 1024 * 1024;
-
-    async function readFileInChunks(file) {
-        const bytes = new Uint8Array(file.size);
-        for (let offset = 0; offset < file.size; offset += ROM_READ_CHUNK_BYTES) {
-            const end = Math.min(offset + ROM_READ_CHUNK_BYTES, file.size);
-            const chunk = await file.slice(offset, end).arrayBuffer();
-            bytes.set(new Uint8Array(chunk), offset);
-            const percent = Math.round(end / file.size * 100);
-            showProgress(percent);
-            setStatus(`Reading ROM... ${percent}%`);
-        }
-        return bytes;
     }
 
     // ── File picker ───────────────────────────────────────────────
@@ -790,9 +770,9 @@ void main() { frag_color = vec4(1.0); }`);
         fileLabel.textContent = `📄 ${romName} (${(file.size / 1024 / 1024).toFixed(1)} MB)`;
 
         btnLoad.disabled = true;
-        showProgress(0);
-        setStatus('Reading ROM... 0%');
-        readFileInChunks(file).then(async function (bytes) {
+        // The File is disk-backed; it is mounted lazily at load time rather
+        // than copied into memory, so multi-GiB images need no browser heap.
+        Promise.resolve(file).then(async function (bytes) {
             if (coreUsed) {
                 // Hand the picked file to a fresh session through the local
                 // game cache rather than reloading into the used core.
@@ -805,8 +785,7 @@ void main() { frag_color = vec4(1.0); }`);
             }
             romData = bytes;
             romMounted = false;
-            log(`File loaded: ${romName} (${romData.length} bytes)`);
-            showProgress(100);
+            log(`File selected: ${romName} (${romData.size} bytes)`);
             setStatus(initialized ? `ROM ready: ${romName}` :
                 `ROM ready; starting emulator...`, 'ok');
             btnLoad.disabled = !initialized;
@@ -994,19 +973,23 @@ void main() { frag_color = vec4(1.0); }`);
             btnLoad.disabled = true;
             await yieldToBrowser();
 
-            // Write ROM to MEMFS so the C++ side can read it. Preserve the
+            // Expose the ROM to the C++ side at romPath. Preserve the
             // selected extension because the native loader uses it as a
-            // fallback for encrypted CIA containers.
-            // A retail .3ds image can be 1 GiB.  The default MEMFS write
-            // copies the FileReader buffer, briefly keeping two full browser
-            // heap copies alive before the core begins loading it.  Let
-            // MEMFS take ownership instead; the selected file can be chosen
-            // again if the user needs to retry with another image.
+            // fallback for encrypted CIA containers. Retail images reach
+            // 2-4 GiB, more than one ArrayBuffer can hold next to the
+            // emulator heap, so Files and Blobs are mounted lazily and read
+            // on demand. In-memory bytes (RAR extraction) go to MEMFS, which
+            // takes ownership to avoid a second copy.
             if (romData) {
-                wasmModule.FS.writeFile(romPath, romData, {canOwn: true});
+                if (romData instanceof Blob && window.AzaharRomFS) {
+                    await window.AzaharRomFS.mount(wasmModule.FS, romPath, romData);
+                    log(`ROM mounted lazily: ${romPath} (${romData.size} bytes)`);
+                } else {
+                    wasmModule.FS.writeFile(romPath, romData, {canOwn: true});
+                    log(`ROM written to MEMFS: ${romPath}`);
+                }
                 romData = null;
                 romMounted = true;
-                log(`ROM written to MEMFS: ${romPath}`);
             }
 
             setStatus('Opening game...');
@@ -1293,6 +1276,7 @@ void main() { frag_color = vec4(1.0); }`);
         }
     }
 
+    // `bytes` is a Uint8Array, or a Blob/File that is mounted lazily.
     async function loadRomBytes(bytes, name, shouldAutoStart = true) {
         if (coreUsed) {
             throw new Error('A title was already loaded in this session; start a fresh session first.');
@@ -1310,11 +1294,11 @@ void main() { frag_color = vec4(1.0); }`);
         romName = name;
         romPath = memfsRomPath(name);
         if (fileLabel) {
-            fileLabel.textContent = `📄 ${romName} (${(bytes.length / 1024 / 1024).toFixed(1)} MB)`;
+            fileLabel.textContent = `📄 ${romName} (${(romSize(bytes) / 1024 / 1024).toFixed(1)} MB)`;
         }
         romData = bytes;
         romMounted = false;
-        log(`Loading ROM: ${romName} (${bytes.length} bytes)`);
+        log(`Loading ROM: ${romName} (${romSize(bytes)} bytes)`);
         await loadAndRunRom();
         if (shouldAutoStart && romLoaded && !running) {
             startRunning();

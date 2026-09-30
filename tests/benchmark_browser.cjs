@@ -455,23 +455,37 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
                 throw new Error('Native WebGL2 initialization did not claim the production canvas');
             }
 
-            // Stream directly into MEMFS so large library entries do not need
-            // a second whole-ROM buffer in Node or the browser main thread.
-            const romFile = Module.FS.open(memfsPath, 'w+');
-            try {
+            if (window.AzaharRomFS?.store.available()) {
+                // Mount the ROM lazily from disk, as the production UI does:
+                // a 2 GiB image fits neither one MEMFS ArrayBuffer nor
+                // Chrome's in-memory blob storage.
+                const writer = await window.AzaharRomFS.store.createWriter('benchmark-rom');
                 while (true) {
                     const {done, value} = await romReader.read();
                     if (done) break;
                     romBytesReceived += value.byteLength;
-                    let offset = 0;
-                    while (offset < value.byteLength) {
-                        offset += Module.FS.write(
-                            romFile, value, offset, value.byteLength - offset,
-                            romBytesReceived - value.byteLength + offset);
-                    }
+                    await writer.write(value);
                 }
-            } finally {
-                Module.FS.close(romFile);
+                await window.AzaharRomFS.mount(Module.FS, memfsPath, await writer.close());
+            } else {
+                // Stream directly into MEMFS so large library entries do not need
+                // a second whole-ROM buffer in Node or the browser main thread.
+                const romFile = Module.FS.open(memfsPath, 'w+');
+                try {
+                    while (true) {
+                        const {done, value} = await romReader.read();
+                        if (done) break;
+                        romBytesReceived += value.byteLength;
+                        let offset = 0;
+                        while (offset < value.byteLength) {
+                            offset += Module.FS.write(
+                                romFile, value, offset, value.byteLength - offset,
+                                romBytesReceived - value.byteLength + offset);
+                        }
+                    }
+                } finally {
+                    Module.FS.close(romFile);
+                }
             }
             const heapAfterWrite = Module.HEAPU8 ? Module.HEAPU8.length : 0;
             const romSizeInMemfs = Module.FS.stat(memfsPath).size;
