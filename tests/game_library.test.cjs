@@ -398,6 +398,28 @@ async function runTests() {
         await page.waitForFunction(() => window.__loadedArchiveRom !== null, { timeout: 10000 });
         assert.strictEqual(await page.evaluate(() => window.__archiveDownloadCount), 0,
             'Playing from the ready list must not download the archive again');
+        // Once the core has loaded a title it cannot load another in place;
+        // both play buttons must hand over to a fresh session instead.
+        await page.evaluate(() => {
+            window.__restartUrls = [];
+            window.__loadedArchiveRom = null;
+            window.AzaharUI.needsFreshSession = () => true;
+            window.AzaharUI.restartWithPlayable = url => window.__restartUrls.push(url);
+            document.querySelector('#library-ready-list button[data-action="play-ready"]').click();
+            [...document.querySelectorAll('#library-list tr')]
+                .find(row => row.querySelector('a[download]')?.href.endsWith('.cia'))
+                .querySelector('.play-btn').click();
+        });
+        await page.waitForFunction(() => window.__restartUrls.length === 2, { timeout: 5000 });
+        assert.deepStrictEqual(await page.evaluate(() => window.__restartUrls), [
+            'https://archive.org/download/3ds-cia-files/0023%20-%20Picross%20e%20(Japan)%20(eShop).rar',
+            'https://archive.org/download/3ds-cia-files/Homebrew%20Demo%20(USA).cia'
+        ], 'Follow-up plays must restart with the requested title');
+        assert.strictEqual(await page.evaluate(() => window.__loadedArchiveRom), null,
+            'A used core must never receive a second ROM in place');
+        assert.strictEqual(await page.evaluate(() => window.__archiveDownloadCount), 0,
+            'The handover itself must not download the game');
+
         await page.click('#library-ready-list button[data-action="remove-ready"]');
         await page.waitForFunction(() => document.getElementById('library-ready').hidden, { timeout: 5000 });
 

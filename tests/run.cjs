@@ -13,6 +13,7 @@
  *   node tests/run.cjs --transition         # Cold boot, touch title, sustain gameplay
  *   node tests/run.cjs --save-states        # Persistent UI save/load/reload/delete lifecycle
  *   node tests/run.cjs --autofallback       # Auto leaves a stalling accelerated renderer
+ *   node tests/run.cjs --library            # Library catalog, cache, and replay flows
  *   node tests/run.cjs --bench --no-state   # Benchmark from cold boot (slow)
  *   node tests/run.cjs --duration 30        # Custom benchmark duration
  *   node tests/run.cjs --warmup 10          # Custom warmup (short with save state)
@@ -32,13 +33,15 @@ const argVal = (k, d) => {
 };
 
 const explicit = argFlag('--smoke') || argFlag('--bench') || argFlag('--regression') ||
-  argFlag('--transition') || argFlag('--save-states') || argFlag('--autofallback');
+  argFlag('--transition') || argFlag('--save-states') || argFlag('--autofallback') ||
+  argFlag('--library');
 const runSmoke = !explicit || argFlag('--smoke');
 const runBench = !explicit || argFlag('--bench');
 const runRegression = !explicit || argFlag('--regression');
 const runTransition = argFlag('--transition');
 const runSaveStates = argFlag('--save-states');
 const runAutoFallback = argFlag('--autofallback');
+const runLibrary = argFlag('--library');
 const useState = !argFlag('--no-state');
 const artifact = argVal('--artifact', 'software');
 const duration = argVal('--duration', useState ? '15' : '15');
@@ -178,6 +181,18 @@ if (runAutoFallback) {
     run('Renderer Auto-fallback',
       path.join(TESTS_DIR, 'renderer_autofallback.cjs'), ['--timeout-seconds', '300'],
       { timeout: 900000 });
+  }
+}
+
+// Library UI: mocked catalog/cache checks, then real-emulator replays that
+// load a second title through the fresh-session handover.
+if (runLibrary) {
+  if (!cfg.chromePath) {
+    header('Game Library'); console.log('  Skipped: Chrome not found.'); skipped++;
+  } else {
+    run('Game Library UI', path.join(TESTS_DIR, 'game_library.test.cjs'), [], { timeout: 120000 });
+    run('Game Library Replay (real emulator)',
+      path.join(TESTS_DIR, 'library_replay.test.cjs'), [], { timeout: 900000 });
   }
 }
 

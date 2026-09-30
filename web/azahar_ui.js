@@ -107,8 +107,13 @@
     let romName = '';
     let romPath = '/rom.bin';
     let initialized = false;
-    let initializing = false;
+    let initializing = null;
     let romLoaded = false;
+    // The native core cannot load a second title into the same WebAssembly
+    // instance: a repeated azahar_load_rom traps ("unreachable" / "memory
+    // access out of bounds"). Once a load was attempted, another title needs
+    // a fresh page session.
+    let coreUsed = false;
     let running = false;
     let runAnimationFrame = null;
     let frameCount = 0;
@@ -787,7 +792,17 @@ void main() { frag_color = vec4(1.0); }`);
         btnLoad.disabled = true;
         showProgress(0);
         setStatus('Reading ROM... 0%');
-        readFileInChunks(file).then(function (bytes) {
+        readFileInChunks(file).then(async function (bytes) {
+            if (coreUsed) {
+                // Hand the picked file to a fresh session through the local
+                // game cache rather than reloading into the used core.
+                if (window.AzaharLibrary?.playInFreshSession) {
+                    await window.AzaharLibrary.playInFreshSession(
+                        `local-file:${file.name}:${file.size}:${file.lastModified}`, bytes, file.name, file.name);
+                    return;
+                }
+                throw new Error('Reload the page to load another game.');
+            }
             romData = bytes;
             romMounted = false;
             log(`File loaded: ${romName} (${romData.length} bytes)`);
@@ -913,9 +928,17 @@ void main() { frag_color = vec4(1.0); }`);
     }
 
     // ── Initialize Emulator ──────────────────────────────────────
-    async function initializeEmulator() {
-        if (initialized || initializing) return;
-        initializing = true;
+    function initializeEmulator() {
+        if (initialized) return Promise.resolve();
+        // Concurrent callers (auto-init and a library play request) must all
+        // wait for the same initialization instead of racing past it.
+        if (!initializing) {
+            initializing = runInitializeEmulator().finally(() => { initializing = null; });
+        }
+        return initializing;
+    }
+
+    async function runInitializeEmulator() {
         btnInit.disabled = true;
         showProgress(null);
         setStatus('Initializing emulator...');
@@ -946,8 +969,6 @@ void main() { frag_color = vec4(1.0); }`);
             setStatus(`Init error: ${err.message}`, 'error');
             log(`ERROR: ${err.message}`);
             btnInit.disabled = false;
-        } finally {
-            initializing = false;
         }
     }
 
@@ -959,6 +980,11 @@ void main() { frag_color = vec4(1.0); }`);
     async function loadAndRunRom() {
         if (!initialized || (!romData && !romMounted)) {
             setStatus('Initialize emulator and select a ROM first.', 'error');
+            return;
+        }
+        if (coreUsed && romData) {
+            setStatus('Another title was already loaded. Reload the page to start a new game.', 'error');
+            btnLoad.disabled = true;
             return;
         }
 
@@ -985,6 +1011,7 @@ void main() { frag_color = vec4(1.0); }`);
 
             setStatus('Opening game...');
             await yieldToBrowser();
+            coreUsed = true;
             const result = wasmModule.ccall('azahar_load_rom', 'number', ['string'], [romPath]);
             if (result === 0) {
                 romLoaded = true;
@@ -1267,9 +1294,15 @@ void main() { frag_color = vec4(1.0); }`);
     }
 
     async function loadRomBytes(bytes, name, shouldAutoStart = true) {
+        if (coreUsed) {
+            throw new Error('A title was already loaded in this session; start a fresh session first.');
+        }
         if (!initialized) {
             setStatus('Initializing emulator for ROM...', 'ok');
             await initializeEmulator();
+        }
+        if (!initialized) {
+            throw new Error('The emulator could not be initialized.');
         }
         if (running) {
             stopRunning();
@@ -1286,6 +1319,18 @@ void main() { frag_color = vec4(1.0); }`);
         if (shouldAutoStart && romLoaded && !running) {
             startRunning();
         }
+        return romLoaded;
+    }
+
+    // Start a new page session that plays `sourceUrl` from the library's
+    // local cache once the emulator is ready.
+    function restartWithPlayable(sourceUrl) {
+        if (running) stopRunning();
+        setStatus('Starting a fresh emulator session for the next game...', 'ok');
+        showProgress(null);
+        const destination = new URL(location.href);
+        destination.searchParams.set('play', sourceUrl);
+        location.assign(destination.toString());
     }
 
     // ── Public API for Shared Library & External Integration ─────
@@ -1294,6 +1339,8 @@ void main() { frag_color = vec4(1.0); }`);
         initializeEmulator,
         isInitialized: () => initialized,
         isRunning: () => running,
+        needsFreshSession: () => coreUsed,
+        restartWithPlayable,
         stopRunning,
         startRunning,
         setStatus,

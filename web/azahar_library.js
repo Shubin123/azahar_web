@@ -219,16 +219,18 @@
         }
     }
 
+    // Resolves true once the playable copy is in CacheStorage.
     function rememberPlayable(url, bytes, name, title) {
         cachedPlayableDownload = { url, bytes, name, title };
         void renderReadyList();
         // Keep a browser-managed copy so played titles are available after a
         // reload. Storage quota failures leave the in-memory replay cache intact.
-        void (async () => {
+        return (async () => {
             try {
                 const request = await getPlayableCacheRequest(url);
-                if (!request) return;
+                if (!request) return false;
                 const cache = await window.caches.open(PLAYABLE_CACHE_NAME);
+                if (await cache.match(request)) return true;
                 await cache.put(request, new Response(bytes, {
                     headers: {
                         'Content-Type': 'application/octet-stream',
@@ -239,10 +241,67 @@
                     }
                 }));
                 void renderReadyList();
+                return true;
             } catch (error) {
                 console.warn('Could not persist the played game in the local cache:', error);
+                return false;
             }
         })();
+    }
+
+    async function isPlayablePersisted(url) {
+        try {
+            const request = await getPlayableCacheRequest(url);
+            if (!request) return false;
+            return Boolean(await (await window.caches.open(PLAYABLE_CACHE_NAME)).match(request));
+        } catch (_) {
+            return false;
+        }
+    }
+
+    function isLocalFileUrl(url) {
+        return String(url || '').startsWith('local-file:');
+    }
+
+    // The native core cannot load a second title into a used WebAssembly
+    // instance, so the next game starts in a fresh page session which picks
+    // it up from the local cache (or downloads it again) via ?play=.
+    async function playInFreshSession(url, bytes = null, name = '', title = '') {
+        if (bytes) await rememberPlayable(url, bytes, name, title);
+        if (isLocalFileUrl(url) && !(await isPlayablePersisted(url))) {
+            throw new Error('This game is too large for browser storage. Reload the page and choose it again.');
+        }
+        window.AzaharUI.restartWithPlayable(url);
+    }
+
+    function clearPendingPlay() {
+        const current = new URL(window.location.href);
+        if (!current.searchParams.has('play')) return;
+        current.searchParams.delete('play');
+        window.history.replaceState(window.history.state, '', current.toString());
+    }
+
+    function fallbackGameForUrl(url, title) {
+        const name = isLocalFileUrl(url)
+            ? url.slice('local-file:'.length).replace(/:\d+:\d+$/, '')
+            : decodeURIComponent(url.split('/').pop() || '');
+        return {
+            id: `ready:${url}`,
+            title: title || name.replace(/\.[^.]+$/, '') || url,
+            romName: name,
+            downloadUrl: url,
+            size: 0,
+            extractBeforePlay: /\.rar$/i.test(name)
+        };
+    }
+
+    async function resumePendingPlay(url) {
+        const sourceId = Object.keys(LIBRARY_SOURCES)
+            .find(id => url.startsWith(LIBRARY_SOURCES[id].baseUrl)) || currentSourceId;
+        await loadCatalog(sourceId);
+        const cached = (await listReadyPlayables()).find(entry => entry.url === url);
+        const game = allGames.find(g => g.downloadUrl === url) || fallbackGameForUrl(url, cached?.title);
+        await streamRom(game);
     }
 
     function parseArchiveGame(file, index, source) {
@@ -482,6 +541,7 @@
             throw new Error('Azahar UI is not ready to accept ROM bytes.');
         }
         await window.AzaharUI.loadRomBytes(bytes, name, true);
+        clearPendingPlay();
         const canvas = window.AzaharUI.getCanvas ? window.AzaharUI.getCanvas() : document.getElementById('canvas');
         if (canvas) canvas.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
@@ -489,6 +549,15 @@
     async function streamRom(game) {
         if (activeDownload) {
             cancelDownload();
+        }
+        if (window.AzaharUI?.needsFreshSession?.()) {
+            try {
+                await playInFreshSession(game.downloadUrl);
+            } catch (error) {
+                window.AzaharUI.setStatus(error.message, 'error');
+                alert(error.message);
+            }
+            return;
         }
 
         const controller = new AbortController();
@@ -535,6 +604,9 @@
                 }
                 await loadPlayableBytes(cachedPlayable.bytes, cachedPlayable.name);
                 return;
+            }
+            if (isLocalFileUrl(directUrl)) {
+                throw new Error('This local game is no longer cached. Choose the file again.');
             }
 
             if (!response) {
@@ -645,7 +717,7 @@
                 }
             }
 
-            rememberPlayable(directUrl, playableBytes, playableName, game.title);
+            void rememberPlayable(directUrl, playableBytes, playableName, game.title);
 
             if (controller.signal.aborted) throw new DOMException('The operation was aborted', 'AbortError');
 
@@ -653,6 +725,7 @@
             await loadPlayableBytes(playableBytes, playableName);
 
         } catch (err) {
+            clearPendingPlay();
             if (controller.signal.aborted) {
                 if (window.AzaharUI) {
                     window.AzaharUI.setStatus('Download cancelled.', '');
@@ -906,19 +979,16 @@
                     void forgetPlayable(url);
                     return;
                 }
-                const game = allGames.find(g => g.downloadUrl === url) || {
-                    id: `ready:${url}`,
-                    title: btn.closest('li')?.querySelector('.game-name')?.textContent || url,
-                    romName: '',
-                    downloadUrl: url,
-                    size: 0
-                };
+                const game = allGames.find(g => g.downloadUrl === url) ||
+                    fallbackGameForUrl(url, btn.closest('li')?.querySelector('.game-name')?.textContent);
                 void streamRom(game);
             });
         }
 
-        // Load catalog
-        void loadCatalog();
+        // Load catalog, then resume a game handed over from a previous session.
+        const pendingPlay = new URLSearchParams(window.location.search).get('play');
+        if (pendingPlay) void resumePendingPlay(pendingPlay);
+        else void loadCatalog();
         void renderReadyList();
     }
 
@@ -928,6 +998,7 @@
         loadCatalog,
         streamRom,
         cancelDownload,
+        playInFreshSession,
         getAllGames: () => allGames,
         listReadyPlayables,
         getFilteredGames: () => filteredGames
