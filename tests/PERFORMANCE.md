@@ -299,3 +299,45 @@ thread's profile is the one with `ProcessCmdList` under it.
 `tests/title_transition_regression.cjs` fails at the title touch step with
 both the old and new engine builds, so it is not a regression from this
 change.
+
+## 2026-09-30 Pokemon X opening and stripe detection
+
+`tests/pokemon_x_regression.cjs` (`node tests/run.cjs --pokemon`) cold-boots
+Pokemon X in the production UI, confirms the language menu, presses A
+through the title and the opening (Professor Sycamore's 3D scene), and
+samples the canvas every 20 s from 150 s. The test needs a decrypted image
+in `test_games/` (or `AZAHAR_POKEMON_X_ROM`) and takes about five minutes.
+It fails on:
+
+- **Stripes.** The top screen's ratio of horizontal to vertical neighbour
+  differences ("stripe anisotropy") is 0.5-1.0 for rendered scenes and
+  measured 3.4-3.5 with the WebGL2 bug below. The threshold is 2.5
+  (`AZAHAR_MAX_STRIPE_ANISOTROPY`). `benchmark_browser.cjs` now reports
+  the same metric on its sampled scene and fails the run above it.
+- **Run errors**, a stopped emulator, or two consecutive samples at
+  0 game FPS.
+
+Findings that motivated it, engine commits `63424a386` and `f2d516830`:
+
+1. **WebGL2 stripes in 3D scenes.** Pokemon X/Y sample the D24S8 depth
+   buffer as an RGBA8 texture for their outlines. WebGL2 lacks texture
+   views and `glCopyImageSubData`, so the conversion failed. The cache then
+   fell back to downloading depth, which WebGL2's `readPixels` also
+   rejects, and the colour texture held stale memory. The engine now
+   samples depth directly and builds the stencil byte with stencil-tested
+   passes. The same fallback crashed with "memory access out of bounds" or
+   "unreachable" at the title-to-opening transition in 5 of 8 runs before;
+   none of 4 runs crashed after.
+2. **Engine logs were silently dropped on the web** and could deadlock any
+   thread after 4096 entries. They now appear in the UI log panel.
+
+Known issue: on the **software** renderer the opening freezes right after
+"DllIntro" loads (the guest keeps running at 0 game FPS; old builds too).
+A command list chained from a 0x20-byte kick list ends in a sub-list that
+is all zeros, so its P3D interrupt never arrives and the game waits forever.
+WebGL2 runs the same chain correctly. `--artifact software --pokemon`
+reproduces it.
+
+`tests/capture_fixture.cjs` takes `AZAHAR_RENDERER`, `AZAHAR_FIXTURE_SPEED`
+(starting fast-forward) and `AZAHAR_WEB_DIR`, and has a `log` command that
+returns the UI log.

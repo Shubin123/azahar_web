@@ -1,6 +1,6 @@
 'use strict';
 // Local CDP fixture session. Start with `serve ROM`; use `shot`, `key KEY MS`,
-// `touch X Y` (fractions of canvas), `save SCENE`, and `close` from another shell.
+// `touch X Y` (fractions of canvas), `save SCENE`, `log`, and `close` from another shell.
 // Captures stay under ignored tmp_test; never publish game data.
 const fs = require('node:fs');
 const path = require('node:path');
@@ -27,7 +27,7 @@ async function main() {
     const directory = path.join(cfg.ROOT, 'tmp_test', 'fixtures',
         path.basename(rom, path.extname(rom)).replace(/[^a-zA-Z0-9_-]/g, '_'));
     fs.mkdirSync(directory, { recursive: true });
-    const web = createWebServer(cfg.webDir);
+    const web = createWebServer(process.env.AZAHAR_WEB_DIR || cfg.webDir);
     await new Promise(resolve => web.listen(0, '127.0.0.1', resolve));
     const puppeteer = require(process.env.AZAHAR_PUPPETEER_MODULE || 'puppeteer-core');
     const browser = await puppeteer.launch({ executablePath: cfg.chromePath,
@@ -94,6 +94,9 @@ async function main() {
                     capturedAt: new Date().toISOString(), errors };
                 fs.writeFileSync(path.join(directory, `${scene}.json`), JSON.stringify(result, null, 2));
                 await page.click('#btn-run');
+            } else if (action === 'log') {
+                result = { log: await page.$eval('#log', element => element.textContent.slice(-4000)),
+                    status: await page.$eval('#status', element => element.textContent), errors };
             } else if (action === 'close') {
                 await browser.close(); web.close(); control.close();
                 result = { closed: true };
@@ -104,7 +107,11 @@ async function main() {
         } catch (error) { res.writeHead(500); res.end(JSON.stringify({ error: String(error) })); }
         finally { busy = false; }
     });
-    await page.goto(`http://127.0.0.1:${web.address().port}/?speed=4`, { waitUntil: 'networkidle0' });
+    // AZAHAR_RENDERER pins the renderer; Auto may reload the page to switch.
+    // AZAHAR_FIXTURE_SPEED sets the starting fast-forward (default 4x).
+    const renderer = process.env.AZAHAR_RENDERER ?
+        `&renderer=${encodeURIComponent(process.env.AZAHAR_RENDERER)}` : '';
+    await page.goto(`http://127.0.0.1:${web.address().port}/?speed=${process.env.AZAHAR_FIXTURE_SPEED || 4}${renderer}`, { waitUntil: 'networkidle0' });
     await page.waitForFunction(() => document.querySelector('#status').textContent.includes('Emulator ready'),
         { timeout: 120000 });
     await (await page.$('#rom-file')).uploadFile(rom);
