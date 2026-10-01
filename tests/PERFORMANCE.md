@@ -299,3 +299,88 @@ thread's profile is the one with `ProcessCmdList` under it.
 `tests/title_transition_regression.cjs` fails at the title touch step with
 both the old and new engine builds, so it is not a regression from this
 change.
+
+## 2026-09-30 Pokemon X opening and stripe detection
+
+`tests/pokemon_x_regression.cjs` (`node tests/run.cjs --pokemon`) cold-boots
+Pokemon X in the production UI, confirms the language menu, presses A
+through the title and the opening (Professor Sycamore's 3D scene), and
+samples the canvas every 20 s from 150 s. The test needs a decrypted image
+in `test_games/` (or `AZAHAR_POKEMON_X_ROM`) and takes about five minutes.
+It fails on:
+
+- **Stripes.** The top screen's ratio of horizontal to vertical neighbour
+  differences ("stripe anisotropy") is 0.5-1.0 for rendered scenes and
+  measured 3.4-3.5 with the WebGL2 bug below. The threshold is 2.5
+  (`AZAHAR_MAX_STRIPE_ANISOTROPY`). `benchmark_browser.cjs` now reports
+  the same metric on its sampled scene and fails the run above it.
+- **Run errors**, a stopped emulator, or two consecutive samples at
+  0 game FPS.
+
+Findings that motivated it, engine commits `63424a386` and `f2d516830`:
+
+1. **WebGL2 stripes in 3D scenes.** Pokemon X/Y sample the D24S8 depth
+   buffer as an RGBA8 texture for their outlines. WebGL2 lacks texture
+   views and `glCopyImageSubData`, so the conversion failed. The cache then
+   fell back to downloading depth, which WebGL2's `readPixels` also
+   rejects, and the colour texture held stale memory. The engine now
+   samples depth directly and builds the stencil byte with stencil-tested
+   passes. The same fallback crashed with "memory access out of bounds" or
+   "unreachable" at the title-to-opening transition in 5 of 8 runs before;
+   none of 4 runs crashed after.
+2. **Engine logs were silently dropped on the web** and could deadlock any
+   thread after 4096 entries. They now appear in the UI log panel.
+
+Known issue: on the **software** renderer the opening freezes right after
+"DllIntro" loads (the guest keeps running at 0 game FPS; old builds too).
+A command list chained from a 0x20-byte kick list ends in a sub-list that
+is all zeros, so its P3D interrupt never arrives and the game waits forever.
+WebGL2 runs the same chain correctly. `--artifact software --pokemon`
+reproduces it.
+
+`tests/capture_fixture.cjs` takes `AZAHAR_RENDERER`, `AZAHAR_FIXTURE_SPEED`
+(starting fast-forward) and `AZAHAR_WEB_DIR`, and has a `log` command that
+returns the UI log.
+
+## 2026-09-30 texture and scene rendering fixes
+
+Engine commits `6e05a528d`..`7a575bd97` on `azahar_emscripten`
+(`fix/webgl2-textures`). Found by booting every local title on both
+renderers. WebGL2 ran on the host GPU (`--use-angle=vulkan
+--enable-features=Vulkan --ignore-gpu-blocklist --enable-gpu`). Under
+SwiftShader it ran at 1-2% speed and never reached the scenes.
+
+**WebGL2: lookup tables were never uploaded.** WebGL2 has no buffer
+textures, so the lighting, fog and procedural-texture LUTs are staged in a
+CPU buffer and read from 2D textures, but nothing allocated or filled
+those textures. Every LUT read returned zero: fogged geometry became the
+fog colour (Super Mario 3D Land's level vanished into the sky; Animal
+Crossing's title village and Fire Emblem's avatar background became flat
+colour), and lighting and procedural textures were wrong everywhere.
+
+**Software renderer: one sample per 3x3 block.** The recovered web-port
+work shaded one sample per 3x3 pixel block and copied it to the rest, and
+reused lighting across four samples. Every game's text and textures were
+blocky or broken. Full detail is now the default; the UI's *Software
+detail* selector (and `?swDetail=3`) restores the fast mode. Cost on the
+Mario state: 41.9 -> 16.6 game FPS.
+
+Also: clamp-to-border wrapping is emulated in the shader on WebGL2
+(previously clamped to edge), and RGB8 colour surfaces keep the opaque
+alpha an RGB8 surface reads as on OpenGL ES.
+
+`tests/renderer_parity.cjs` (`run.cjs --parity`, `AZAHAR_PARITY_GPU=1`
+on machines with a GPU) boots titles on both renderers, samples the top
+screen at eight guest times in a window, and compares the two colour
+distributions (total variation distance). Asset loads finish in host
+time, so the renderers reach a scene at slightly different guest times;
+a distribution over a window tolerates that, a single frame does not.
+
+| Title (window) | LUT bug | Fixed |
+|---|---:|---:|
+| Super Mario 3D Land (18-40 s) | 0.80 | 0.26 |
+| Animal Crossing (25-45 s) | 0.66 | 0.30 |
+| Cubic Ninja (20-40 s, control) | 0.02 | 0.15 |
+
+The threshold is 0.45. Adventure Time was dropped: its boot logo lasts a
+host-dependent time, so it measured 0.44-0.46 either way.

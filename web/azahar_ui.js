@@ -93,6 +93,7 @@
     const rendererRemeasure = document.getElementById('renderer-remeasure');
     const resolutionScale = document.getElementById('resolution-scale');
     const resolutionScaleHelp = document.getElementById('resolution-scale-help');
+    const softwareDetail = document.getElementById('software-detail');
     const saveStateSlot = document.getElementById('save-state-slot');
     const btnSaveState = document.getElementById('btn-save-state');
     const saveStorageInfo = document.getElementById('save-storage-info');
@@ -146,6 +147,19 @@
         }
     }
     selectedResolutionScale = Math.max(1, Math.min(4, selectedResolutionScale || 1));
+    // Software renderer detail: 1 shades every pixel, 3 shades one sample
+    // per 3x3 block (faster, but blocky textures and text).
+    let selectedSoftwarePixelScale = Number.parseInt(
+        new URLSearchParams(location.search).get('swDetail') || '', 10);
+    if (!Number.isInteger(selectedSoftwarePixelScale)) {
+        try {
+            selectedSoftwarePixelScale = Number.parseInt(
+                localStorage.getItem('azahar-software-pixel-scale') || '1', 10);
+        } catch (_) {
+            selectedSoftwarePixelScale = 1;
+        }
+    }
+    selectedSoftwarePixelScale = selectedSoftwarePixelScale === 3 ? 3 : 1;
     const fastForwardQuery = new URLSearchParams(location.search).get('speed');
     let selectedFastForward = Number.parseInt(fastForwardQuery || '', 10);
     if (!Number.isInteger(selectedFastForward)) {
@@ -177,6 +191,12 @@
             return;
         }
         log(`Internal resolution set to ${applied}x.`);
+    }
+
+    function applySoftwarePixelScale() {
+        if (!initialized || !wasmModule?._azahar_set_software_pixel_scale || isWebGL2Artifact) return;
+        const applied = wasmModule._azahar_set_software_pixel_scale(selectedSoftwarePixelScale);
+        log(applied === 1 ? 'Software detail: full.' : 'Software detail: fast (3x3 blocks).');
     }
 
     function applyFastForward() {
@@ -273,6 +293,18 @@
             history.replaceState(null, '', currentUrl);
             updateResolutionHelp();
             applyResolutionScale();
+        });
+    }
+
+    if (softwareDetail) {
+        softwareDetail.value = String(selectedSoftwarePixelScale);
+        softwareDetail.disabled = isWebGL2Artifact;
+        softwareDetail.addEventListener('change', () => {
+            selectedSoftwarePixelScale = softwareDetail.value === '3' ? 3 : 1;
+            try {
+                localStorage.setItem('azahar-software-pixel-scale', String(selectedSoftwarePixelScale));
+            } catch (_) {}
+            applySoftwarePixelScale();
         });
     }
 
@@ -954,6 +986,7 @@ void main() { frag_color = vec4(1.0); }`);
             }
             initialized = true;
             applyResolutionScale();
+            applySoftwarePixelScale();
             applyFastForward();
             log('Emulator initialized successfully.');
             hideProgress();

@@ -57,6 +57,10 @@ const PROFILE = argFlag('--profile');
 const INTERACTIVE = argFlag('--interactive');
 const MANUAL_START = argFlag('--manual-start');
 const DEBUG_CONSOLE = process.env.AZAHAR_DEBUG_CONSOLE === '1';
+// Scenes whose top screen is this much more detailed across columns than
+// down them have a stripe artifact (see stripeAnisotropy in the page code).
+const MAX_STRIPE_ANISOTROPY = Number(process.env.AZAHAR_MAX_STRIPE_ANISOTROPY || 2.5);
+const stripeFailures = [];
 const CPU_PROFILE_PATH = process.env.AZAHAR_CPU_PROFILE || '';
 const EXTRA_CHROME_ARGS = (process.env.AZAHAR_CHROME_ARGS || '').split(/\s+/).filter(Boolean);
 
@@ -219,6 +223,32 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
             target.getContext('2d').drawImage(Module.canvas, 0, 0, target.width, target.height);
         }
 
+        // Ratio of horizontal to vertical neighbour differences over the top
+        // screen. Rendered scenes stay near 1 (0.6-0.9 measured); a periodic
+        // column pattern such as missing or misread pixel rows in the
+        // rotated framebuffer drives it far above (3.5 in Pokemon X with
+        // broken depth reinterpretation). `topScreenRows` selects the canvas
+        // rows holding the top screen in this buffer's row order.
+        function stripeAnisotropy(data, width, firstRow, lastRow) {
+            let horizontal = 0;
+            let vertical = 0;
+            let count = 0;
+            const luma = i => data[i] + data[i + 1] + data[i + 2];
+            for (let y = firstRow; y < lastRow - 1; ++y) {
+                for (let x = 0; x < width - 1; ++x) {
+                    const i = (y * width + x) * 4;
+                    const value = luma(i);
+                    horizontal += Math.abs(value - luma(i + 4));
+                    vertical += Math.abs(value - luma(i + width * 4));
+                    ++count;
+                }
+            }
+            // A floor of two luma steps per pixel keeps flat screens (a white
+            // top screen, a fade) near 1 instead of dividing by almost nothing.
+            const floor = 2 * count;
+            return (horizontal + floor) / (vertical + floor);
+        }
+
         async function readCanvasSceneStats() {
             const canvas = document.querySelector('#canvas');
             if (!canvas?.width || !canvas?.height) return null;
@@ -248,8 +278,12 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
                     if (high - Math.min(r, g, b) > 24) colorful++;
                     samples++;
                 }
+                // readPixels rows start at the bottom: the top screen is the
+                // upper half of the canvas, so the last rows here.
                 return {samples, nonBlackCoverage: nonBlack / samples,
                     colorfulCoverage: colorful / samples,
+                    stripeAnisotropy: stripeAnisotropy(data, canvas.width,
+                        Math.floor(canvas.height / 2), canvas.height),
                     rendererNonblackPixels: -2,
                     rendererStats: readRendererStats()};
             }
@@ -292,6 +326,8 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
             globalThis.__azaharLastScenePng = sample.toDataURL('image/png');
             return {samples, nonBlackCoverage: nonBlack / samples,
                 colorfulCoverage: colorful / samples,
+                stripeAnisotropy: stripeAnisotropy(data, sample.width, 0,
+                    Math.floor(sample.height / 2)),
                 rendererNonblackPixels: Module._azahar_framebuffer_nonblack_pixels?.() ?? -1,
                 rendererStats: readRendererStats()};
         }
@@ -448,6 +484,9 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
             const t0 = perf.now();
             if (Module._azahar_init() !== 0) throw new Error('azahar_init failed');
             const initMs = perf.now() - t0;
+            const shaderJitOptions = globalThis.__azaharShaderJitOptions || {};
+            if (shaderJitOptions.jit !== undefined) Module._azahar_set_shader_jit?.(shaderJitOptions.jit);
+            if (shaderJitOptions.verify) Module._azahar_set_shader_jit_verify?.(1);
             // SDL must claim the production canvas first. Asking for WebGL2
             // earlier would create an unrelated context and invalidate the
             // backend under test.
@@ -554,6 +593,14 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
                 Object.entries(globalThis.azaharPicaTrace).map(([key, value]) =>
                     [key, value - (picaBefore[key] || 0)])) : null;
             const heapAfter = Module.HEAPU8 ? Module.HEAPU8.length : 0;
+            let shaderJit = null;
+            if (Module._azahar_get_shader_jit_stats) {
+                const statsPtr = Module._malloc(16);
+                Module._azahar_get_shader_jit_stats(statsPtr);
+                const view = new Float64Array(Module.HEAPU8.buffer, statsPtr, 2);
+                shaderJit = {enabled: Module._azahar_get_shader_jit(), verified: view[0], mismatches: view[1]};
+                Module._free(statsPtr);
+            }
 
             Module._azahar_shutdown();
 
@@ -562,7 +609,7 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
                 scheduler: AzaharScheduler.mode,
                 measuredGuestSpeed: Number.isFinite(guestStartUs) && perfStats ?
                     (perfStats.guestTimeUs - guestStartUs) / (bench.elapsedMs * 1000) : null,
-                initMs, loadMs,
+                initMs, loadMs, shaderJit,
                 restoredState: stateName_ || null,
                 restore: restoreStats ? { avg: restoreStats.avg, fps: restoreStats.fps,
                     p50: restoreStats.p50, p95: restoreStats.p95, visual: restoreStats.visual } : null,
@@ -727,6 +774,13 @@ async function main() {
             }
         });
     }
+    // AZAHAR_SHADER_JIT=0|1 selects the shader engine for the title;
+    // AZAHAR_SHADER_JIT_VERIFY=1 checks every JIT invocation against the
+    // interpreter and reports the counts (slow).
+    await page.evaluateOnNewDocument((jit, verify) => {
+        globalThis.__azaharShaderJitOptions = {jit, verify};
+    }, process.env.AZAHAR_SHADER_JIT === undefined ? undefined : Number(process.env.AZAHAR_SHADER_JIT),
+    process.env.AZAHAR_SHADER_JIT_VERIFY === '1');
     const profiler = CPU_PROFILE_PATH ? await page.createCDPSession() : null;
     if (profiler) {
         await profiler.send('Profiler.enable');
@@ -1000,8 +1054,22 @@ async function main() {
                 await page.evaluate(() => { if (Module._azahar_shutdown) Module._azahar_shutdown(); });
             }
 
+            // AZAHAR_LIVE_SCREENSHOT_AT=seconds saves a compositor screenshot of the
+            // canvas while the benchmark is running (to AZAHAR_LIVE_SCREENSHOT).
+            let liveShot = null;
+            if (process.env.AZAHAR_LIVE_SCREENSHOT_AT && process.env.AZAHAR_LIVE_SCREENSHOT) {
+                liveShot = setTimeout(async () => {
+                    try {
+                        await (await page.$('#canvas')).screenshot({path: process.env.AZAHAR_LIVE_SCREENSHOT});
+                        console.log(`   Live screenshot: ${process.env.AZAHAR_LIVE_SCREENSHOT}`);
+                    } catch (error) {
+                        console.error(`   Live screenshot failed: ${error.message}`);
+                    }
+                }, Number(process.env.AZAHAR_LIVE_SCREENSHOT_AT) * 1000);
+            }
             const runs = await runBenchInPage(page, romExt, BENCH_SECONDS, WARMUP_SECONDS, PROFILE,
                 MANUAL_START, stateName, ARTIFACT);
+            clearTimeout(liveShot);
 
             for (const run of runs) {
                 const b = run.bench;
@@ -1026,6 +1094,10 @@ async function main() {
                         + `speed=${(ps.emulationSpeed * 100).toFixed(0)}% `
                         + `gpu=${(ps.timeGpu * 1000).toFixed(2)}ms `
                         + `swap=${(ps.timeSwap * 1000).toFixed(2)}ms`);
+                }
+                if (run.shaderJit) {
+                    console.log(`   Shader JIT: enabled=${run.shaderJit.enabled} `
+                        + `verified=${run.shaderJit.verified} mismatches=${run.shaderJit.mismatches}`);
                 }
                 if (run.rendererStats?.rendererKind === 1) {
                     const rs = run.rendererStats;
@@ -1069,7 +1141,11 @@ async function main() {
                 if (run.visual) {
                     console.log(`   Scene: nonBlack ${(run.visual.nonBlackCoverage * 100).toFixed(1)}% `
                         + `colorful ${(run.visual.colorfulCoverage * 100).toFixed(1)}% `
+                        + `stripes ${run.visual.stripeAnisotropy?.toFixed(2)} `
                         + `(sampled ${run.visual.samples} px)`);
+                    if (run.visual.stripeAnisotropy > MAX_STRIPE_ANISOTROPY) {
+                        stripeFailures.push(`run ${rep + 1}: ${run.visual.stripeAnisotropy.toFixed(2)}`);
+                    }
                 }
                 // Capture the live page, while emulation is still presenting,
                 // so renderer changes can be compared frame-for-frame.
@@ -1077,9 +1153,15 @@ async function main() {
                     const scenePath = REPEAT > 1
                         ? process.env.AZAHAR_SCENE_SCREENSHOT.replace(/(\.png)?$/, `-${rep + 1}.png`)
                         : process.env.AZAHAR_SCENE_SCREENSHOT;
+                    // WebGL2 samples the scene with readPixels and keeps no
+                    // image; use AZAHAR_LIVE_SCREENSHOT_AT for that artifact.
                     const dataUrl = await page.evaluate(() => globalThis.__azaharLastScenePng);
-                    fs.writeFileSync(scenePath, Buffer.from(dataUrl.split(',')[1], 'base64'));
-                    console.log(`   Scene screenshot: ${scenePath}`);
+                    if (dataUrl) {
+                        fs.writeFileSync(scenePath, Buffer.from(dataUrl.split(',')[1], 'base64'));
+                        console.log(`   Scene screenshot: ${scenePath}`);
+                    } else {
+                        console.log('   Scene screenshot: unavailable for this artifact');
+                    }
                 }
                 if (processCpuSamples.start && processCpuSamples.end) {
                     const wall = (processCpuSamples.end.at - processCpuSamples.start.at) / 1000;
@@ -1188,6 +1270,11 @@ async function main() {
         if (consoleErrors.length) {
             console.log(`\n   Console messages (${consoleErrors.length}):`);
             consoleErrors.slice(0, 10).forEach(e => console.log(`     - ${e}`));
+        }
+        if (stripeFailures.length) {
+            console.error(`Scene stripe artifact (anisotropy above ${MAX_STRIPE_ANISOTROPY}): `
+                + stripeFailures.join(', '));
+            process.exitCode = 1;
         }
     } catch (error) {
         await stopProfiler().catch(() => {});
