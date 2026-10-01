@@ -1054,8 +1054,22 @@ async function main() {
                 await page.evaluate(() => { if (Module._azahar_shutdown) Module._azahar_shutdown(); });
             }
 
+            // AZAHAR_LIVE_SCREENSHOT_AT=seconds saves a compositor screenshot of the
+            // canvas while the benchmark is running (to AZAHAR_LIVE_SCREENSHOT).
+            let liveShot = null;
+            if (process.env.AZAHAR_LIVE_SCREENSHOT_AT && process.env.AZAHAR_LIVE_SCREENSHOT) {
+                liveShot = setTimeout(async () => {
+                    try {
+                        await (await page.$('#canvas')).screenshot({path: process.env.AZAHAR_LIVE_SCREENSHOT});
+                        console.log(`   Live screenshot: ${process.env.AZAHAR_LIVE_SCREENSHOT}`);
+                    } catch (error) {
+                        console.error(`   Live screenshot failed: ${error.message}`);
+                    }
+                }, Number(process.env.AZAHAR_LIVE_SCREENSHOT_AT) * 1000);
+            }
             const runs = await runBenchInPage(page, romExt, BENCH_SECONDS, WARMUP_SECONDS, PROFILE,
                 MANUAL_START, stateName, ARTIFACT);
+            clearTimeout(liveShot);
 
             for (const run of runs) {
                 const b = run.bench;
@@ -1139,9 +1153,15 @@ async function main() {
                     const scenePath = REPEAT > 1
                         ? process.env.AZAHAR_SCENE_SCREENSHOT.replace(/(\.png)?$/, `-${rep + 1}.png`)
                         : process.env.AZAHAR_SCENE_SCREENSHOT;
+                    // WebGL2 samples the scene with readPixels and keeps no
+                    // image; use AZAHAR_LIVE_SCREENSHOT_AT for that artifact.
                     const dataUrl = await page.evaluate(() => globalThis.__azaharLastScenePng);
-                    fs.writeFileSync(scenePath, Buffer.from(dataUrl.split(',')[1], 'base64'));
-                    console.log(`   Scene screenshot: ${scenePath}`);
+                    if (dataUrl) {
+                        fs.writeFileSync(scenePath, Buffer.from(dataUrl.split(',')[1], 'base64'));
+                        console.log(`   Scene screenshot: ${scenePath}`);
+                    } else {
+                        console.log('   Scene screenshot: unavailable for this artifact');
+                    }
                 }
                 if (processCpuSamples.start && processCpuSamples.end) {
                     const wall = (processCpuSamples.end.at - processCpuSamples.start.at) / 1000;
