@@ -17,6 +17,7 @@
  *   node tests/run.cjs --input              # Keymap menu and input bindings
  *   node tests/run.cjs --audio              # Game audio, Audio widget, pacing, resampling
  *   node tests/run.cjs --pokemon            # Pokemon X opening: 3D stripe artifact, run errors (~5 min)
+ *   node tests/run.cjs --parity             # WebGL2 vs software scene content on title screens (~25 min)
  *   node tests/run.cjs --bench --no-state   # Benchmark from cold boot (slow)
  *   node tests/run.cjs --duration 30        # Custom benchmark duration
  *   node tests/run.cjs --warmup 10          # Custom warmup (short with save state)
@@ -37,7 +38,7 @@ const argVal = (k, d) => {
 
 const explicit = argFlag('--smoke') || argFlag('--bench') || argFlag('--regression') ||
   argFlag('--transition') || argFlag('--save-states') || argFlag('--autofallback') ||
-  argFlag('--library') || argFlag('--input') || argFlag('--audio') || argFlag('--pokemon');
+  argFlag('--library') || argFlag('--input') || argFlag('--audio') || argFlag('--pokemon') || argFlag('--parity');
 const runSmoke = !explicit || argFlag('--smoke');
 const runBench = !explicit || argFlag('--bench');
 const runRegression = !explicit || argFlag('--regression');
@@ -48,6 +49,7 @@ const runLibrary = argFlag('--library');
 const runInput = !explicit || argFlag('--input');
 const runAudio = !explicit || argFlag('--audio');
 const runPokemon = argFlag('--pokemon');
+const runParity = argFlag('--parity');
 const useState = !argFlag('--no-state');
 const artifact = argVal('--artifact', 'software');
 const duration = argVal('--duration', useState ? '15' : '15');
@@ -170,6 +172,18 @@ if (runPokemon) {
     // appeared. --artifact software runs the same opening on the CPU path.
     run('Pokemon X Opening Regression', path.join(TESTS_DIR, 'pokemon_x_regression.cjs'), [], {
       timeout: 600000, env: { AZAHAR_RENDERER: argVal('--artifact', 'webgl2') },
+    });
+  }
+}
+
+if (runParity) {
+  if (!cfg.chromePath) {
+    header('Renderer parity'); console.log('  Skipped: Chrome not found.'); skipped++;
+  } else {
+    // Set AZAHAR_PARITY_GPU=1 where the browser can use the host GPU;
+    // SwiftShader works but is much slower.
+    run('Renderer Parity (WebGL2 vs software)', path.join(TESTS_DIR, 'renderer_parity.cjs'), [], {
+      timeout: 3600000,
     });
   }
 }
