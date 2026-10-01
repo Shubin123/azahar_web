@@ -384,3 +384,18 @@ a distribution over a window tolerates that, a single frame does not.
 
 The threshold is 0.45. Adventure Time was dropped: its boot logo lasts a
 host-dependent time, so it measured 0.44-0.46 either way.
+
+## 2026-10-01 software renderer memory race
+
+Engine commit `97ed88f1d`. `MemorySystem::GetPhysMemRegionInfo` cached the
+last physical region in one shared struct. The software renderer's threads
+(GPU thread, parallel vertex loading, raster workers) could tear it, pairing
+FCRAM's backing with VRAM's start address. Every later FCRAM lookup then
+pointed 128 MiB past the right place, so textures came out corrupted and
+Pokemon X's opening froze when a command list read as zeros. Found by
+comparing the CPU page table with `GetPhysicalPointer` at the hang: they
+disagreed by exactly 0x08000000. The lookup no longer caches.
+
+`run.cjs --pokemon` now runs the opening on both renderers. Full suite
+after the fix: 10 passed, 0 failed; renderer parity distances 0.09 (Mario),
+0.37 (Animal Crossing), 0.12 (Cubic Ninja).

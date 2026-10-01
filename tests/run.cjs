@@ -168,11 +168,17 @@ if (runPokemon) {
   if (!cfg.chromePath) {
     header('Pokemon X'); console.log('  Skipped: Chrome not found.'); skipped++;
   } else {
-    // WebGL2 by default: that is where the depth-reinterpretation stripes
-    // appeared. --artifact software runs the same opening on the CPU path.
-    run('Pokemon X Opening Regression', path.join(TESTS_DIR, 'pokemon_x_regression.cjs'), [], {
-      timeout: 600000, env: { AZAHAR_RENDERER: argVal('--artifact', 'webgl2') },
-    });
+    // Both renderers by default: WebGL2 showed the depth-reinterpretation
+    // stripes, and the software renderer froze in the opening when a racy
+    // physical-memory lookup sent GPU reads 128 MiB astray. --artifact
+    // selects one.
+    const renderers = process.argv.includes('--artifact') ? [artifact] : ['webgl2', 'software'];
+    for (const renderer of renderers) {
+      run(`Pokemon X Opening Regression (${renderer})`,
+        path.join(TESTS_DIR, 'pokemon_x_regression.cjs'), [], {
+          timeout: 600000, env: { AZAHAR_RENDERER: renderer },
+        });
+    }
   }
 }
 

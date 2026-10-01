@@ -7,6 +7,9 @@
 //   - a stripe artifact: Pokemon X/Y's outline pass reads the depth buffer
 //     back as colour, and when that reinterpretation is wrong the 3D scene
 //     shows a striped overlay with every few framebuffer rows dark;
+//   - on the software renderer, a game that stops presenting frames: a racy
+//     physical-memory lookup once sent GPU reads to the wrong memory, so a
+//     command list read as zeros and the opening froze;
 //   - an emulator run error (the UI's "Run error" log line), a stopped
 //     emulator, or a guest that keeps running but stops presenting frames.
 //
