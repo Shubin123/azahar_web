@@ -154,12 +154,14 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
                 throw new Error('WebGL2 artifact fell back to software before benchmarking');
             }
         }
-        const memfsPath = '/benchmark' + romExt_;
+        // Save states serialize open ROM file paths. Match the UI's path so
+        // states captured there can reopen their RomFS after restoration.
+        const memfsPath = '/rom' + romExt_;
 
-        // Fetch ROM from the server
-        const response = await fetch('/bench_rom');
-        if (!response.ok) throw new Error('Failed to fetch ROM: ' + response.status);
-        const romReader = response.body.getReader();
+        // Use the same disk-backed File as the production file picker. This
+        // avoids a second copy in OPFS and keeps large fixtures out of MEMFS.
+        const romFile = document.querySelector('#rom-file').files[0];
+        if (!romFile) throw new Error('Benchmark ROM was not selected');
         let romBytesReceived = 0;
 
         function readPerfStats() {
@@ -349,6 +351,10 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
             // nominal settle window (notably ANGLE/D3D). Require several completed emulation
             // callbacks so a single compile-heavy frame cannot be mistaken for a black restore.
             const settle = await runForDuration(3, false, 30);
+            const operation = Module._azahar_get_state_operation?.();
+            if (operation !== 0) {
+                throw new Error(`Save-state restoration did not complete: ${operation}`);
+            }
             const rendererStatsBeforeReset = readRendererStats();
             Module._azahar_reset_renderer_stats?.();
             const visual = await readCanvasSceneStats();
@@ -494,22 +500,17 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
                 throw new Error('Native WebGL2 initialization did not claim the production canvas');
             }
 
-            if (window.AzaharRomFS?.store.available()) {
+            if (window.AzaharRomFS?.mount) {
                 // Mount the ROM lazily from disk, as the production UI does:
                 // a 2 GiB image fits neither one MEMFS ArrayBuffer nor
                 // Chrome's in-memory blob storage.
-                const writer = await window.AzaharRomFS.store.createWriter('benchmark-rom');
-                while (true) {
-                    const {done, value} = await romReader.read();
-                    if (done) break;
-                    romBytesReceived += value.byteLength;
-                    await writer.write(value);
-                }
-                await window.AzaharRomFS.mount(Module.FS, memfsPath, await writer.close());
+                await window.AzaharRomFS.mount(Module.FS, memfsPath, romFile);
+                romBytesReceived = romFile.size;
             } else {
                 // Stream directly into MEMFS so large library entries do not need
                 // a second whole-ROM buffer in Node or the browser main thread.
-                const romFile = Module.FS.open(memfsPath, 'w+');
+                const romReader = romFile.stream().getReader();
+                const romHandle = Module.FS.open(memfsPath, 'w+');
                 try {
                     while (true) {
                         const {done, value} = await romReader.read();
@@ -518,12 +519,12 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
                         let offset = 0;
                         while (offset < value.byteLength) {
                             offset += Module.FS.write(
-                                romFile, value, offset, value.byteLength - offset,
+                                romHandle, value, offset, value.byteLength - offset,
                                 romBytesReceived - value.byteLength + offset);
                         }
                     }
                 } finally {
-                    Module.FS.close(romFile);
+                    Module.FS.close(romHandle);
                 }
             }
             const heapAfterWrite = Module.HEAPU8 ? Module.HEAPU8.length : 0;
@@ -1033,8 +1034,7 @@ async function main() {
         });
         if (!hasModule) throw new Error('Module._azahar_init not available');
 
-        // Shut down the UI's auto-initialized emulator so we control init/load
-        await page.evaluate(() => { if (Module._azahar_shutdown) Module._azahar_shutdown(); });
+        // Keep the page's initialized emulator; each repeat gets a fresh page.
 
         // Run benchmarks.  Reload the page for each repeat so the WASM
         // module and emulator start from a clean state.
@@ -1051,7 +1051,6 @@ async function main() {
                         status.textContent.includes('ROM ready')
                     );
                 }, { timeout: 120000 });
-                await page.evaluate(() => { if (Module._azahar_shutdown) Module._azahar_shutdown(); });
             }
 
             // AZAHAR_LIVE_SCREENSHOT_AT=seconds saves a compositor screenshot of the
@@ -1067,6 +1066,7 @@ async function main() {
                     }
                 }, Number(process.env.AZAHAR_LIVE_SCREENSHOT_AT) * 1000);
             }
+            await (await page.$('#rom-file')).uploadFile(path.resolve(romPath));
             const runs = await runBenchInPage(page, romExt, BENCH_SECONDS, WARMUP_SECONDS, PROFILE,
                 MANUAL_START, stateName, ARTIFACT);
             clearTimeout(liveShot);

@@ -399,3 +399,70 @@ disagreed by exactly 0x08000000. The lookup no longer caches.
 `run.cjs --pokemon` now runs the opening on both renderers. Full suite
 after the fix: 10 passed, 0 failed; renderer parity distances 0.09 (Mario),
 0.37 (Animal Crossing), 0.12 (Cubic Ninja).
+
+## 2026-10-01 opaque pixel replacement and Smash fixtures
+
+Software renderer, headless Chrome, 16 logical CPUs, native resolution,
+100% CPU clock, 1x speed, full pixel detail. Each run restores the same local
+state, settles for at least 30 callbacks, warms up for 5 seconds, and measures
+20 seconds without CPU profiling. No builds or other test emulators ran in
+these measured windows. FPS is the mean of the final native FPS snapshots;
+guest speed measures guest time advanced over the entire measured window.
+
+| Fixture | Repeats per build | Before FPS | After FPS | Before guest speed | After guest speed |
+|---|---:|---:|---:|---:|---:|
+| Smash kiosk demo, Battlefield, Mega Man vs two CPUs | 3 | 15.99 | 16.75 | 26.76% | 28.49% |
+| Pokemon X, Sycamore dialogue | 2 | 13.72 | 14.38 | 45.76% | 48.13% |
+
+The rasterizer now detects opaque color replacement once per triangle.
+One/zero blending with Add or Subtract, and the Copy logic operation, return
+the source color directly. Disabled color channels retain their old values;
+other blending, logic operations, depth, stencil, and shadow rendering keep
+their existing paths. This avoids redundant blend-factor evaluation and,
+when every channel is enabled, the framebuffer color read. These runs show
+about 4.7-4.8% higher FPS and 5.2-6.5% higher measured guest speed.
+
+The fixture work also exposed two worker problems. A late-starting raster
+worker could skip the first published batch, leaving its caller waiting
+forever. It now starts with generation zero; a native delayed-start probe
+times out before the change and completes afterward. The new pool regression
+passes 50,800 assertions with delayed worker startup. Separately, software
+state restoration transiently needs more than seven pthread workers while
+motion devices are reconstructed. The prewarmed pool now reserves seven to
+ten slots according to host CPU count, without increasing raster parallelism.
+
+The benchmark selects the actual ROM through the browser file picker and
+mounts it at `/rom.<extension>`, matching paths serialized by the UI. It no
+longer duplicates each local ROM into OPFS, and it requires the native
+state-operation acknowledgement before reporting restored-fixture results.
+
+Local reports: `tmp_test/smash_{before,after}_clean.json` and
+`tmp_test/pokemon_{before,after}_clean.json`. The Smash fixture is
+`tmp_test/fixtures/Smash_Bros_Kiosk_Decrypted/battlefield-playable/000400000014E600.01.cst`;
+its JSON metadata and screenshot are alongside it. Prepare the local test copy
+with `tests/prepare_rom.cjs`; the original external-drive dump is unchanged.
+
+```bash
+node tests/benchmark_browser.cjs --artifact software \
+  --rom test_games/Smash_Bros_Kiosk_Decrypted.3ds \
+  --state tmp_test/fixtures/Smash_Bros_Kiosk_Decrypted/battlefield-playable/000400000014E600.01.cst \
+  --warmup-seconds 5 --duration-seconds 20 --repeat 3 \
+  --output tmp_test/smash_fps.json
+```
+
+Validation: both artifact smoke checks (including served/build hashes),
+seven active browser regression groups, scheduler/profile-report checks, and
+Smash's persistent save/load/paused-load/reload/delete lifecycle passed. Scene
+coverage and stripe checks passed for all measured fixture runs.
+Renderer parity passed on all three existing titles: Mario 3D Land (0.22),
+Animal Crossing (0.35), and Cubic Ninja (0.14), below the 0.45 threshold.
+Logs are `tmp_test/fps_regressions.log`, `tmp_test/smash_ui_regression.log`,
+and `tmp_test/fps_parity.log`; parity captures are under `tmp_test/fps-parity/`.
+
+Known baseline limitations: the Smash fixture crashes in the WebGL2 rendering
+cache before the pixel optimization, with an invalid depth readback followed
+by an unreachable trap in `RasterizerCache::FlushRegion`. Its failed result
+is retained in `tmp_test/smash_baseline_webgl2.json`; no WebGL2 FPS claim is made.
+The legacy `tests/e2e` Node runner was stopped after existing missing-path
+errors: it still expects the removed `azahar/` checkout inside this frontend
+repository. Its results are not included in the passing browser suite.
