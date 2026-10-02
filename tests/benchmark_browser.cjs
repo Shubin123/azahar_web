@@ -864,7 +864,7 @@ async function main() {
                 console.log(`   [browser ${msg.type()}] (further identical messages suppressed)`);
             }
         }
-        if (msg.type() === 'error' || msg.type() === 'warning') {
+        if (msg.type() === 'error' || msg.type() === 'warning' || msg.type() === 'warn') {
             consoleErrors.push(`[${msg.type()}] ${msg.text()}`);
         }
     });
@@ -1252,6 +1252,8 @@ async function main() {
         if (DEBUG_CONSOLE) {
             results.webglDrawFailure = await page.evaluate(
                 () => globalThis.__azaharWebGLDrawFailure || null);
+            const nativeLog = await page.evaluate(() => document.getElementById('log')?.textContent || '');
+            fs.writeFileSync(OUTPUT_PATH.replace(/\.json$/, '') + '.native.log', nativeLog);
         }
 
         if (consoleErrors.length) results.consoleErrors = consoleErrors;
@@ -1276,10 +1278,21 @@ async function main() {
                 + stripeFailures.join(', '));
             process.exitCode = 1;
         }
+        if (ARTIFACT === 'webgl2' && consoleErrors.some(message =>
+            /WebGL.*(?:INVALID_ENUM|INVALID_OPERATION|INVALID_FRAMEBUFFER_OPERATION|draw failure|shader compile)/i.test(message))) {
+            console.error('WebGL2 issued invalid graphics commands; benchmark failed.');
+            process.exitCode = 1;
+        }
     } catch (error) {
         await stopProfiler().catch(() => {});
         console.error('Benchmark failed:', error.message);
         console.error(error.stack);
+        const nativeLog = await page.evaluate(() => document.getElementById('log')?.textContent || '')
+            .catch(() => '');
+        if (nativeLog) {
+            fs.writeFileSync(OUTPUT_PATH.replace(/\.json$/, '') + '.native.log', nativeLog);
+            console.error('Native log tail:\n' + nativeLog.slice(-6000));
+        }
         if (DEBUG_CONSOLE) {
             const webglDrawFailure = await page.evaluate(
                 () => globalThis.__azaharWebGLDrawFailure || null).catch(() => null);

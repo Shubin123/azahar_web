@@ -466,3 +466,79 @@ is retained in `tmp_test/smash_baseline_webgl2.json`; no WebGL2 FPS claim is mad
 The legacy `tests/e2e` Node runner was stopped after existing missing-path
 errors: it still expects the removed `azahar/` checkout inside this frontend
 repository. Its results are not included in the passing browser suite.
+
+## 2026-10-01 WebGL2 depth readback and interval ownership
+
+The playable Smash fixture reproduced two independent failures. WebGL2 rejected
+the renderer's direct depth/stencil `readPixels` commands. A longer run then
+aborted in `RasterizerCache::FlushRegion` because a reused 128×64 RGBA8 texture
+remained the dirty-region owner after another texture overwrote it.
+
+The cache failure was isolated without a ROM: assigning two small intervals to
+owners 42 and 41, then overwriting their combined range with owner 43, left the
+old owners behind in Emscripten. The same probe passed with native libstdc++.
+The failure also reproduced at `-O0`, so this was a container compatibility
+issue. libc++'s newer unique-key bounds stop at one equivalent interval; Boost.ICL
+needs all overlapping intervals. The underlying change is described in
+[LLVM's libc++ release notes](https://releases.llvm.org/23.1.0/projects/libcxx/docs/ReleaseNotes/22.html).
+
+The browser build now uses Boost.Container consistently for core and frontend
+ICL maps/sets (`ICL_USE_BOOST_MOVE_IMPLEMENTATION`). This covers both dirty GPU
+regions and heap interval sets without relying on libc++'s temporary legacy
+escape hatch. Desktop builds retain their existing containers.
+
+Depth downloads now encode D16, D24 and D24S8 into an RGBA8 intermediate, read
+through the supported RGBA/UNSIGNED_BYTE path, then reconstruct the cache's
+client pixel layout. Read-only stencil tests recover all eight stencil bits.
+The intermediate follows the mip dimensions and is recreated when dimensions
+change; offset rectangles and downscaled surfaces preserve their coordinates.
+The shared depth shader now selects the requested mip and uses high-precision
+texture coordinates.
+
+New tests:
+
+- Engine `src/tests/video_core/interval_map.cpp`: ownership replacement, partial
+  GPU writes/CPU flushes against a 64-byte reference, and erasure across several
+  invalid intervals. Passed 64,303 assertions in three cases both natively and
+  in Emscripten with the browser container definition.
+- `node tests/run.cjs --webgl-depth`: compiles the actual engine shaders and
+  checks 12,522 exact depth/stencil texels, including endpoints, all stencil
+  bytes, wide textures, offset rectangles and mips. Requires the sibling engine
+  checkout, or `AZAHAR_ENGINE_DIR`.
+- Browser benchmarks now reject invalid WebGL commands even when they appear
+  as Chrome `warn` messages. The original shipped Smash artifact fails this
+  negative control (`tmp_test/smash_webgl_negative_control.json`). Diagnostic
+  runs also retain native UI logs beside their JSON report.
+
+Validation of the rebuilt artifacts:
+
+- Software and WebGL2 artifact smoke checks both passed, including exact
+  served/build hashes and 1,912 exported WASM functions.
+- The Smash fixture completed 60 measured seconds and 2,119 browser callbacks
+  on ANGLE/Vulkan (GTX 1080 Ti), with no invalid WebGL commands or cache trap.
+  Its WebGL2 UI regression also passed visible-scene detection, 20 seconds of
+  responsive gameplay, resolution/speed controls, running and paused save/load,
+  reload persistence and deletion.
+- The Pokémon X fixture completed its 10-second WebGL2 run without invalid
+  graphics commands. Its separate compositor/UI regression passed, and the
+  captured opening shows Sycamore and the Pokémon correctly in 3D. Use
+  compositor captures/UI scene checks for visual
+  validation: a cleared WebGL default framebuffer can return black pixels to
+  direct `readPixels`, and the benchmark's shutdown collapses its canvas.
+- The existing unified browser suite passed 7 tests with 0 failures or skips:
+  artifact smoke, rendering, static-host rendering, library UI and real replay,
+  input, and audio/save-state behavior. Scheduler and profile-report tests passed.
+- Renderer parity passed for Mario 3D Land (0.20), Animal Crossing (0.43), and
+  Cubic Ninja (0.25), below the existing 0.45 limit. Animal Crossing's sampled
+  camera positions differ between renderers; inspected captures retain its
+  trees, terrain, buildings and title geometry.
+- A final software Smash fixture check completed normally at 18.1 game FPS
+  (one 15-second run, five-second warmup). This is a sanity check, not a new
+  paired performance comparison.
+
+Logs/reports are `tmp_test/smash_webgl_fixed.json`,
+`tmp_test/pokemon_webgl_fixed.json`, `tmp_test/smash_webgl_ui_fixed.log`,
+`tmp_test/pokemon_webgl_ui_fixed.log`, and `tmp_test/webgl_fix_regressions.log`.
+Parity captures are under
+`tmp_test/webgl-fix-parity/`. ROMs, states, captures and generated reports remain
+ignored local artifacts.

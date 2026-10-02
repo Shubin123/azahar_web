@@ -18,6 +18,7 @@
  *   node tests/run.cjs --audio              # Game audio, Audio widget, pacing, resampling
  *   node tests/run.cjs --pokemon            # Pokemon X opening: 3D stripe artifact, run errors (~5 min)
  *   node tests/run.cjs --parity             # WebGL2 vs software scene content on title screens (~25 min)
+ *   node tests/run.cjs --webgl-depth        # Exact depth/stencil shader readback (engine sources required)
  *   node tests/run.cjs --bench --no-state   # Benchmark from cold boot (slow)
  *   node tests/run.cjs --duration 30        # Custom benchmark duration
  *   node tests/run.cjs --warmup 10          # Custom warmup (short with save state)
@@ -38,7 +39,7 @@ const argVal = (k, d) => {
 
 const explicit = argFlag('--smoke') || argFlag('--bench') || argFlag('--regression') ||
   argFlag('--transition') || argFlag('--save-states') || argFlag('--autofallback') ||
-  argFlag('--library') || argFlag('--input') || argFlag('--audio') || argFlag('--pokemon') || argFlag('--parity');
+  argFlag('--library') || argFlag('--input') || argFlag('--audio') || argFlag('--pokemon') || argFlag('--parity') || argFlag('--webgl-depth');
 const runSmoke = !explicit || argFlag('--smoke');
 const runBench = !explicit || argFlag('--bench');
 const runRegression = !explicit || argFlag('--regression');
@@ -50,6 +51,7 @@ const runInput = !explicit || argFlag('--input');
 const runAudio = !explicit || argFlag('--audio');
 const runPokemon = argFlag('--pokemon');
 const runParity = argFlag('--parity');
+const runWebGLDepth = argFlag('--webgl-depth');
 const useState = !argFlag('--no-state');
 const artifact = argVal('--artifact', 'software');
 const duration = argVal('--duration', useState ? '15' : '15');
@@ -180,6 +182,10 @@ if (runPokemon) {
         });
     }
   }
+}
+
+if (runWebGLDepth) {
+  run('Exact WebGL Depth/Stencil Readback', path.join(TESTS_DIR, 'webgl_depth_readback.test.cjs'), []);
 }
 
 if (runParity) {
