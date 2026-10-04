@@ -166,16 +166,20 @@ speed before the run requirement was added.
 carries both directions:
 
 ```bash
-# Positive: ANGLE Metal stalls, Auto must leave it and reuse the verdict
+# Positive: a stalling backend, Auto must leave it and reuse the verdict
 node tests/renderer_autofallback.cjs
 
 # Back-compat: an explicit WebGL2 choice survives the same stalling backend
 node tests/renderer_autofallback.cjs --pinned
 
 # Negative control: WebGL2 keeps up, Auto must stay on it
-AZAHAR_CHROME_ARGS=--use-angle=swiftshader \
-  node tests/renderer_autofallback.cjs --expect-none
+node tests/renderer_autofallback.cjs --expect-none
 ```
+
+Since 2026-10-04 ANGLE Metal no longer stalls (see "WebGL2 stream buffer
+orphaning" below). The positive and pinned directions add `glStream=ring`,
+which restores the old upload pattern and its stall; the negative control
+needs no SwiftShader override any more.
 
 Measured on 2026-09-19 with `2in1 Horses 3D`:
 
@@ -542,3 +546,131 @@ Logs/reports are `tmp_test/smash_webgl_fixed.json`,
 Parity captures are under
 `tmp_test/webgl-fix-parity/`. ROMs, states, captures and generated reports remain
 ignored local artifacts.
+
+## 2026-10-04 WebGL2 stream buffer orphaning, CPU-vertex speedups, shader JIT
+
+Engine commits `61e0d2b0e`..`80fc561fd` on `azahar_emscripten` (`main`).
+Measured on an Apple M1 (4 performance + 4 efficiency cores, 8 GB), Chrome
+154 headless, ANGLE Metal. No commercial ROMs were available on this machine,
+so the scene is the freely released homebrew Craftus Reloaded 0.3
+(`RSDuck/craftus_reloaded`, local and ignored under `tmp_test/homebrew/`),
+driven into a generated world with the new `AZAHAR_BENCH_INPUT` steps. Every
+run below was confirmed in-world from a live compositor screenshot; the
+benchmark's direct WebGL readback still samples the wrong buffer, so its
+WebGL2 scene percentages are not evidence.
+
+```bash
+AZAHAR_BENCH_INPUT='[{"at":40,"touch":[0.31,0.92]},{"at":44,"touch":[0.68,0.555]},{"at":47,"touch":[0.68,0.852]}]' \
+AZAHAR_LIVE_SCREENSHOT=tmp_test/craftus.png AZAHAR_LIVE_SCREENSHOT_AT=80 \
+  node tests/benchmark_browser.cjs --artifact webgl2 \
+  --rom tmp_test/homebrew/craftus_reloaded.3dsx --no-state \
+  --warmup-seconds 70 --duration-seconds 15
+```
+
+| Craftus world, Apple M1 | Before | After |
+|---|---:|---:|
+| WebGL2, hardware vertex shaders (Metal default) | never reached the world: title at 5-8 game FPS, 9-13% speed | 61.0 game FPS, 102% |
+| WebGL2, CPU vertex path (`?hwShader=0`, the D3D11 path) | never reached the world: 11 game FPS, 18% | 60.4 game FPS, 102% |
+| Software | 59.1 game FPS, 99% | 60.0 game FPS, 101% |
+| Chrome GPU-process CPU, WebGL2 | 0.85-1.01 cores | 0.08-0.12 cores |
+
+Craftus is capped at 60 FPS, so the software row only shows no regression.
+
+**Cause of the Metal stall.** The 2026-09-19 investigation localised it to
+ANGLE's Metal synchronization but not to a call. Sampling Chrome's GPU process
+with macOS `sample` showed its main thread 100% busy in one ANGLE routine:
+self time, `memmove`, `-[MTLCommandBuffer waitUntilCompleted]` and Metal
+buffer allocation. The WebGL2 renderer streamed vertex, index and uniform data
+with `bufferSubData` into 16 MiB and 8 MiB rings, and ANGLE's Metal backend
+copies (or waits for) the whole buffer when it is written while the GPU still
+reads it. `tests/webgl_buffer_upload_bench.cjs` reproduces it without a ROM
+(400 small draws per frame, ms per frame, vsync is 16.7):
+
+| Backend | Ring 16/8 MiB | Ring 128/32 KiB | Orphan per upload |
+|---|---:|---:|---:|
+| ANGLE Metal, Apple M1 | 837 | 16.9 | 16.6 |
+| ANGLE Vulkan, SwiftShader | 196 | 187 | 123 |
+
+The stream buffer now replaces the data store (`bufferData`) on every
+upload and reports earlier chunks invalid, which its callers already handle.
+Direct3D keeps the ring until it is measured; `?glStream=orphan|ring`
+overrides the choice. On the new build, `?glStream=ring` drops Craftus back
+to 8 game FPS with the GPU process at 0.89 cores, so orphaning alone is the
+fix. Auto's remembered renderer verdict is now version 2, so browsers that
+stored "software" for the old Metal stall measure again once.
+
+**CPU vertex path.** The WebGL2 renderer runs PICA on the browser main
+thread. On ANGLE/D3D11 and above native resolution it shades vertices on the
+CPU, serially and with the interpreter. Now:
+
+- The OpenGL rasterizer (Emscripten only) has a `RunParallel` pool, so
+  `LoadVerticesParallel`, already used by the software renderer, runs there:
+  half the logical cores minus one, at most three helpers (3 on both the
+  16-thread and 8-thread baselines, 1 on a 4-thread machine), leaving the rest
+  to the GPU process.
+- The PICA shader JIT (`61e0d2b0e`, previously unmerged on
+  `perf/pica-shader-jit`) compiles on the main thread too. Chrome refuses
+  synchronous compilation above 8 MB there (checked on Chrome 154: a 1 MB
+  module compiled in 2.8 ms, 9 MB was refused); larger modules interpret.
+
+Craftus's vertex work is too light to show a CPU-vertex FPS difference here.
+The D3D11 machines and the heavy fixtures (Mario, Smash, Pokemon) need the
+measurements listed below.
+
+**Correctness.** `AZAHAR_SHADER_JIT_VERIFY=1` on the Craftus world:
+72,059,418 invocations on the WebGL2 CPU-vertex path (main thread and its new
+pool) and 65,316,852 on software, all bit-identical to the interpreter.
+`568fba4be` fixes the likely cause of the Animal Crossing mismatches the JIT
+commit reported: float uniform writes were compared by value, so a change
+between 0.0 and -0.0 did not invalidate the interpreter's baked uniforms or
+the OpenGL uniform upload.
+
+The engine's Catch2 tests now build for Emscripten and run in Node.js
+(`-DENABLE_TESTS=ON`, then `node bin/Release/tests.js "[video_core]"`):
+
+- Thread pool and interval map: 115,103 assertions passed (50,800 + 64,303,
+  as on the 1080 Ti machine).
+- Shader tests against the interpreter and the WebAssembly JIT: 30 passed, 15
+  known deviations reported. The JIT matches the interpreter in every case.
+  Both deviate from PICA where the browser interpreter always has: `inf * 0`
+  is NaN rather than 0 in MUL/DP3/DP4/DPH/MAD, MIN/MAX treat NaN differently,
+  and nested loops are wrong (upstream excludes that case from its
+  interpreter run). These are tagged `[!mayfail]` on Emscripten only; native
+  expectations are unchanged. Fixing them changes rendering for every title
+  and invalidates bit-identical comparisons, so it is left for a separate
+  change.
+
+Other gates on this machine: both artifact smoke checks (1,916 exports),
+`--webgl-depth` (12,522 exact texels), scheduler, profile report, game
+library, input UI, browser regression (Craftus; Auto now selects WebGL2 on
+Metal) and all three `renderer_autofallback` directions passed. The audio and
+library replay tests skip without their commercial ROMs.
+
+**Shader compilation and caching (analysis, not changed).** Every WebGL2
+program compiles synchronously on the emulation thread: compile and
+`COMPILE_STATUS` per shader, link and `LINK_STATUS`, then three uniform-block
+and about eight uniform-location queries. Each query waits for the GPU
+process. WebGL has no program binaries, so nothing persists across sessions
+beyond Chrome's own GPU program cache, and `KHR_parallel_shader_compile` is
+unused. The UI forces the CPU vertex path on ANGLE/D3D11 because translating
+the generated PICA vertex shaders can take about a minute there. Next steps,
+in order: drop the per-shader status queries on success and compile with
+`KHR_parallel_shader_compile`, drawing with CPU vertices until a hardware
+vertex shader is ready (which could lift the D3D11 restriction); then record
+shader configurations per title in OPFS and precompile them at boot.
+
+**To run on the 1080 Ti machine** (D3D11 and native Vulkan cannot be
+measured on the M1):
+
+```bash
+# Ring vs orphan on each backend; switch D3D to orphan if it wins there
+AZAHAR_CHROME_ARGS="--use-angle=d3d11" node tests/webgl_buffer_upload_bench.cjs
+AZAHAR_CHROME_ARGS="--use-angle=vulkan --enable-features=Vulkan" node tests/webgl_buffer_upload_bench.cjs
+
+# CPU-vertex path before/after on the heavy fixtures, plus JIT verification
+AZAHAR_PAGE_QUERY='?hwShader=0' node tests/benchmark_browser.cjs --artifact webgl2 --state <fixture> ...
+AZAHAR_SHADER_JIT_VERIFY=1 AZAHAR_PAGE_QUERY='?hwShader=0' node tests/benchmark_browser.cjs --artifact webgl2 ...
+
+# Full suite, parity and Pokemon on both renderers
+node tests/run.cjs && node tests/run.cjs --parity && node tests/run.cjs --pokemon
+```

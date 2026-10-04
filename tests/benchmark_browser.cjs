@@ -26,6 +26,10 @@
  *   AZAHAR_PUPPETEER_MODULE  Puppeteer module to require (default: puppeteer-core)
  *   AZAHAR_CPU_PROFILE  Optional path for a Chrome .cpuprofile capture
  *   AZAHAR_PAGE_QUERY   Optional query string appended to the benchmark page URL
+ *   AZAHAR_BENCH_INPUT  JSON steps sent during the warmup, timed in seconds from its
+ *                       start, to reach a scene without a save state (homebrew has no
+ *                       title ID to save under). Touches are fractions of the canvas:
+ *                       [{"at":2,"touch":[0.31,0.92]},{"at":3,"key":"a","ms":200}]
  */
 
 const fs = require('fs');
@@ -135,6 +139,49 @@ function createBenchServer(romPath, statePath) {
 }
 
 // ── Benchmark script (runs inside page.evaluate) ──────────────────
+// Sends AZAHAR_BENCH_INPUT's steps while the page runs its warmup. Resolves to
+// the number of steps sent, or 0 when none are configured. A failed step fails
+// the run: measuring the wrong scene would report the wrong numbers.
+async function sendScriptedInput(page) {
+    if (!process.env.AZAHAR_BENCH_INPUT) return 0;
+    const steps = JSON.parse(process.env.AZAHAR_BENCH_INPUT)
+        .slice().sort((a, b) => a.at - b.at);
+    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+    let startedAt = 0;
+    for (const deadline = Date.now() + 180000; !startedAt && Date.now() < deadline;) {
+        startedAt = await page.evaluate(() => globalThis.__azaharWarmupStartedAt || 0);
+        if (!startedAt) await sleep(100);
+    }
+    if (!startedAt) throw new Error('AZAHAR_BENCH_INPUT: the warmup never started');
+    for (const step of steps) {
+        await sleep(Math.max(0, startedAt + step.at * 1000 - Date.now()));
+        if (step.touch) {
+            // The canvas can be taller than the viewport; input outside it is dropped.
+            const target = async () => {
+                const box = await (await page.$('#canvas')).boundingBox();
+                return [box.x + box.width * step.touch[0], box.y + box.height * step.touch[1]];
+            };
+            let [x, y] = await target();
+            const viewportHeight = page.viewport().height;
+            if (y < 0 || y >= viewportHeight) {
+                await page.evaluate(dy => window.scrollBy(0, dy), y - viewportHeight / 2);
+                [x, y] = await target();
+            }
+            await page.mouse.move(x, y);
+            await page.mouse.down();
+            await sleep(250);
+            await page.mouse.up();
+        } else if (step.key) {
+            await page.keyboard.down(step.key);
+            await sleep(step.ms || 200);
+            await page.keyboard.up(step.key);
+        } else {
+            throw new Error(`AZAHAR_BENCH_INPUT: unknown step ${JSON.stringify(step)}`);
+        }
+    }
+    return steps.length;
+}
+
 async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableProfile, manualStart,
     stateName, artifact) {
     // Disable the 30s default evaluate timeout — ROM load + warmup + benchmark
@@ -549,6 +596,7 @@ async function runBenchInPage(page, romExt, benchSeconds, warmupSeconds, enableP
             // Warmup
             let warmupStats = null;
             let restoreStats = null;
+            globalThis.__azaharWarmupStartedAt = Date.now();
             if (stateName_) {
                 restoreStats = await restoreState();
                 // Restoring has its own short correctness settle, but it must
@@ -1067,9 +1115,12 @@ async function main() {
                 }, Number(process.env.AZAHAR_LIVE_SCREENSHOT_AT) * 1000);
             }
             await (await page.$('#rom-file')).uploadFile(path.resolve(romPath));
+            const scriptedInput = sendScriptedInput(page);
             const runs = await runBenchInPage(page, romExt, BENCH_SECONDS, WARMUP_SECONDS, PROFILE,
                 MANUAL_START, stateName, ARTIFACT);
             clearTimeout(liveShot);
+            const inputSteps = await scriptedInput;
+            if (inputSteps) console.log(`   Scripted input: ${inputSteps} steps sent`);
 
             for (const run of runs) {
                 const b = run.bench;

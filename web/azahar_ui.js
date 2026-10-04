@@ -40,7 +40,9 @@
     // Windows D3D11 or Vulkan machine therefore keeps its own answer.
     let webglAdapter = '';
     const RENDERER_VERDICT_KEY = 'azahar-renderer-verdict';
-    const RENDERER_VERDICT_VERSION = 1;
+    // Version 2: the engine stopped stalling ANGLE Metal (streamed uploads now
+    // orphan their buffers), so software verdicts measured before are stale.
+    const RENDERER_VERDICT_VERSION = 2;
 
     function readRendererVerdict() {
         try {

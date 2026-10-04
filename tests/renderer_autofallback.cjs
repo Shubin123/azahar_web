@@ -53,7 +53,14 @@ async function main() {
     // Pinned mode asserts the opposite guarantee: an explicit choice in the
     // dropdown must survive even on a backend Auto would abandon, so the
     // Windows/D3D11 and Vulkan configurations keep behaving as before.
-    const url = pinnedMode ? `${origin}/index.html?renderer=webgl2` : `${origin}/index.html`;
+    //
+    // The stalling backend used to be ANGLE Metal itself: streamed uploads into
+    // large rings made its GPU process copy whole buffers. The engine now
+    // orphans those buffers, so `glStream=ring` restores the old upload pattern
+    // to keep a reproducible stall for the positive and pinned directions.
+    const stall = expectFallback || pinnedMode ? 'glStream=ring' : '';
+    const query = [pinnedMode ? 'renderer=webgl2' : '', stall].filter(Boolean).join('&');
+    const url = `${origin}/index.html${query ? `?${query}` : ''}`;
     console.log(`# Renderer auto-fallback test${pinnedMode ? ' (pinned WebGL2)' : ''}`);
     console.log(`# ROM: ${path.basename(romPath)}`);
     console.log(`# URL: ${url}${pinnedMode ? '' : ' (Auto — no renderer query)'}`);
