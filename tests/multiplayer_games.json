@@ -1,0 +1,39 @@
+{
+  "$comment": [
+    "Games for tests/multiplayer.test.cjs. Each build names a decrypted ROM under the repository.",
+    "Fixtures are save states captured with tests/capture_fixture.cjs into",
+    "tmp_test/fixtures/<ROM file name without extension, non-alphanumerics as _>/<scene>/.",
+    "lobby-host: the console is already hosting the game's local wireless room (it advertises it).",
+    "lobby-guest: the console is on the screen that lists nearby rooms.",
+    "Capture the two scenes in separate sessions so each console has its own address and ID.",
+    "Steps run after linking: 'key CODE MS', 'touch X Y [MS]' (fractions of the canvas), 'wait MS'.",
+    "A pairing [hostBuild, guestBuild] with different builds also checks cross-version play."
+  ],
+  "smash": {
+    "title": "Super Smash Bros. for Nintendo 3DS",
+    "builds": {
+      "full": {
+        "rom": "test_games/Smash_Bros_USA_Rev10_Decrypted.3ds"
+      },
+      "kiosk": {
+        "rom": "test_games/Smash_Bros_Kiosk_Decrypted.3ds",
+        "localWireless": false,
+        "note": "The kiosk demo shows Group on its main menu, but choosing it only replays the selection animation; the demo never calls the local wireless service (checked with logFilter=Service.NWM:Debug, 2026-10-05)."
+      }
+    },
+    "host": { "fixture": "lobby-host", "steps": [] },
+    "guest": { "fixture": "lobby-guest", "steps": ["wait 3000", "key KeyA 600"] },
+    "pairings": [["full", "full"], ["full", "kiosk"], ["kiosk", "full"]]
+  },
+  "mario-kart-7": {
+    "title": "Mario Kart 7",
+    "builds": {
+      "full": {
+        "rom": "test_games/Mario_Kart_7_USA_Rev1_Decrypted.3ds"
+      }
+    },
+    "host": { "fixture": "lobby-host", "steps": [] },
+    "guest": { "fixture": "lobby-guest", "steps": ["wait 3000", "key KeyA 600"] },
+    "pairings": [["full", "full"]]
+  }
+}

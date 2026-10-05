@@ -11,7 +11,9 @@
     "library:generate": "python3 scripts/generate_games_library.py",
     "smoke": "node tests/web_artifact_smoke.cjs",
     "bench": "node tests/benchmark_browser.cjs",
-    "test:audio": "node tests/audio.test.cjs"
+    "test:audio": "node tests/audio.test.cjs",
+    "test:local-play": "node tests/local_play.test.cjs",
+    "test:multiplayer": "node tests/multiplayer.test.cjs --link-smoke && node tests/multiplayer.test.cjs"
   },
   "repository": {
     "type": "git",

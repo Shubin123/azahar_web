@@ -45,6 +45,41 @@ Azahar WebAssembly port targeting modern web browsers via Emscripten.
 - `azahar_shutdown()`: C++ export stopping emulation and releasing frontend resources.
 - `azahar_audio_ring()`: C++ export returning the address of the game-audio ring buffer in shared WASM memory (header of u32 frames written, u32 frames read, u32 capacity, u32 sample rate; interleaved stereo s16 samples from byte 16). `azahar_step_frame()` keeps it filled; `web/azahar_audio.js` drains it from an AudioWorklet.
 - `AzaharRomFS.mount(FS, path, blob)` (`web/azahar_romfs.js`): mounts a File/Blob as a read-only MEMFS file read on demand, so multi-GiB images never occupy browser memory. Downloads and played titles are stored in the Origin Private File System.
+- `azahar_net_join(nickname, mac)`, `azahar_net_leave()`, `azahar_net_receive(data, size)`, `azahar_net_console_mac(out)`, `azahar_net_set_cross_version(enable)`: the serverless Local Play link (see below). After `azahar_net_join`, every local wireless frame the console transmits is passed to `Module.azaharNetSend(bytes)`; frames from peers go back in through `azahar_net_receive`. A null `mac` joins under the console's own address and needs a running title.
+
+## Local Play (multiplayer)
+
+Games' local wireless modes (the 3DS's "Local Play", service `nwm::UDS`) work between browsers with no server. The engine's `RoomMember` has a direct-link mode in which the page carries 802.11 frames between consoles and each console filters them by its own MAC address, as a room server would. `web/azahar_netplay.js` moves those frames:
+
+- **Direct (WebRTC):** the host presses *Host: create invite* on the Local Play card and sends the code to a friend by any means; the friend pastes it into *Use pasted code* and sends back the reply code, which the host pastes in turn. Each further guest needs one more invite; the host relays frames between guests. A public STUN server is used only to discover each browser's internet address (needed outside one home network; it can be switched off under *More options*). No game data passes through any server.
+- **Same-browser tabs:** *More options → Link tabs* (or `?link=tabs:ROOM`) links tabs of one browser through a `BroadcastChannel`. This is for testing; background tabs pause emulation.
+
+Consoles join under their own MAC address once a title runs. Each console has its own address and ID, so two players must not run copies of the same save state; the card warns when two consoles share an address. Save states can be loaded while linked.
+
+**Cross-version play** (on by default) lets different builds of a game, such as a demo and the retail game, find each other: when a title scans for its own `wlan_comm_id`/`id`, beacons from another build are rewritten to those ids, with the encrypted node list and network-info hash regenerated. Whether two builds can then play depends on the games themselves. The Super Smash Bros. kiosk demo's Group mode, for example, never starts local wireless at all.
+
+Useful while debugging: `?logFilter=Service.NWM:Debug` widens the engine log for one session, and the engine logs `Hosting network`, `Scanning for`, `Node N joined the hosted network` and `Joined a network as node N` at the Info level.
+
+### Multiplayer tests and lobby fixtures
+
+- `tests/local_play.test.cjs` (no ROM): tabs and WebRTC links, invite/reply codes, host relay, leaving.
+- `tests/multiplayer.test.cjs --link-smoke`: two browsers running a real title link under distinct console addresses.
+- `tests/multiplayer.test.cjs`: for each pairing in `tests/multiplayer_games.json` (Super Smash Bros. full/kiosk, Mario Kart 7), boots two browsers, restores their lobby fixtures, links them with invite/reply codes, runs the guest's join steps, and passes once the host accepts a node and the guest joins. Pairings of different builds also require the cross-version beacon. Missing ROMs, encrypted dumps and missing fixtures are skipped with the reason.
+
+Lobby fixtures make each run jump straight to the game's local wireless lobby. Capture them with the fixture tool, in two separate sessions so the two consoles have different identities:
+
+```bash
+# Session 1: get to the room you host, so the console is already advertising it.
+AZAHAR_RENDERER=software node tests/capture_fixture.cjs serve test_games/<rom>.3ds
+node tests/capture_fixture.cjs key KeyA 600      # drive the menus; `shot` shows the screen
+node tests/capture_fixture.cjs save lobby-host
+node tests/capture_fixture.cjs close
+# Session 2: a fresh console, on the screen that lists nearby rooms.
+AZAHAR_RENDERER=software node tests/capture_fixture.cjs serve test_games/<rom>.3ds
+node tests/capture_fixture.cjs save lobby-guest
+```
+
+`load SCENE` restores a saved scene in a session, `log PATTERN` filters the log, `touch X Y MS` holds a touch for slow scenes, and `AZAHAR_FIXTURE_QUERY=logFilter=Service.NWM:Debug` passes page options. Adjust a game's `guest.steps` in `multiplayer_games.json` to whatever joins the advertised room from the guest's lobby screen. Azahar needs decrypted dumps; the test reports an encrypted one.
 
 ### Core ↔ EmuWindow Software Presentation
 - `EmuWindow_SDL2_SW::PresentSingleFrame()`: Non-blocking function blitting current `RendererSoftware` framebuffers to SDL surface and updating HTML5 canvas.

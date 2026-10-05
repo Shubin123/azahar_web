@@ -16,6 +16,8 @@
  *   node tests/run.cjs --library            # Library catalog, cache, and replay flows
  *   node tests/run.cjs --input              # Keymap menu and input bindings
  *   node tests/run.cjs --audio              # Game audio, Audio widget, pacing, resampling
+ *   node tests/run.cjs --local-play         # Local Play links between tabs and browsers (no ROM)
+ *   node tests/run.cjs --multiplayer        # Games' local wireless between two browsers (lobby fixtures)
  *   node tests/run.cjs --pokemon            # Pokemon X opening: 3D stripe artifact, run errors (~5 min)
  *   node tests/run.cjs --parity             # WebGL2 vs software scene content on title screens (~25 min)
  *   node tests/run.cjs --webgl-depth        # Exact depth/stencil shader readback (engine sources required)
@@ -39,7 +41,7 @@ const argVal = (k, d) => {
 
 const explicit = argFlag('--smoke') || argFlag('--bench') || argFlag('--regression') ||
   argFlag('--transition') || argFlag('--save-states') || argFlag('--autofallback') ||
-  argFlag('--library') || argFlag('--input') || argFlag('--audio') || argFlag('--pokemon') || argFlag('--parity') || argFlag('--webgl-depth');
+  argFlag('--library') || argFlag('--input') || argFlag('--audio') || argFlag('--local-play') || argFlag('--multiplayer') || argFlag('--pokemon') || argFlag('--parity') || argFlag('--webgl-depth');
 const runSmoke = !explicit || argFlag('--smoke');
 const runBench = !explicit || argFlag('--bench');
 const runRegression = !explicit || argFlag('--regression');
@@ -49,6 +51,8 @@ const runAutoFallback = argFlag('--autofallback');
 const runLibrary = argFlag('--library');
 const runInput = !explicit || argFlag('--input');
 const runAudio = !explicit || argFlag('--audio');
+const runLocalPlay = !explicit || argFlag('--local-play');
+const runMultiplayer = argFlag('--multiplayer');
 const runPokemon = argFlag('--pokemon');
 const runParity = argFlag('--parity');
 const runWebGLDepth = argFlag('--webgl-depth');
@@ -245,6 +249,22 @@ if (runInput) {
     header('Input UI'); console.log('  Skipped: Chrome not found.'); skipped++;
   } else {
     run('Input UI', path.join(TESTS_DIR, 'input_ui.test.cjs'), [], { timeout: 120000 });
+  }
+}
+
+if (runLocalPlay || runMultiplayer) {
+  if (!cfg.chromePath) {
+    header('Local Play'); console.log('  Skipped: Chrome not found.'); skipped++;
+  } else {
+    if (runLocalPlay) {
+      run('Local Play', path.join(TESTS_DIR, 'local_play.test.cjs'), [], { timeout: 300000 });
+    }
+    if (runMultiplayer) {
+      // Links two consoles running a real title, then plays each game whose
+      // decrypted ROMs and lobby fixtures are present (others are skipped).
+      run('Multiplayer link', path.join(TESTS_DIR, 'multiplayer.test.cjs'), ['--link-smoke'], { timeout: 900000 });
+      run('Multiplayer games', path.join(TESTS_DIR, 'multiplayer.test.cjs'), [], { timeout: 3600000 });
+    }
   }
 }
 

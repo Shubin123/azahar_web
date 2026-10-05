@@ -428,6 +428,10 @@
             $('btn-local-play-leave').disabled = !state.mode;
             if (!state.mode) {
                 if (!status.dataset.kind || status.dataset.kind === 'linked') say('Not linked.');
+            } else if (state.mac && state.peers.some(peer => peer.mac === state.mac)) {
+                // Consoles restored from one save state share an address and cannot see each other.
+                say(`Another console has this console's address (${state.mac}). ` +
+                    'Each player needs their own save, not a copy of someone else\'s.', 'error');
             } else {
                 const count = state.peers.length;
                 const consoles = `${count} other console${count === 1 ? '' : 's'}`;
