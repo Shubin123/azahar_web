@@ -1,12 +1,13 @@
 'use strict';
 // Local CDP fixture session. Start with `serve ROM`; use `shot`, `key KEY MS`,
-// `touch X Y` (fractions of canvas), `save SCENE`, `log`, and `close` from another shell.
+// `touch X Y [MS]` (fractions of canvas), `save SCENE`, `load SCENE`, `log [PATTERN]`, `eval EXPR`, and `close` from another shell.
 // Captures stay under ignored tmp_test; never publish game data.
 const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
 const cfg = require('./config.cjs');
 const { createWebServer } = require('../web/server.cjs');
+const { restoreState } = require('./fixture_state.cjs');
 const port = Number(process.env.AZAHAR_FIXTURE_PORT || 18765);
 const [command, ...args] = process.argv.slice(2);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -32,7 +33,11 @@ async function main() {
     const puppeteer = require(process.env.AZAHAR_PUPPETEER_MODULE || 'puppeteer-core');
     const browser = await puppeteer.launch({ executablePath: cfg.chromePath,
         headless: true, defaultViewport: { width: 1100, height: 1400 },
-        args: ['--no-sandbox'], protocolTimeout: 120000 });
+        // AZAHAR_FIXTURE_GPU=1 renders WebGL2 on the real GPU; headless Chrome
+        // otherwise falls back to SwiftShader, which is far too slow for gameplay.
+        args: ['--no-sandbox', ...(process.env.AZAHAR_FIXTURE_GPU === '1' ?
+            ['--use-angle=vulkan', '--enable-features=Vulkan', '--ignore-gpu-blocklist', '--enable-gpu'] : [])],
+        protocolTimeout: 120000 });
     const page = await browser.newPage();
     const errors = [];
     page.on('pageerror', error => errors.push(String(error)));
@@ -65,7 +70,10 @@ async function main() {
                 const box = await (await page.$('#canvas')).boundingBox();
                 await page.mouse.move(box.x + box.width * Number(parameters[0]),
                     box.y + box.height * Number(parameters[1]));
-                await page.mouse.down(); await sleep(250); await page.mouse.up();
+                await page.mouse.down();
+                // Slow scenes sample input rarely; `touch X Y MS` holds longer.
+                await sleep(Math.min(10000, Math.max(50, Number(parameters[2] || 250))));
+                await page.mouse.up();
             } else if (action === 'save') {
                 const scene = parameters[0];
                 if (!/^[a-zA-Z0-9_-]+$/.test(scene)) throw new Error('Use a simple scene slug');
@@ -95,14 +103,34 @@ async function main() {
                 fs.writeFileSync(path.join(directory, `${scene}.json`), JSON.stringify(result, null, 2));
                 await page.click('#btn-run');
             } else if (action === 'log') {
-                result = { log: await page.$eval('#log', element => element.textContent.slice(-4000)),
+                // `log PATTERN` keeps only matching lines, so service messages survive GPU noise.
+                result = { log: await page.$eval('#log', (element, pattern) => {
+                    const lines = element.textContent.split('\n');
+                    return (pattern ? lines.filter(line => new RegExp(pattern).test(line)) : lines)
+                        .join('\n').slice(-4000);
+                }, parameters[0] || ''),
                     status: await page.$eval('#status', element => element.textContent), errors };
+            } else if (action === 'load') {
+                // `load SCENE` restores a fixture saved by `save SCENE` (or a .cst path).
+                const target = parameters[0] || '';
+                const state = target.endsWith('.cst') ? path.resolve(target) : (() => {
+                    if (!/^[a-zA-Z0-9_-]+$/.test(target)) throw new Error('Use a scene slug or a .cst path');
+                    const sceneDirectory = path.join(directory, target);
+                    const file = fs.readdirSync(sceneDirectory).find(entry => entry.endsWith('.cst'));
+                    if (!file) throw new Error(`No state saved for ${target}`);
+                    return path.join(sceneDirectory, file);
+                })();
+                await restoreState(page, state);
+            } else if (action === 'eval') {
+                // Development aid: evaluate an expression in the page (local control port only).
+                result = { value: await page.evaluate(parameters.join(' ')) };
             } else if (action === 'close') {
                 await browser.close(); web.close(); control.close();
                 result = { closed: true };
             } else if (action !== 'shot') throw new Error('Unknown action');
             if (!result) result = { screenshot: await shot('latest'), errors,
-                status: await page.$eval('#status', element => element.textContent) };
+                status: await page.$eval('#status', element => element.textContent),
+                fps: await page.$eval('#fps', element => element.textContent) };
             res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(result));
         } catch (error) { res.writeHead(500); res.end(JSON.stringify({ error: String(error) })); }
         finally { busy = false; }
@@ -111,7 +139,9 @@ async function main() {
     // AZAHAR_FIXTURE_SPEED sets the starting fast-forward (default 4x).
     const renderer = process.env.AZAHAR_RENDERER ?
         `&renderer=${encodeURIComponent(process.env.AZAHAR_RENDERER)}` : '';
-    await page.goto(`http://127.0.0.1:${web.address().port}/?speed=${process.env.AZAHAR_FIXTURE_SPEED || 4}${renderer}`, { waitUntil: 'networkidle0' });
+    // AZAHAR_FIXTURE_QUERY appends page options, for example `logFilter=Service.NWM:Debug`.
+    const extra = process.env.AZAHAR_FIXTURE_QUERY ? `&${process.env.AZAHAR_FIXTURE_QUERY}` : '';
+    await page.goto(`http://127.0.0.1:${web.address().port}/?speed=${process.env.AZAHAR_FIXTURE_SPEED || 4}${renderer}${extra}`, { waitUntil: 'networkidle0' });
     await page.waitForFunction(() => document.querySelector('#status').textContent.includes('Emulator ready'),
         { timeout: 120000 });
     await (await page.$('#rom-file')).uploadFile(rom);
