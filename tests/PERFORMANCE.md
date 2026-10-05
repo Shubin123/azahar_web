@@ -674,3 +674,55 @@ AZAHAR_SHADER_JIT_VERIFY=1 AZAHAR_PAGE_QUERY='?hwShader=0' node tests/benchmark_
 # Full suite, parity and Pokemon on both renderers
 node tests/run.cjs && node tests/run.cjs --parity && node tests/run.cjs --pokemon
 ```
+
+## 2026-10-04 iOS and Safari (WebKit)
+
+Every iOS browser is WebKit, and no ROM picked from the device could start
+there: the page froze at "Mounting ROM..." on iPhone and on Safari for macOS.
+Reproduced without a device in Playwright's WebKit with iPhone emulation and
+in desktop WebKit; Chrome and Chromium's Android emulation were unaffected.
+
+**Cause.** `azahar_romfs.js` serves the emulator's synchronous file reads from
+a worker while the main thread spins on an atomic. WebKit services a worker's
+Blob reads on the main thread, so the read never completed. Isolated in a
+blank page (worker read of a 1 MiB Blob while the main thread spins, 4 s
+limit):
+
+| Worker read | WebKit | Chromium |
+|---|---|---|
+| `FileReaderSync` on the Blob | deadlock | 0.3 ms |
+| `blob.arrayBuffer()` | deadlock | 0.2 ms |
+| OPFS `FileSystemSyncAccessHandle.read` | 0.1 ms | 0.0 ms |
+
+**Fix.** `mount()` first reads 64 KiB through the worker with a 500 ms limit.
+Where that completes (Chrome, Firefox) nothing else changes. Where it does not,
+the worker copies the file into one OPFS file (`staging/mounted.rom`, replaced
+by the next title) before the game starts, reporting progress in the status
+line, and serves reads from a sync access handle. Detection is by behaviour,
+not user agent, so iOS Chrome/Firefox (also WebKit) take the same path.
+
+**Memory hedge.** The glue allocates a 768 MiB shared heap with a 4 GiB
+maximum, and a shared memory reserves its maximum. If a device refuses that
+allocation, the UI now retries with 2 GiB, 1.5 GiB and 1 GiB maximums.
+Nothing changes where the first allocation succeeds. This could not be checked
+on an iPhone, only with a simulated limit.
+
+**Touch was checked and needs no change.** Playwright's `touchscreen.tap`
+never registers in the game, in WebKit or Chromium, which first looked like a
+mobile touch bug. Real touch events sent through the Chrome DevTools Protocol
+register at every hold from 0 to 150 ms, on the old and new builds alike, so
+it is an artefact of that helper. A deferred-release engine change written for
+it was reverted, and the engine is unchanged.
+
+`tests/webkit_mobile.test.cjs` covers WebKit with iPhone emulation in three
+configurations: isolation headers from the server, a static host where
+`coi-serviceworker.js` provides isolation, and a simulated 2 GiB shared-memory
+limit. It requires the staged path to be taken and the game to run. Playwright
+is optional and the test skips without it. With the old `azahar_romfs.js` all
+three cases fail on the ROM-load timeout; with the new one all pass (Craftus,
+62-63 game FPS, 103-105%).
+
+Not covered without a device: real iOS memory limits and thermal throttling,
+Safari's OPFS quota on a full device, and audio start-up on iOS. Library
+titles already stored in OPFS are copied a second time on WebKit; reading
+the stored file directly would avoid that.

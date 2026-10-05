@@ -50,7 +50,9 @@ PROJECT.md              # Detailed architecture and optimization history
 
 ## Requirements
 
-**To run:** Any modern browser with WebAssembly and SharedArrayBuffer support (Chrome 91+, Firefox 79+, Safari 15.2+).
+**To run:** Any modern browser with WebAssembly SIMD and SharedArrayBuffer support (Chrome 91+, Firefox 89+, Safari 16.4+, iOS/iPadOS 16.4+).
+
+On Safari and every iOS browser (all are WebKit), a ROM picked from the device is first copied into the browser's private storage (shown as "Copying ROM into browser storage"), because WebKit cannot read the picked file while a game runs. There is only ever one such copy, replaced by the next title; it needs free space equal to the ROM's size.
 
 **To build from source:** Emscripten SDK 6.0+, CMake, Ninja, and the Azahar source tree checked out at `./azahar/`.
 
@@ -119,6 +121,10 @@ AZAHAR_ROM_PATH=test_games/your_rom.3ds node tests/run.cjs --transition
 
 # Save, restore, reload, and delete an IndexedDB-backed save through the UI
 node tests/run.cjs --save-states --artifact webgl2
+
+# Safari/iOS engine: WebKit with iPhone emulation (optional Playwright install)
+npm install --no-save playwright && npx playwright install webkit
+node tests/webkit_mobile.test.cjs --rom test_games/your_rom.3ds
 ```
 
 ## Architecture

@@ -9,10 +9,18 @@
  *
  * The emulator reads files synchronously on the browser main thread, where
  * Blob reads are asynchronous. A small dedicated worker performs the reads
- * with FileReaderSync and hands the bytes back through a SharedArrayBuffer;
- * the main thread spins on an atomic flag meanwhile (Atomics.wait is not
- * allowed there). Recently read 1 MiB blocks are kept in a small LRU cache so
- * the many small header/table reads do not each round-trip to the worker.
+ * and hands the bytes back through a SharedArrayBuffer; the main thread spins
+ * on an atomic flag meanwhile (Atomics.wait is not allowed there). Recently
+ * read 1 MiB blocks are kept in a small LRU cache so the many small
+ * header/table reads do not each round-trip to the worker.
+ *
+ * The worker reads the Blob directly with FileReaderSync where it can. WebKit
+ * (Safari on macOS, every browser on iOS) services a worker's Blob reads on
+ * the main thread, so those reads never finish while it spins. mount()
+ * therefore checks that one read completes; if it does not, the worker copies
+ * the file into the Origin Private File System before the game starts and
+ * reads it with a FileSystemSyncAccessHandle, which does not need the main
+ * thread.
  *
  * Usage: await AzaharRomFS.mount(Module.FS, '/rom.3ds', fileOrBlob);
  */
@@ -32,20 +40,51 @@
     // because images larger than 2 GiB exceed Int32 range.
     const WORKER_SOURCE = `
         'use strict';
-        onmessage = (event) => {
-            const { blob, control, offsetBox, data } = event.data;
+        const STAGE_CHUNK = 16 << 20;
+        onmessage = async (event) => {
+            const { mode, blob, control, offsetBox, data, directory, name } = event.data;
             const bytes = new Uint8Array(data);
-            const reader = new FileReaderSync();
-            postMessage('ready');
+            let readAt;
+            if (mode === 'staged') {
+                // Copy the Blob into a private file; reads then come from disk
+                // without the main thread's help.
+                let handle;
+                try {
+                    const root = await navigator.storage.getDirectory();
+                    const dir = await root.getDirectoryHandle(directory, { create: true });
+                    const file = await dir.getFileHandle(name, { create: true });
+                    handle = await file.createSyncAccessHandle();
+                    handle.truncate(0);
+                    for (let offset = 0; offset < blob.size; offset += STAGE_CHUNK) {
+                        const chunk = await blob.slice(offset, offset + STAGE_CHUNK).arrayBuffer();
+                        if (handle.write(new Uint8Array(chunk), { at: offset }) !== chunk.byteLength) {
+                            throw new Error('short write');
+                        }
+                        postMessage({ progress: Math.min(1, (offset + chunk.byteLength) / blob.size) });
+                    }
+                    handle.flush();
+                } catch (error) {
+                    try { handle?.close(); } catch (_) {}
+                    postMessage({ error: String(error && error.message || error) });
+                    return;
+                }
+                readAt = (start, end) => handle.read(bytes.subarray(0, end - start), { at: start });
+            } else {
+                const reader = new FileReaderSync();
+                readAt = (start, end) => {
+                    const chunk = new Uint8Array(reader.readAsArrayBuffer(blob.slice(start, end)));
+                    bytes.set(chunk);
+                    return chunk.length;
+                };
+            }
+            postMessage({ ready: true });
             for (;;) {
                 Atomics.wait(control, 0, 0);
                 if (Atomics.load(control, 0) !== 1) continue;
                 try {
                     const start = offsetBox[0];
                     const end = Math.min(blob.size, start + control[1]);
-                    const chunk = new Uint8Array(reader.readAsArrayBuffer(blob.slice(start, end)));
-                    bytes.set(chunk);
-                    control[1] = chunk.length;
+                    control[1] = readAt(start, end);
                     control[2] = 0;
                 } catch (error) {
                     control[1] = 0;
@@ -56,9 +95,20 @@
         };
     `;
 
+    // Where WebKit's copy of the mounted file lives: one file, replaced on
+    // every mount and removed on unmount, so copies never accumulate.
+    const STAGING_DIRECTORY = 'staging';
+    const STAGING_NAME = 'mounted.rom';
+    // How long the main thread waits for the probe read before deciding that
+    // a worker cannot read Blobs while it spins. Reading 64 KiB directly takes
+    // well under a millisecond in Chrome.
+    const PROBE_TIMEOUT_MS = 500;
+
     let workerUrl = null;
 
-    function startReader(blob) {
+    // Starts a reader worker in `mode` ('direct' or 'staged') and resolves once
+    // it serves reads, to { worker, staged, readRange, probe }.
+    function startReader(blob, mode, onProgress) {
         if (typeof SharedArrayBuffer === 'undefined') {
             return Promise.reject(new Error('Lazy ROM loading needs a cross-origin isolated page.'));
         }
@@ -69,14 +119,17 @@
         const data = new SharedArrayBuffer(TRANSFER_BYTES);
         const view = new Uint8Array(data);
 
-        // Returns a view of the shared buffer valid until the next call.
-        function readRange(offset, length) {
+        // Returns a view of the shared buffer valid until the next call, or
+        // null when `timeoutMs` passes without a reply.
+        function request(offset, length, timeoutMs = Infinity) {
             offsetBox[0] = offset;
             control[1] = length;
             Atomics.store(control, 0, 1);
             Atomics.notify(control, 0);
+            const deadline = performance.now() + timeoutMs;
             while (Atomics.load(control, 0) !== 2) {
                 // Spin: the main thread may not block on Atomics.wait.
+                if (timeoutMs !== Infinity && performance.now() > deadline) return null;
             }
             const failed = control[2] !== 0;
             const received = control[1];
@@ -86,10 +139,42 @@
         }
 
         return new Promise((resolve, reject) => {
-            worker.onmessage = () => resolve({ worker, readRange });
+            worker.onmessage = event => {
+                const message = event.data;
+                if (message.progress !== undefined) {
+                    onProgress?.(message.progress);
+                } else if (message.error) {
+                    worker.terminate();
+                    reject(new Error(`Could not copy the ROM into browser storage: ${message.error}`));
+                } else if (message.ready) {
+                    resolve({
+                        worker,
+                        staged: mode === 'staged',
+                        readRange: (offset, length) => request(offset, length),
+                        probe: () => request(0, Math.min(blob.size, 64 << 10), PROBE_TIMEOUT_MS),
+                    });
+                }
+            };
             worker.onerror = event => reject(new Error(event.message || 'ROM reader worker failed'));
-            worker.postMessage({ blob, control, offsetBox, data });
+            worker.postMessage({ mode, blob, control, offsetBox, data,
+                                 directory: STAGING_DIRECTORY, name: STAGING_NAME });
         });
+    }
+
+    // Reads the Blob directly when a worker can do so while the main thread
+    // waits; otherwise (WebKit) serves reads from a staged copy.
+    async function openReader(blob, onProgress) {
+        const direct = await startReader(blob, 'direct');
+        if (blob.size === 0 || direct.probe() !== null) return direct;
+        // The probe read is still pending; discard the worker and its buffers.
+        direct.worker.terminate();
+        if (!navigator.storage?.getDirectory) {
+            throw new Error('This browser cannot read the ROM file while the game runs.');
+        }
+        // Removing the previous title's copy must finish before this one is
+        // created under the same name.
+        await stagedCopyRemoval;
+        return startReader(blob, 'staged', onProgress);
     }
 
     function createBlockCache(size, readRange) {
@@ -156,9 +241,11 @@
 
     const mounted = new Map();
 
-    async function mount(FS, path, blob) {
+    // options.onProgress(fraction) reports the copy when the file has to be
+    // staged in browser storage first (WebKit).
+    async function mount(FS, path, blob, options = {}) {
         unmount(FS, path);
-        const reader = await startReader(blob);
+        const reader = await openReader(blob, options.onProgress);
         const contents = createBlockCache(blob.size, reader.readRange);
 
         const slash = path.lastIndexOf('/');
@@ -185,8 +272,19 @@
         if (reader) {
             reader.worker.terminate();
             mounted.delete(path);
+            if (reader.staged) stagedCopyRemoval = removeStagedCopy();
         }
         try { FS.unlink(path); } catch (_) { /* not present */ }
+    }
+
+    let stagedCopyRemoval = Promise.resolve();
+
+    async function removeStagedCopy() {
+        try {
+            const root = await navigator.storage.getDirectory();
+            const directory = await root.getDirectoryHandle(STAGING_DIRECTORY);
+            await directory.removeEntry(STAGING_NAME);
+        } catch (_) { /* already gone, or still held by the closing worker */ }
     }
 
     // ── Disk-backed storage for downloaded titles ─────────────────────
@@ -290,5 +388,10 @@
         return data ? (typeof data.size === 'number' ? data.size : data.length) : 0;
     }
 
-    window.AzaharRomFS = { mount, unmount, store, sizeOf };
+    // True when the file at `path` is served from a staged copy (WebKit).
+    function isStaged(path) {
+        return Boolean(mounted.get(path)?.staged);
+    }
+
+    window.AzaharRomFS = { mount, unmount, isStaged, store, sizeOf };
 })();

@@ -838,6 +838,39 @@ void main() { frag_color = vec4(1.0); }`);
     // 'EmscriptenEH' has already been declared") and stalls start-up, so all
     // callers share one load.
     let wasmModuleLoad = null;
+
+    // The generated glue allocates its shared heap with a 4 GiB maximum. A
+    // shared WebAssembly memory reserves its maximum up front, which phones
+    // (iOS in particular) may refuse with a RangeError even though the
+    // emulator rarely grows past its initial 768 MiB. Only when that
+    // allocation fails, retry with smaller maximums; everywhere it succeeds
+    // the original constructor's result is returned unchanged.
+    function installSharedMemoryFallback() {
+        const NativeMemory = WebAssembly.Memory;
+        if (NativeMemory.azaharFallback) return;
+        const fallbackPages = [32768, 24576, 16384]; // 2 GiB, 1.5 GiB, 1 GiB
+        function Memory(descriptor) {
+            try {
+                return new NativeMemory(descriptor);
+            } catch (error) {
+                if (!descriptor?.shared || !descriptor.maximum) throw error;
+                for (const maximum of fallbackPages) {
+                    if (maximum >= descriptor.maximum || maximum < descriptor.initial) continue;
+                    try {
+                        const memory = new NativeMemory({...descriptor, maximum});
+                        log(`Shared memory with a ${descriptor.maximum / 16} MiB maximum was refused ` +
+                            `(${error}); using ${maximum / 16} MiB.`);
+                        return memory;
+                    } catch (_) { /* try the next size */ }
+                }
+                throw error;
+            }
+        }
+        Memory.prototype = NativeMemory.prototype;
+        Memory.azaharFallback = true;
+        WebAssembly.Memory = Memory;
+    }
+
     function loadWasmModule() {
         wasmModuleLoad ||= loadWasmModuleOnce().catch(error => {
             wasmModuleLoad = null;
@@ -855,6 +888,7 @@ void main() { frag_color = vec4(1.0); }`);
         log(`Loading ${artifactName}.js glue script...`);
         setStatus('Loading WebAssembly module...');
 
+        installSharedMemoryFallback();
         return new Promise((resolve, reject) => {
             const script = document.createElement('script');
             script.src = `${artifactName}.js`;
@@ -1033,8 +1067,14 @@ void main() { frag_color = vec4(1.0); }`);
             // takes ownership to avoid a second copy.
             if (romData) {
                 if (romData instanceof Blob && window.AzaharRomFS) {
-                    await window.AzaharRomFS.mount(wasmModule.FS, romPath, romData);
-                    log(`ROM mounted lazily: ${romPath} (${romData.size} bytes)`);
+                    await window.AzaharRomFS.mount(wasmModule.FS, romPath, romData, {
+                        onProgress: fraction => {
+                            setStatus(`Copying ROM into browser storage (${Math.round(fraction * 100)}%)...`);
+                            showProgress(fraction * 100);
+                        },
+                    });
+                    log(`ROM mounted lazily: ${romPath} (${romData.size} bytes` +
+                        `${window.AzaharRomFS.isStaged?.(romPath) ? ', staged copy for this browser' : ''})`);
                 } else {
                     wasmModule.FS.writeFile(romPath, romData, {canOwn: true});
                     log(`ROM written to MEMFS: ${romPath}`);
