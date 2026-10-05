@@ -262,6 +262,7 @@
 
     enterButton?.addEventListener('click', () => (active ? exit() : void enter()));
     exitButton?.addEventListener('click', exit);
+    document.getElementById('btn-fullscreen-stage')?.addEventListener('click', () => void enter());
     overlaySettingsButton?.addEventListener('click', () => setOverlayOpen(overlayPanel?.hidden ?? false));
     // Alt+Enter toggles fullscreen; Escape also leaves the window-filling view
     // (the browser handles Escape for real fullscreen).

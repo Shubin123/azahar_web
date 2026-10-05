@@ -117,8 +117,11 @@ async function runTests() {
             console.log(`  (no homebrew at ${romPath}; checking the idle canvas only)`);
         }
 
-        await page.click('#btn-fullscreen');
+        // The button on the emulator screen enters fullscreen and hides there.
+        await page.click('#btn-fullscreen-stage');
         await page.waitForFunction(() => window.AzaharFullscreen.isActive());
+        assert.strictEqual(await page.$eval('#btn-fullscreen-stage', el => el.offsetParent), null,
+            'On-screen fullscreen button is hidden while fullscreen');
         await page.waitForFunction(() => document.getElementById('canvas').width !== 400, { timeout: 5000 });
         const state = await page.evaluate(() => {
             const stage = document.getElementById('screen-stage');
@@ -237,6 +240,12 @@ async function runTests() {
         }, { timeout: 5000 });
         assert.ok(await page.evaluate(() =>
             !!document.querySelector('#fullscreen-card #fullscreen-settings')), 'Controls return to the card');
+
+        console.log('Test 5: the card button toggles fullscreen too...');
+        await page.click('#btn-fullscreen');
+        await page.waitForFunction(() => window.AzaharFullscreen.isActive());
+        await page.click('#btn-fullscreen-exit');
+        await page.waitForFunction(() => !window.AzaharFullscreen.isActive());
 
         console.log('--- Fullscreen Tests passed ---');
     } finally {

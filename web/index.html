@@ -208,6 +208,30 @@
             /* Before the emulator starts the canvas is still 400x480. */
             object-fit: contain;
         }
+        /* Sits in the native frame's empty corner beside the bottom screen. */
+        .stage-fullscreen-btn {
+            position: absolute;
+            right: 1.5%;
+            bottom: 1.5%;
+            width: 7%;
+            min-width: 26px;
+            max-width: 40px;
+            aspect-ratio: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0;
+            border: 1px solid #0f3460;
+            border-radius: 6px;
+            background: rgba(15, 52, 96, .75);
+            color: #e0e0e0;
+            cursor: pointer;
+            opacity: .6;
+            transition: opacity .2s;
+        }
+        .stage-fullscreen-btn svg { width: 62%; height: 62%; }
+        .stage-fullscreen-btn:hover, .stage-fullscreen-btn:focus-visible { opacity: 1; }
+        .screen-stage.is-fullscreen .stage-fullscreen-btn { display: none; }
         .fullscreen-overlay {
             display: none;
             position: absolute;
@@ -654,6 +678,13 @@
         <div class="canvas-panel">
             <div id="screen-stage" class="screen-stage">
                 <canvas id="canvas" width="400" height="480"></canvas>
+                <button type="button" class="stage-fullscreen-btn" id="btn-fullscreen-stage"
+                        title="Fullscreen (Alt+Enter)" aria-label="Fullscreen">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
+                         stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/>
+                    </svg>
+                </button>
                 <div class="fullscreen-overlay" id="fullscreen-overlay">
                     <div class="fullscreen-overlay-buttons">
                         <button type="button" class="btn btn-secondary" id="btn-fullscreen-settings"
