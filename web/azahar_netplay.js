@@ -18,14 +18,6 @@
     const PUBLIC_STUN = [{urls: 'stun:stun.l.google.com:19302'}];
     const ICE_GATHER_TIMEOUT_MS = 5000;
 
-    // Nintendo's OUI keeps the address plausible to titles that inspect it.
-    function randomMac() {
-        const mac = new Uint8Array(6);
-        crypto.getRandomValues(mac.subarray(3));
-        mac.set([0x40, 0xF4, 0x07]);
-        return mac;
-    }
-
     function macText(mac) {
         return Array.from(mac, byte => byte.toString(16).padStart(2, '0')).join(':');
     }
@@ -81,7 +73,7 @@
         constructor() {
             super();
             this.id = randomId();
-            this.mac = randomMac();
+            this.mac = null;           // the console's MAC address while joined
             this.name = 'Player';
             this.mode = null;          // null, 'tabs', 'direct-host' or 'direct-guest'
             this.joined = false;       // the engine is attached to the link
@@ -89,7 +81,8 @@
             this.useStun = true;
             this.peers = new Map();    // id -> {name, mac, title, channel?}
             this.pending = new Map();  // host: invite id -> RTCPeerConnection awaiting a reply
-            this.stats = {sent: 0, received: 0, relayed: 0};
+            // received counts frames off the wire; delivered counts frames handed to the engine.
+            this.stats = {sent: 0, received: 0, delivered: 0, relayed: 0};
             this.channel = null;       // BroadcastChannel in tabs mode
         }
 
@@ -112,8 +105,20 @@
         }
 
         hello() {
-            return {kind: 'hello', from: this.id, name: this.name, mac: macText(this.mac),
-                title: this.titleId()};
+            return {kind: 'hello', from: this.id, name: this.name,
+                mac: this.mac ? macText(this.mac) : null, title: this.titleId()};
+        }
+
+        consoleMac() {
+            const module = this.module();
+            if (!module?._azahar_net_console_mac) return null;
+            const pointer = module._malloc(6);
+            try {
+                return module._azahar_net_console_mac(pointer) === 0 ?
+                    module.HEAPU8.slice(pointer, pointer + 6) : null;
+            } finally {
+                module._free(pointer);
+            }
         }
 
         emit(type, detail) {
@@ -124,7 +129,7 @@
         status() {
             return {
                 mode: this.mode, joined: this.joined, id: this.id, name: this.name,
-                mac: macText(this.mac), title: this.titleId(), crossVersion: this.crossVersion,
+                mac: this.mac ? macText(this.mac) : null, title: this.titleId(), crossVersion: this.crossVersion,
                 peers: Array.from(this.peers, ([id, peer]) => ({id, name: peer.name, mac: peer.mac,
                     title: peer.title, open: peer.channel ? peer.channel.readyState === 'open' : true})),
                 stats: {...this.stats},
@@ -132,28 +137,52 @@
         }
 
         // ── Engine attachment ────────────────────────────────────────
-        // Attach as soon as both a link and an initialized module exist. A game
-        // can be loaded before or after linking; save states must be restored
-        // before linking because the engine refuses them while connected.
+        // The console joins under its own MAC address, so it needs a running
+        // title; until then frames are only counted. A restored save state can
+        // bring a different address, so sync() rejoins when it changes.
         attach() {
             const module = this.module();
             if (!this.mode || this.joined || !module?._azahar_net_join) return false;
+            const mac = this.consoleMac();
+            if (!mac) return false;
             module.azaharNetSend = bytes => this.sendFrame(bytes);
             module._azahar_net_set_cross_version(this.crossVersion ? 1 : 0);
             const name = new TextEncoder().encode(this.name + '\0');
             const namePointer = module._malloc(name.length);
-            const macPointer = module._malloc(6);
             try {
                 module.HEAPU8.set(name, namePointer);
-                module.HEAPU8.set(this.mac, macPointer);
-                if (module._azahar_net_join(namePointer, macPointer) !== 0) return false;
+                if (module._azahar_net_join(namePointer, 0) !== 0) return false;
             } finally {
                 module._free(namePointer);
-                module._free(macPointer);
             }
+            this.mac = mac;
             this.joined = true;
-            this.emit('joined', {mac: macText(this.mac)});
+            this.announce();
+            this.emit('joined', {mac: macText(mac)});
             return true;
+        }
+
+        sync() {
+            if (!this.mode) return false;
+            if (!this.joined) return this.attach();
+            const mac = this.consoleMac();
+            if (mac && macText(mac) !== macText(this.mac)) {
+                this.joined = false;
+                return this.attach();
+            }
+            return false;
+        }
+
+        // Tell peers our name, title and address after they change.
+        announce() {
+            if (this.mode === 'tabs') {
+                this.channel.postMessage(this.hello());
+                return;
+            }
+            const text = JSON.stringify(this.hello());
+            for (const peer of this.peers.values()) {
+                if (peer.channel?.readyState === 'open') peer.channel.send(text);
+            }
         }
 
         detach() {
@@ -172,13 +201,14 @@
         }
 
         deliver(bytes) {
+            this.stats.received++;
             const module = this.module();
             if (!this.joined || !module) return;
             const pointer = module._malloc(bytes.length);
             try {
                 module.HEAPU8.set(bytes, pointer);
                 module._azahar_net_receive(pointer, bytes.length);
-                this.stats.received++;
+                this.stats.delivered++;
             } finally {
                 module._free(pointer);
             }
@@ -246,8 +276,10 @@
                     const message = JSON.parse(data);
                     if (message.kind !== 'hello') return;
                     const peer = this.peers.get(peerId);
+                    const first = !peer.mac && peer.name === '…';
                     Object.assign(peer, {name: message.name, mac: message.mac, title: message.title});
-                    this.emit('peer', {id: peerId, name: message.name});
+                    if (first) this.emit('peer', {id: peerId, name: message.name});
+                    else this.emit('change');
                     return;
                 }
                 const bytes = new Uint8Array(data);
@@ -396,17 +428,20 @@
             $('btn-local-play-leave').disabled = !state.mode;
             if (!state.mode) {
                 if (!status.dataset.kind || status.dataset.kind === 'linked') say('Not linked.');
-            } else if (state.joined) {
+            } else {
                 const count = state.peers.length;
-                say(`Linked (${state.mode.replace('direct-', 'direct, ')}) as ${state.mac} — ` +
-                    `${count} other console${count === 1 ? '' : 's'}. Open the game's local wireless menu.`, 'linked');
+                const consoles = `${count} other console${count === 1 ? '' : 's'}`;
+                say(state.joined ?
+                    `Linked (${state.mode.replace('direct-', 'direct, ')}) as ${state.mac} — ${consoles}. ` +
+                    'Open the game\'s local wireless menu.' :
+                    `Linked (${state.mode.replace('direct-', 'direct, ')}) — ${consoles}. Start a game to play.`, 'linked');
             }
         };
         netplay.addEventListener('change', render);
         render();
-        // The module may finish loading after the user links.
+        // The title may start, or a save state may change the console, after linking.
         const timer = setInterval(() => {
-            if (netplay.mode && !netplay.joined && netplay.attach()) render();
+            if (netplay.sync()) render();
         }, 500);
         window.addEventListener('pagehide', () => clearInterval(timer));
 

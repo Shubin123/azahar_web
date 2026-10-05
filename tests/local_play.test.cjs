@@ -3,7 +3,7 @@
  * Checks the serverless Local Play transport without a game:
  *   1. the engine exports the direct-link entry points;
  *   2. two tabs of one browser link through BroadcastChannel, see each other,
- *      and carry frames both ways into the engine;
+ *      and carry frames both ways;
  *   3. two separate browsers link over WebRTC by swapping the invite and reply
  *      codes (no STUN, as on one network), and a host relays frames between
  *      two guests;
@@ -63,7 +63,7 @@ async function main() {
         const browser = await launch();
         const first = await openPage(browser, '&link=tabs:test-room&nick=Alpha');
         const exports = await first.evaluate(() => ['_azahar_net_join', '_azahar_net_leave',
-            '_azahar_net_receive', '_azahar_net_set_cross_version']
+            '_azahar_net_receive', '_azahar_net_set_cross_version', '_azahar_net_console_mac']
             .filter(name => typeof window.AzaharUI.getModule()?.[name] !== 'function'));
         assert.deepStrictEqual(exports, [], `missing engine exports: ${exports}`);
         const second = await openPage(browser, '&link=tabs:test-room&nick=Beta');
@@ -71,13 +71,9 @@ async function main() {
             { timeout: 10000 });
         await second.waitForFunction(() => window.AzaharNetplay.status().peers.some(peer => peer.name === 'Alpha'),
             { timeout: 10000 });
-        for (const page of [first, second]) {
-            await page.waitForFunction(() => window.AzaharNetplay.status().joined, { timeout: 10000 })
-                .catch(() => { throw new Error('the engine did not attach to the link'); });
-        }
-        const [a, b] = [await status(first), await status(second)];
-        assert.ok(a.joined && b.joined, 'both tabs attach the engine');
-        assert.notStrictEqual(a.mac, b.mac, 'each console gets its own MAC address');
+        // Without a running title the consoles have no address yet, so the engine
+        // stays detached; multiplayer.test.cjs covers attachment with games.
+        assert.strictEqual((await status(first)).joined, false, 'no title, no engine attachment');
         await sendTestFrame(first, 1);
         await waitForReceived(second, 1, 'tabs A->B');
         await sendTestFrame(second, 2);
@@ -86,7 +82,7 @@ async function main() {
         assert.match(card, /Linked \(tabs\)/, 'the card reports the link');
         await second.evaluate(() => window.AzaharNetplay.leave());
         await first.waitForFunction(() => window.AzaharNetplay.status().peers.length === 0, { timeout: 10000 });
-        assert.strictEqual((await status(second)).joined, false, 'leaving unlinks the engine');
+        assert.strictEqual((await status(second)).mode, null, 'leaving ends the link');
         console.log('PASS same-browser tabs link, exchange frames and leave');
 
         // 3. Direct WebRTC between separate browsers, one host and two guests.
