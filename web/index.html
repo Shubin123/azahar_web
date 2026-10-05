@@ -259,6 +259,16 @@
         }
         .audio-toggle { display: flex; gap: 6px; align-items: flex-start; margin-top: 10px; cursor: pointer; }
         .audio-toggle input { accent-color: #e94560; margin-top: 2px; }
+        .local-play-row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+        .local-play-row .btn { margin-bottom: 0; }
+        #local-play-card textarea { resize: vertical; min-height: 54px; font: 0.7rem ui-monospace, monospace; word-break: break-all; }
+        #local-play-card input[type="text"] { margin-bottom: 6px; }
+        #local-play-status { margin: 8px 0 4px; }
+        #local-play-status[data-kind="error"] { color: #ff7a8a; }
+        #local-play-status[data-kind="ok"], #local-play-status[data-kind="linked"] { color: #8fd6a6; }
+        #local-play-peers { margin: 0 0 6px 18px; font-size: 0.78rem; }
+        #local-play-card details { margin-top: 8px; }
+        #local-play-card summary { cursor: pointer; font-size: 0.8rem; margin-bottom: 6px; }
         #audio-status { margin-top: 8px; }
 
         #status {
@@ -819,6 +829,43 @@
                 <div id="audio-status" class="mode-help" aria-live="polite">Audio starts when a game loads.</div>
             </div>
 
+            <div class="card" id="local-play-card">
+                <h2>📡 Local Play</h2>
+                <input type="text" id="local-play-name" class="renderer-select" maxlength="10"
+                       placeholder="Your name" aria-label="Your name" autocomplete="nickname">
+                <div class="local-play-row">
+                    <button type="button" class="btn btn-primary" id="btn-local-play-invite">Host: create invite</button>
+                    <button type="button" class="btn btn-secondary" id="btn-local-play-leave" disabled>Leave</button>
+                </div>
+                <textarea id="local-play-code-out" class="renderer-select" readonly
+                          placeholder="Your invite or reply code appears here" aria-label="Code to send"></textarea>
+                <button type="button" class="btn btn-secondary" id="btn-local-play-copy">Copy code</button>
+                <textarea id="local-play-code-in" class="renderer-select"
+                          placeholder="Paste an invite (to join) or a reply (as host)" aria-label="Code received"></textarea>
+                <button type="button" class="btn btn-success" id="btn-local-play-accept">Use pasted code</button>
+                <div id="local-play-status" class="mode-help" aria-live="polite">Not linked.</div>
+                <ul id="local-play-peers"></ul>
+                <label class="mode-help audio-toggle">
+                    <input type="checkbox" id="local-play-cross-version" checked>
+                    Cross-version play: let a demo find a network hosted by the full game, and the other way round
+                </label>
+                <details>
+                    <summary>More options</summary>
+                    <label class="mode-help audio-toggle" style="margin-top:0;">
+                        <input type="checkbox" id="local-play-stun" checked>
+                        Look up my internet address with a public STUN server (needed outside one home network; no game data passes through it)
+                    </label>
+                    <label for="local-play-room" class="mode-help" style="display:block;margin:10px 0 4px;">Same-browser room (for testing with two tabs)</label>
+                    <div class="local-play-row">
+                        <input type="text" id="local-play-room" class="renderer-select" value="default" aria-label="Same-browser room name">
+                        <button type="button" class="btn btn-secondary" id="btn-local-play-tabs">Link tabs</button>
+                    </div>
+                </details>
+                <div class="mode-help" style="margin-top:7px;">
+                    Consoles talk to each other directly; there is no server. Load any save state before linking, then use the game's local wireless menu.
+                </div>
+            </div>
+
             <div class="card" id="save-state-card">
                 <h2>Save States</h2>
                 <div class="save-toolbar">
@@ -966,6 +1013,7 @@
     <script src="azahar_input.js"></script>
     <script src="azahar_fullscreen.js"></script>
     <script src="azahar_library.js"></script>
+    <script src="azahar_netplay.js"></script>
     <script>
         document.getElementById('btn-browse-library')?.addEventListener('click', () => {
             const lib = document.getElementById('library-section');
