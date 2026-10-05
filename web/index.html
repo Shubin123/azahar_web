@@ -183,6 +183,56 @@
             margin-bottom: 4px;
         }
         .speed-control input { width: 100%; accent-color: #e94560; }
+        /* Fullscreen view: the stage fills the display and the engine draws
+           both screens into a canvas of exactly the stage's shape. */
+        .screen-stage { position: relative; }
+        .screen-stage canvas { display: block; }
+        .screen-stage.is-fullscreen {
+            width: 100vw;
+            height: 100vh;
+            height: 100dvh;
+            background: #000;
+        }
+        .screen-stage.is-pseudo-fullscreen {
+            position: fixed;
+            inset: 0;
+            z-index: 1000;
+        }
+        html.has-pseudo-fullscreen, html.has-pseudo-fullscreen body { overflow: hidden; }
+        .screen-stage.is-fullscreen canvas {
+            width: 100%;
+            height: 100%;
+            border: 0;
+            border-radius: 0;
+            box-shadow: none;
+            /* Before the emulator starts the canvas is still 400x480. */
+            object-fit: contain;
+        }
+        .fullscreen-overlay {
+            display: none;
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 6px;
+            opacity: .3;
+            transition: opacity .2s;
+            z-index: 1;
+        }
+        .screen-stage.is-fullscreen .fullscreen-overlay { display: flex; }
+        .fullscreen-overlay:hover, .fullscreen-overlay:focus-within,
+        .fullscreen-overlay.is-open { opacity: 1; }
+        .fullscreen-overlay-buttons { display: flex; gap: 6px; }
+        .fullscreen-overlay-buttons .btn { width: auto; margin: 0; padding: 6px 10px; }
+        .fullscreen-overlay-panel {
+            width: 260px;
+            background: rgba(22, 33, 62, .94);
+            border: 1px solid #0f3460;
+            border-radius: 8px;
+            padding: 12px;
+            text-align: left;
+        }
         .audio-toggle { display: flex; gap: 6px; align-items: flex-start; margin-top: 10px; cursor: pointer; }
         .audio-toggle input { accent-color: #e94560; margin-top: 2px; }
         #audio-status { margin-top: 8px; }
@@ -602,7 +652,17 @@
 
     <div class="main-layout">
         <div class="canvas-panel">
-            <canvas id="canvas" width="400" height="480"></canvas>
+            <div id="screen-stage" class="screen-stage">
+                <canvas id="canvas" width="400" height="480"></canvas>
+                <div class="fullscreen-overlay" id="fullscreen-overlay">
+                    <div class="fullscreen-overlay-buttons">
+                        <button type="button" class="btn btn-secondary" id="btn-fullscreen-settings"
+                                aria-expanded="false" aria-controls="fullscreen-overlay-panel">⚙ Screen sizes</button>
+                        <button type="button" class="btn btn-secondary" id="btn-fullscreen-exit">✕ Exit</button>
+                    </div>
+                    <div class="fullscreen-overlay-panel" id="fullscreen-overlay-panel" hidden></div>
+                </div>
+            </div>
             <p style="font-size:0.7rem;color:#555;margin-top:4px;">
                 Native 400×480 — Top: 400×240, Bottom: 320×240
                 <span id="fps" style="margin-left:12px;color:#aaa;"></span>
@@ -669,6 +729,37 @@
                            aria-label="Fast-forward multiplier">
                     <div class="mode-help">Target speed for cutscenes: 1x normal, up to 4x fast-forward. Actual speed depends on your device and the game.</div>
                 </div>
+            </div>
+
+            <div class="card" id="fullscreen-card">
+                <h2>⛶ Fullscreen</h2>
+                <button type="button" class="btn btn-secondary" id="btn-fullscreen">⛶ Fullscreen</button>
+                <div id="fullscreen-settings">
+                    <label for="fullscreen-arrangement" class="mode-help" style="display:block;margin-top:6px;margin-bottom:4px;">
+                        Screen arrangement
+                    </label>
+                    <select id="fullscreen-arrangement" class="renderer-select" aria-label="Fullscreen screen arrangement">
+                        <option value="auto">Auto — biggest top screen</option>
+                        <option value="side">Side by side</option>
+                        <option value="stacked">Stacked</option>
+                    </select>
+                    <div class="speed-control">
+                        <label for="fullscreen-bottom-min">
+                            <span>Bottom screen minimum</span><output id="fullscreen-bottom-min-value">40%</output>
+                        </label>
+                        <input id="fullscreen-bottom-min" type="range" min="20" max="100" step="1" value="40"
+                               aria-label="Bottom screen minimum size, percent of the top screen">
+                    </div>
+                    <div class="speed-control">
+                        <label for="fullscreen-bottom-max">
+                            <span>Bottom screen maximum</span><output id="fullscreen-bottom-max-value">70%</output>
+                        </label>
+                        <input id="fullscreen-bottom-max" type="range" min="20" max="100" step="1" value="70"
+                               aria-label="Bottom screen maximum size, percent of the top screen">
+                    </div>
+                    <div id="fullscreen-help" class="mode-help" aria-live="polite"></div>
+                </div>
+                <div class="mode-help" style="margin-top:7px;">Alt+Enter toggles fullscreen.</div>
             </div>
 
             <div class="card" id="audio-card">
@@ -842,6 +933,7 @@
     <script src="azahar_audio.js"></script>
     <script src="azahar_ui.js"></script>
     <script src="azahar_input.js"></script>
+    <script src="azahar_fullscreen.js"></script>
     <script src="azahar_library.js"></script>
     <script>
         document.getElementById('btn-browse-library')?.addEventListener('click', () => {

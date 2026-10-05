@@ -1024,6 +1024,7 @@ void main() { frag_color = vec4(1.0); }`);
             applyResolutionScale();
             applySoftwarePixelScale();
             applyFastForward();
+            window.dispatchEvent(new Event('azahar-initialized'));
             log('Emulator initialized successfully.');
             hideProgress();
             setStatus('Emulator ready. Choose a ROM to load and run.', 'ok');
@@ -1477,7 +1478,8 @@ void main() { frag_color = vec4(1.0); }`);
         showProgress,
         hideProgress,
         log,
-        getCanvas: () => canvas
+        getCanvas: () => canvas,
+        getModule: () => (initialized ? wasmModule : null)
     };
 
     // ── Auto-init on page load ───────────────────────────────────

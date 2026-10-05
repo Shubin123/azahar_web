@@ -21,7 +21,7 @@ Open `http://localhost:8765` in Chrome, then load a **decrypted** `.3ds` ROM fil
 
 ### Deploy to GitHub Pages
 
-The `web/` folder is self-contained and `.github/workflows/pages.yml` publishes it on every relevant `main` push. The included `coi-serviceworker.js` handles the required cross-origin isolation headers automatically on static hosts. The single `index.html` page provides Auto, accelerated WebGL2, and compatibility renderer modes, 1x-4x internal-resolution scaling, a 1x-4x fast-forward target for cutscenes, and per-game persistent browser save slots; switching renderers performs the fresh-page reload required by browser canvas contexts.
+The `web/` folder is self-contained and `.github/workflows/pages.yml` publishes it on every relevant `main` push. The included `coi-serviceworker.js` handles the required cross-origin isolation headers automatically on static hosts. The single `index.html` page provides Auto, accelerated WebGL2, and compatibility renderer modes, 1x-4x internal-resolution scaling, a 1x-4x fast-forward target for cutscenes, a fullscreen view (Alt+Enter) that keeps both screens' shapes and sizes the bottom screen between user-set minimum and maximum percentages of the top screen, and per-game persistent browser save slots; switching renderers performs the fresh-page reload required by browser canvas contexts.
 
 ## What's Included
 
@@ -31,6 +31,7 @@ web/                    # Ready-to-serve web application
   index_webgl2.html     # Legacy redirect into index.html renderer selection
   azahar_ui.js          # UI controller (ROM loading, run loop, FPS display)
   azahar_savestates.js  # IndexedDB persistence for compressed per-game save slots
+  azahar_fullscreen.js  # Fullscreen view: screen layout within the user's size bounds
   coi-serviceworker.js  # COOP/COEP header injection for static hosts
   server.cjs            # Local dev server with isolation headers
   azahar.js             # Emscripten glue (software renderer)
@@ -118,6 +119,9 @@ AZAHAR_ROM_PATH=test_games/your_rom.3ds node tests/browser_regression.cjs
 
 # Cold boot, press the title-screen touch target, and sustain gameplay
 AZAHAR_ROM_PATH=test_games/your_rom.3ds node tests/run.cjs --transition
+
+# Fullscreen layout, canvas sizing, touch on the scaled bottom screen, and exit
+node tests/fullscreen.test.cjs            # add --renderer=software for the CPU path
 
 # Save, restore, reload, and delete an IndexedDB-backed save through the UI
 node tests/run.cjs --save-states --artifact webgl2
