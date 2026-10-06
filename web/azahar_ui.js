@@ -328,10 +328,28 @@
     }
 
     // ── Logging ───────────────────────────────────────────────────
+    // Appending to textContent copied the whole log and forced a layout per line, so a
+    // chatty session slowed down as its log grew (one Local Play host fell from 100% to
+    // 6% speed). Lines are separate text nodes, the view keeps the newest LOG_VIEW_LINES,
+    // and scrolling is batched. The full history is AzaharUI.getLog().
+    const LOG_VIEW_LINES = 5000;
+    const LOG_HISTORY_LINES = 50000;
+    const logHistory = [];
+    let logScrollPending = false;
     function log(msg) {
         const time = new Date().toLocaleTimeString();
-        logEl.textContent += `[${time}] ${msg}\n`;
-        logEl.scrollTop = logEl.scrollHeight;
+        const line = `[${time}] ${msg}\n`;
+        logHistory.push(line);
+        if (logHistory.length > LOG_HISTORY_LINES + 5000) logHistory.splice(0, 5000);
+        logEl.appendChild(document.createTextNode(line));
+        if (logEl.childNodes.length > LOG_VIEW_LINES) logEl.removeChild(logEl.firstChild);
+        if (!logScrollPending) {
+            logScrollPending = true;
+            setTimeout(() => {
+                logScrollPending = false;
+                logEl.scrollTop = logEl.scrollHeight;
+            }, 100);
+        }
     }
 
     function setStatus(msg, cls) {
@@ -1278,6 +1296,12 @@ void main() { frag_color = vec4(1.0); }`);
 
         function tick(now) {
             if (!running) return;
+            // Local Play keeps linked consoles' game clocks together; a console that
+            // has run ahead waits here for the others.
+            if (window.AzaharNetplay?.shouldHold?.()) {
+                runAnimationFrame = AzaharScheduler.request(tick);
+                return;
+            }
 
             try {
                 frameCount++;
@@ -1491,6 +1515,7 @@ void main() { frag_color = vec4(1.0); }`);
         showProgress,
         hideProgress,
         log,
+        getLog: () => logHistory.join(''),
         getCanvas: () => canvas,
         getModule: () => (initialized ? wasmModule : null)
     };

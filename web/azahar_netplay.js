@@ -17,6 +17,41 @@
     // carries no game traffic; it is needed for play outside one network.
     const PUBLIC_STUN = [{urls: 'stun:stun.l.google.com:19302'}];
     const ICE_GATHER_TIMEOUT_MS = 5000;
+    // Clock pacing: games' local-play netcode assumes every console runs at the same
+    // real-time speed, as hardware does. Browsers do not, so consoles report their game
+    // clocks and one that gets ahead of a peer by more than the tolerance waits for it.
+    // A peer that stops reporting (hidden tab, lost link) is not waited for; pacing
+    // resumes when its reports return.
+    // A console ahead by more than PACE_START_US runs slower, down to PACE_MIN_SCALE of real
+    // time at PACE_FULL_US, so it keeps talking to its peers while they catch up; games treat a
+    // silent peer as disconnected. Only a lead past PACE_HOLD_US pauses it, for at most
+    // MAX_HOLD_MS at a time with at least HOLD_COOLDOWN_MS of running in between. A lead that
+    // will not close for PACE_REBASE_MS is accepted as the new baseline (a resync).
+    const CLOCK_REPORT_MS = 100;
+    const CLOCK_STALE_MS = 1500;
+    const PACE_START_US = 20000;
+    const PACE_FULL_US = 250000;
+    const PACE_MIN_SCALE = 0.5;
+    const PACE_HOLD_US = 600000;
+    const MAX_HOLD_MS = 250;
+    const HOLD_COOLDOWN_MS = 100;
+    const PACE_REBASE_MS = 8000;
+
+    // "drop=0.05,delay=60,jitter=40,burst=800/15000" -> {drop, delay, jitter, burst}
+    function parseNetsim(text) {
+        if (!text) return null;
+        const options = {};
+        for (const part of text.split(',')) {
+            const [key, value] = part.split('=');
+            if (key === 'burst') {
+                const [length, every] = value.split('/').map(Number);
+                if (length > 0 && every > length) options.burst = {length, every};
+            } else if (['drop', 'delay', 'jitter', 'lossy'].includes(key) && Number.isFinite(Number(value))) {
+                options[key] = Number(value);
+            }
+        }
+        return Object.keys(options).length ? options : null;
+    }
 
     function macText(mac) {
         return Array.from(mac, byte => byte.toString(16).padStart(2, '0')).join(':');
@@ -84,6 +119,199 @@
             // received counts frames off the wire; delivered counts frames handed to the engine.
             this.stats = {sent: 0, received: 0, delivered: 0, relayed: 0};
             this.channel = null;       // BroadcastChannel in tabs mode
+            // Simulated network faults for testing: see setNetsim().
+            this.netsim = parseNetsim(new URLSearchParams(location.search).get('netsim'));
+            this.netsimStats = {dropped: 0, delayed: 0, retransmitted: 0};
+            this.netsimLastAt = 0;
+            this.pacing = new URLSearchParams(location.search).get('pacing') !== '0';
+            this.pacingStats = {holds: 0, heldMs: 0, throttledMs: 0, gaveUp: 0};
+            this.speedPermille = 1000;
+            this.holdSince = 0;
+        }
+
+        guestTimeUs() {
+            const module = this.module();
+            if (!module?._azahar_get_perf_stats) return null;
+            const pointer = module._malloc(16 * 8);
+            try {
+                if (module._azahar_get_perf_stats(pointer, 16) !== 0) return null;
+                return new Float64Array(module.HEAPU8.buffer, pointer, 16)[10];
+            } finally {
+                module._free(pointer);
+            }
+        }
+
+        sendControl(message) {
+            const text = JSON.stringify({...message, from: this.id});
+            if (this.mode === 'tabs') {
+                this.channel?.postMessage({...message, from: this.id});
+                return;
+            }
+            for (const peer of this.peers.values()) {
+                if (peer.channel?.readyState === 'open') peer.channel.send(text);
+            }
+        }
+
+        // Control message for one peer (tabs broadcast it with a recipient).
+        sendControlTo(peerKey, message) {
+            const peer = this.peers.get(peerKey);
+            if (!peer) return;
+            if (this.mode === 'tabs') {
+                this.channel?.postMessage({...message, from: this.id, to: peerKey});
+            } else if (peer.channel?.readyState === 'open') {
+                peer.channel.send(JSON.stringify({...message, from: this.id}));
+            }
+        }
+
+        reportClock() {
+            if (!this.joined) return;
+            const t = this.guestTimeUs();
+            if (t) this.sendControl({kind: 'clock', t});
+        }
+
+        receiveClock(peer, t) {
+            const now = performance.now();
+            const previous = peer.clock;
+            // Measured game-clock rate of the peer, in game µs per wall ms.
+            const rate = previous && now > previous.at ? (t - previous.t) / (now - previous.at) : 1000;
+            peer.clock = {t, at: now, rate: Math.max(0, Math.min(1200, rate))};
+            // Consoles boot at different times, so only drift since the link matters. Both
+            // sides of a pair must agree on the expected offset, or each could think it is
+            // ahead and both would wait: the console with the lower id measures it (on the
+            // first report, after an outage or when asked) and the other adopts its mirror.
+            const outage = previous && now - previous.at > CLOCK_STALE_MS;
+            if (this.id < peer.netId && (peer.clockOffset == null || outage)) {
+                const local = this.guestTimeUs();
+                if (local != null) {
+                    peer.clockOffset = local - t;
+                    this.sendControlTo(peer.key, {kind: 'clock-base', offset: peer.clockOffset});
+                }
+            }
+        }
+
+        receiveClockBase(peer, offset) {
+            if (this.id > peer.netId) peer.clockOffset = -offset;
+        }
+
+        handleClockControl(peer, message) {
+            if (!peer) return;
+            if (message.kind === 'clock') this.receiveClock(peer, message.t);
+            else if (message.kind === 'clock-base') this.receiveClockBase(peer, message.offset);
+            else if (message.kind === 'clock-rebase' && this.id < peer.netId) peer.clockOffset = null;
+        }
+
+        // How far this console's game clock is ahead of its slowest live peer, in µs, against
+        // the baseline agreed when the link started (or last resynced).
+        clockLead() {
+            const local = this.guestTimeUs();
+            if (local == null) return null;
+            const now = performance.now();
+            let lead = null;
+            for (const peer of this.peers.values()) {
+                const clock = peer.clock;
+                if (!clock || peer.netId == null || peer.clockOffset == null ||
+                    now - clock.at > CLOCK_STALE_MS) continue;
+                const estimate = clock.t + (now - clock.at) * clock.rate;
+                const peerLead = local - estimate - peer.clockOffset;
+                lead = lead == null ? peerLead : Math.max(lead, peerLead);
+            }
+            return lead;
+        }
+
+        setSpeedScale(scale) {
+            const permille = Math.round(scale * 1000);
+            if (permille === this.speedPermille) return;
+            this.speedPermille = permille;
+            this.module()?._azahar_set_speed_scale?.(permille);
+        }
+
+        // Called before each emulation step. Slows this console while it is ahead of a peer and
+        // returns true when the step should be skipped altogether.
+        shouldHold() {
+            const lead = this.pacing && this.joined && this.peers.size ? this.clockLead() : null;
+            const now = performance.now();
+            if (lead == null || lead <= PACE_START_US) {
+                this.leadSince = 0;
+                this.setSpeedScale(1);
+                return this.endHold(false);
+            }
+            if (!this.leadSince) this.leadSince = now;
+            if (now - this.leadSince > PACE_REBASE_MS) {
+                // The peer is not catching up (a stall, a much slower device): resync from here
+                // rather than throttle forever. Authorities re-measure; others ask theirs to.
+                this.pacingStats.gaveUp++;
+                this.leadSince = 0;
+                for (const [key, peer] of this.peers) {
+                    peer.clockOffset = null;
+                    if (this.id > peer.netId) this.sendControlTo(key, {kind: 'clock-rebase'});
+                }
+                this.setSpeedScale(1);
+                return this.endHold(false);
+            }
+            const fraction = Math.min(1, (lead - PACE_START_US) / (PACE_FULL_US - PACE_START_US));
+            this.setSpeedScale(1 - (1 - PACE_MIN_SCALE) * fraction);
+            if (this.speedPermille < 1000) this.pacingStats.throttledMs += now - (this.lastPaceAt || now);
+            this.lastPaceAt = now;
+            if (lead <= PACE_HOLD_US) return this.endHold(false);
+            if (this.holdSince && now - this.holdSince > MAX_HOLD_MS) {
+                this.cooldownUntil = now + HOLD_COOLDOWN_MS;
+                return this.endHold(false);
+            }
+            if (now < (this.cooldownUntil || 0)) return false;
+            if (!this.holdSince) {
+                this.holdSince = now;
+                this.pacingStats.holds++;
+            }
+            return true;
+        }
+
+        endHold(result) {
+            if (this.holdSince) {
+                this.pacingStats.heldMs += performance.now() - this.holdSince;
+                this.holdSince = 0;
+            }
+            return result;
+        }
+
+        // Simulates real-world network conditions on outgoing frames. The link is a reliable,
+        // ordered WebRTC channel, so by default a "lost" frame is retransmitted and delays
+        // every frame behind it, as SCTP does:
+        //   delay, jitter  ms added to each frame (order is kept)
+        //   drop           fraction of frames lost and resent after RETRANSMIT_MS
+        //   burst          {length, every} ms outages; frames wait for the link to return
+        //   lossy          frames really vanish (UDP-like), for stress testing
+        // Pass null to turn it off.
+        setNetsim(options) {
+            this.netsim = options && Object.keys(options).length ? {...options} : null;
+            this.netsimStats = {dropped: 0, delayed: 0, retransmitted: 0};
+            this.netsimLastAt = 0;
+        }
+
+        // Sends now, later or never, as the simulated network decides.
+        transmit(send) {
+            const sim = this.netsim;
+            if (!sim) return send();
+            const RETRANSMIT_MS = 200;
+            const now = performance.now();
+            let at = now + (sim.delay || 0) + (sim.jitter ? Math.random() * sim.jitter : 0);
+            const lost = sim.drop && Math.random() < sim.drop;
+            const phase = sim.burst ? now % sim.burst.every : Infinity;
+            const inOutage = sim.burst && phase < sim.burst.length;
+            if (sim.lossy && (lost || inOutage)) {
+                this.netsimStats.dropped++;
+                return;
+            }
+            if (lost) {
+                at += RETRANSMIT_MS;
+                this.netsimStats.retransmitted++;
+            }
+            if (inOutage) at = Math.max(at, now - phase + sim.burst.length);
+            // Reliable and ordered: nothing overtakes an earlier frame.
+            if (!sim.lossy) at = Math.max(at, this.netsimLastAt || 0);
+            this.netsimLastAt = at;
+            if (at <= now) return send();
+            this.netsimStats.delayed++;
+            setTimeout(send, at - now);
         }
 
         module() {
@@ -133,6 +361,9 @@
                 peers: Array.from(this.peers, ([id, peer]) => ({id, name: peer.name, mac: peer.mac,
                     title: peer.title, open: peer.channel ? peer.channel.readyState === 'open' : true})),
                 stats: {...this.stats},
+                netsim: this.netsim && {...this.netsim, ...this.netsimStats},
+                pacing: this.pacing ? {...this.pacingStats, heldMs: Math.round(this.pacingStats.heldMs),
+                    throttledMs: Math.round(this.pacingStats.throttledMs), speed: this.speedPermille / 1000} : null,
             };
         }
 
@@ -157,6 +388,8 @@
             }
             this.mac = mac;
             this.joined = true;
+            clearInterval(this.clockTimer);
+            this.clockTimer = setInterval(() => this.reportClock(), CLOCK_REPORT_MS);
             this.announce();
             this.emit('joined', {mac: macText(mac)});
             return true;
@@ -186,6 +419,9 @@
         }
 
         detach() {
+            clearInterval(this.clockTimer);
+            this.endHold(false);
+            this.setSpeedScale(1);
             const module = this.module();
             if (this.joined && module) {
                 module._azahar_net_leave();
@@ -217,11 +453,13 @@
         sendFrame(bytes) {
             this.stats.sent++;
             if (this.mode === 'tabs') {
-                this.channel.postMessage({kind: 'frame', from: this.id, bytes});
+                this.transmit(() => this.channel?.postMessage({kind: 'frame', from: this.id, bytes}));
                 return;
             }
             for (const peer of this.peers.values()) {
-                if (peer.channel?.readyState === 'open') peer.channel.send(bytes);
+                this.transmit(() => {
+                    if (peer.channel?.readyState === 'open') peer.channel.send(bytes);
+                });
             }
         }
 
@@ -237,10 +475,15 @@
                     this.deliver(data.bytes);
                 } else if (data.kind === 'hello' || data.kind === 'hello-reply') {
                     const known = this.peers.has(data.from);
-                    this.peers.set(data.from, {name: data.name, mac: data.mac, title: data.title});
+                    const existing = this.peers.get(data.from);
+                    this.peers.set(data.from, {...existing, name: data.name, mac: data.mac, title: data.title,
+                        key: data.from, netId: data.from});
                     if (data.kind === 'hello') this.channel.postMessage({...this.hello(), kind: 'hello-reply'});
                     if (!known) this.emit('peer', {id: data.from, name: data.name});
                     else this.emit('change');
+                } else if (data.kind?.startsWith('clock')) {
+                    if (data.to && data.to !== this.id) return;
+                    this.handleClockControl(this.peers.get(data.from), data);
                 } else if (data.kind === 'bye') {
                     this.peers.delete(data.from);
                     this.emit('peer-left', {id: data.from});
@@ -274,10 +517,15 @@
             channel.onmessage = ({data}) => {
                 if (typeof data === 'string') {
                     const message = JSON.parse(data);
+                    if (message.kind?.startsWith('clock')) {
+                        this.handleClockControl(this.peers.get(peerId), {...message, to: undefined});
+                        return;
+                    }
                     if (message.kind !== 'hello') return;
                     const peer = this.peers.get(peerId);
                     const first = !peer.mac && peer.name === '…';
-                    Object.assign(peer, {name: message.name, mac: message.mac, title: message.title});
+                    Object.assign(peer, {name: message.name, mac: message.mac, title: message.title,
+                        netId: message.from});
                     if (first) this.emit('peer', {id: peerId, name: message.name});
                     else this.emit('change');
                     return;
@@ -287,14 +535,16 @@
                 if (this.mode === 'direct-host') {
                     // Guests reach each other only through the host.
                     for (const [id, other] of this.peers) {
-                        if (id !== peerId && other.channel?.readyState === 'open') {
-                            other.channel.send(bytes);
+                        if (id !== peerId) {
+                            this.transmit(() => {
+                                if (other.channel?.readyState === 'open') other.channel.send(bytes);
+                            });
                             this.stats.relayed++;
                         }
                     }
                 }
             };
-            this.peers.set(peerId, {name: '…', mac: null, title: null, channel});
+            this.peers.set(peerId, {name: '…', mac: null, title: null, channel, key: peerId, netId: null});
         }
 
         // Takes over a data channel that is already open, such as one a public

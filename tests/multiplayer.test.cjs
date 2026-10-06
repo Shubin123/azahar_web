@@ -22,6 +22,7 @@
  *       [--renderer software|webgl2] [--gpu] [--timeout SECONDS]
  *   node tests/multiplayer.test.cjs --link-smoke [--rom PATH]
  *   add --via lobby to link through a public lobby (local tracker) instead of codes
+ *   add --netsim drop=0.05,delay=60,jitter=40,burst=800/15000 to impair the link
  */
 'use strict';
 
@@ -90,7 +91,9 @@ async function boot(browser, rom, nick, statePath) {
     const page = await browser.newPage();
     page.errors = [];
     page.on('pageerror', error => page.errors.push(String(error)));
-    const trackers = tracker ? `&trackers=${encodeURIComponent(tracker.url)}` : '';
+    const trackers = (tracker ? `&trackers=${encodeURIComponent(tracker.url)}` : '') +
+        (cfg.argVal('--netsim', '') ? `&netsim=${encodeURIComponent(cfg.argVal('--netsim', ''))}` : '') +
+        (cfg.argVal('--query', '') ? `&${cfg.argVal('--query', '')}` : '');
     await page.goto(`http://127.0.0.1:${PORT}/index.html?renderer=${renderer}&nick=${nick}${trackers}`,
         { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => document.getElementById('status')?.textContent.includes('Emulator ready'),
@@ -166,7 +169,82 @@ async function runSteps(page, steps) {
     }
 }
 
-const logText = page => page.$eval('#log', element => element.textContent);
+// Average colour of an image region, sampled on a grid, decoded in the page.
+async function regionSignatures(page, png, rects) {
+    return page.evaluate(async (dataUrl, rects) => {
+        const image = new Image();
+        image.src = dataUrl;
+        await image.decode();
+        const canvas = new OffscreenCanvas(image.width, image.height);
+        const context = canvas.getContext('2d');
+        context.drawImage(image, 0, 0);
+        return rects.map(([x, y, w, h]) => {
+            const data = context.getImageData(Math.round(x * image.width), Math.round(y * image.height),
+                Math.max(1, Math.round(w * image.width)), Math.max(1, Math.round(h * image.height))).data;
+            const grid = [];
+            const cols = 4, rows = 4, width = Math.max(1, Math.round(w * image.width)), height = Math.max(1, Math.round(h * image.height));
+            for (let gy = 0; gy < rows; gy++) for (let gx = 0; gx < cols; gx++) {
+                const px = Math.floor((gx + 0.5) * width / cols), py = Math.floor((gy + 0.5) * height / rows);
+                const i = (py * width + px) * 4;
+                grid.push(data[i], data[i + 1], data[i + 2]);
+            }
+            return grid;
+        });
+    }, `data:image/png;base64,${png}`, rects);
+}
+
+// While both consoles play, compares what each shows in matching screen regions
+// (for Mario Kart 7, the racer portraits in its ranking list). Returns the share
+// of samples where every region agreed.
+async function checkSync(host, guest, sync) {
+    // Sample the middle of each row so per-console decorations at its edges (Mario Kart 7
+    // highlights the local player's row) do not count as disagreement.
+    const inset = sync.rowInset ?? 0.1;
+    const rects = Array.from({ length: sync.rows }, (_, row) =>
+        [sync.x, sync.y + (row + inset) * sync.rowHeight, sync.width, sync.rowHeight * (1 - 2 * inset)]);
+    // The rows only mean something once the screen shows distinct entries in them
+    // (not a loading or blank panel), so wait for that on both consoles first.
+    const variety = grids => {
+        let total = 0, pairs = 0;
+        for (let i = 0; i < grids.length; i++) for (let j = i + 1; j < grids.length; j++, pairs++) {
+            total += grids[i].reduce((sum, value, k) => sum + Math.abs(value - grids[j][k]), 0) / grids[i].length;
+        }
+        return total / pairs;
+    };
+    // Readiness looks at whole rows, which differ from each other more than the sampled centres.
+    const readyRects = Array.from({ length: sync.rows }, (_, row) =>
+        [sync.readyX ?? sync.x, sync.y + row * sync.rowHeight, sync.readyWidth ?? sync.width, sync.rowHeight * 0.8]);
+    const readyBy = Date.now() + (sync.readyTimeoutMs || 120000);
+    for (;;) {
+        const shots = await Promise.all([host, guest].map(async page =>
+            (await page.$('#canvas')).screenshot({ encoding: 'base64' })));
+        const grids = await Promise.all([regionSignatures(host, shots[0], readyRects),
+            regionSignatures(guest, shots[1], readyRects)]);
+        if (grids.every(g => variety(g) > (sync.minVariety ?? 25))) break;
+        if (Date.now() > readyBy) {
+            throw new Error('the consoles never reached the synced scene (both stayed on a blank or loading screen)');
+        }
+        await sleep(3000);
+    }
+    for (const page of [host, guest]) for (const key of sync.holdKeys || []) await page.keyboard.down(key);
+    let agreed = 0;
+    const details = [];
+    for (let sample = 0; sample < sync.samples; sample++) {
+        await sleep(sync.intervalMs);
+        const shots = await Promise.all([host, guest].map(async page =>
+            (await page.$('#canvas')).screenshot({ encoding: 'base64' })));
+        const [a, b] = await Promise.all([regionSignatures(host, shots[0], rects), regionSignatures(guest, shots[1], rects)]);
+        const differing = a.map((grid, row) => grid.reduce((sum, value, i) => sum + Math.abs(value - b[row][i]), 0) / grid.length)
+            .map((distance, row) => [row + 1, Math.round(distance)]).filter(([, distance]) => distance > sync.threshold);
+        // Close racers can swap places between two snapshots taken milliseconds apart.
+        if (sync.rows - differing.length >= (sync.minRowsAgree ?? sync.rows)) agreed++;
+        details.push(differing.length ? differing.map(([row, d]) => `${row}:${d}`).join(' ') : 'ok');
+    }
+    for (const page of [host, guest]) for (const key of sync.holdKeys || []) await page.keyboard.up(key);
+    return { share: agreed / sync.samples, details };
+}
+
+const logText = page => page.evaluate(() => window.AzaharUI.getLog?.() ?? document.getElementById('log').textContent);
 
 async function waitForLog(page, pattern, label) {
     const started = Date.now();
@@ -215,6 +293,47 @@ async function playPairing(key, game, hostBuild, guestBuild) {
             boot(browsers[0], hostRom, 'Host', game.host.fixture && findFixture(hostRom, game.host.fixture)),
             boot(browsers[1], guestRom, 'Guest', game.guest.fixture && findFixture(guestRom, game.guest.fixture)),
         ]);
+        // --monitor prints both consoles' speed and pacing every 10 seconds.
+        const started = Date.now();
+        const monitor = cfg.argFlag('--monitor') && setInterval(async () => {
+            const read = page => page.evaluate(() => [document.getElementById('fps').textContent,
+                JSON.stringify(window.AzaharNetplay.status().pacing)]).catch(() => ['?', '?']);
+            const [h, g] = await Promise.all([read(host), read(guest)]);
+            console.log(`  t+${Math.round((Date.now() - started) / 1000)}s host ${h.join(' ')} | guest ${g.join(' ')}`);
+            if (Math.round((Date.now() - started) / 1000) % 60 < 10) {
+                const top = await host.evaluate(() => {
+                    const counts = new Map();
+                    for (const line of (window.AzaharUI.getLog?.() ?? '').split('\n')) {
+                        const key = line.replace(/^.*?\] /, '').replace(/\[ *[0-9.]+\] /, '').replace(/0x[0-9a-fA-F]+|\d+/g, '#').slice(0, 110);
+                        counts.set(key, (counts.get(key) || 0) + 1);
+                    }
+                    return [...counts].sort((a, b) => b[1] - a[1]).slice(0, 3);
+                }).catch(() => []);
+                console.log(`  host log top lines: ${JSON.stringify(top)}`);
+            }
+        }, 10000);
+        browsers.monitor = monitor;
+        // --profile-host SECONDS: sample the host page's CPU for 5 s at that time and list hot spots.
+        const profileAt = Number(cfg.argVal('--profile-host', 0));
+        if (profileAt) setTimeout(async () => {
+            const session = await host.createCDPSession();
+            await session.send('Profiler.enable');
+            await session.send('Profiler.start');
+            await sleep(5000);
+            const { profile } = await session.send('Profiler.stop');
+            const self = new Map();
+            const total = profile.samples.length;
+            const byId = new Map(profile.nodes.map(node => [node.id, node]));
+            for (const id of profile.samples) {
+                const frame = byId.get(id).callFrame;
+                const name = `${frame.functionName || '(anonymous)'} ${frame.url.split('/').pop()}:${frame.lineNumber}`;
+                self.set(name, (self.get(name) || 0) + 1);
+            }
+            console.log('  host CPU profile (self samples):');
+            for (const [name, count] of [...self].sort((a, b) => b[1] - a[1]).slice(0, 15)) {
+                console.log(`    ${(count * 100 / total).toFixed(1)}% ${name.slice(0, 120)}`);
+            }
+        }, profileAt * 1000);
         const [hostState, guestState] = await link(host, guest);
         assert.notStrictEqual(hostState.mac, guestState.mac,
             'the host and guest fixtures came from one console; capture them in separate sessions');
@@ -241,6 +360,22 @@ async function playPairing(key, game, hostBuild, guestBuild) {
             const joins = hostLog.match(/Node \d+ joined the hosted network/g).length - joinsBefore;
             const hosting = hostLog.match(/Hosting network wlan_comm_id=0x[0-9A-F]+/g) || [];
             console.log(`  after join: host networks ${[...new Set(hosting)].join(', ')}; ${joins} more join(s) on the host`);
+            if (game.syncCheck) {
+                const { share, details } = await checkSync(host, guest, game.syncCheck).catch(async error => {
+                    await screenshot(host, directory, 'host-sync');
+                    await screenshot(guest, directory, 'guest-sync');
+                    throw error;
+                });
+                const netsim = await host.evaluate(() => window.AzaharNetplay.status().netsim);
+                const pacing = await Promise.all([host, guest].map(page => page.evaluate(() => window.AzaharNetplay.status().pacing)));
+                console.log(`  pacing: host ${JSON.stringify(pacing[0])}, guest ${JSON.stringify(pacing[1])}`);
+                console.log(`  sync: ${(share * 100).toFixed(0)}% of samples agree (${details.join(' | ')})` +
+                    (netsim ? ` under ${JSON.stringify(netsim)}` : ''));
+                await screenshot(host, directory, 'host-sync');
+                await screenshot(guest, directory, 'guest-sync');
+                assert.ok(share >= (game.syncCheck.minShare ?? 0.6),
+                    `the consoles disagreed in ${Math.round((1 - share) * 100)}% of samples`);
+            }
         }
         const errors = [...host.errors, ...guest.errors];
         assert.deepStrictEqual(errors, [], 'no page errors');
@@ -255,14 +390,37 @@ async function playPairing(key, game, hostBuild, guestBuild) {
             const [page] = (await browser.pages().catch(() => [])).slice(-1);
             const stats = page && await page.evaluate(() => window.AzaharNetplay?.status().stats).catch(() => null);
             if (stats) console.log(`  ${index ? 'guest' : 'host'} frames: ${JSON.stringify(stats)}`);
-            const lines = page && await page.$eval('#log', element => element.textContent.split('\n')
+            const lines = page && await page.evaluate(() => (window.AzaharUI.getLog?.() ?? document.getElementById('log').textContent).split('\n')
                 .filter(line => /NWM|DLP|dlp:|uds/i.test(line)).slice(-12)
                 .map(line => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/^.*?\] (?=[A-Z])/, '').slice(0, 170)))
                 .catch(() => []);
             for (const line of lines || []) console.log(`    ${line}`);
+            const health = page && await page.evaluate(() => ({
+                fps: document.getElementById('fps')?.textContent,
+                pacing: window.AzaharNetplay?.status().pacing,
+                clocks: [...(window.AzaharNetplay?.peers.values() || [])].map(peer => ({
+                    peerMs: peer.clock && Math.round(peer.clock.t / 1000), rate: peer.clock && Math.round(peer.clock.rate),
+                    offsetMs: peer.clockOffset == null ? null : Math.round(peer.clockOffset / 1000),
+                    localMs: Math.round(window.AzaharNetplay.guestTimeUs() / 1000) })),
+                status: document.getElementById('status')?.textContent,
+                tail: document.getElementById('log').textContent.split('\n')
+                    .filter(line => !/uniform index/.test(line)).slice(-6)
+                    .map(line => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/^.*?\] (?=[A-Z])/, '').slice(0, 170)),
+            })).catch(error => ({ error: String(error) }));
+            if (health) console.log(`    health: ${JSON.stringify(health)}`);
+            const threads = page && await page.evaluate(() => {
+                const module = window.AzaharUI.getModule();
+                const before = document.getElementById('log').textContent.length;
+                module?._azahar_debug_threads?.();
+                return document.getElementById('log').textContent.slice(before).split('\n')
+                    .filter(line => /azahar_debug_threads/.test(line) && !/WaitArb|WaitSleep/.test(line))
+                    .map(line => line.replace(/.*azahar_debug_threads:\d+: /, '').slice(0, 160));
+            }).catch(() => []);
+            for (const line of threads || []) console.log(`    thread: ${line}`);
         }
         return 'fail';
     } finally {
+        clearInterval(browsers.monitor);
         await Promise.all(browsers.map(browser => browser.close().catch(() => {})));
     }
 }

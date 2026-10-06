@@ -13,7 +13,7 @@
     "title": "Super Smash Bros. for Nintendo 3DS",
     "builds": {
       "full": {
-        "rom": "test_games/Smash_Bros_USA_Rev10_Decrypted.3ds"
+        "rom": "test_games/Smash_Bros_USA_Rev7_Decrypted.3ds"
       },
       "kiosk": {
         "rom": "test_games/Smash_Bros_Kiosk_Decrypted.3ds",
@@ -112,6 +112,22 @@
         "wait 3000",
         "key KeyA 200",
         "wait 3000",
+        "key KeyA 200",
+        "wait 3000",
+        "key KeyA 200",
+        "wait 3000",
+        "key KeyA 200",
+        "wait 3000",
+        "key KeyA 200",
+        "wait 3000",
+        "key KeyA 200",
+        "wait 3000",
+        "key KeyA 200",
+        "wait 3000",
+        "key KeyA 200",
+        "wait 3000",
+        "key KeyA 200",
+        "wait 3000",
         "key KeyA 200"
       ]
     },
@@ -167,6 +183,22 @@
         "wait 3000",
         "key KeyA 200",
         "wait 3000",
+        "key KeyA 200",
+        "wait 3000",
+        "key KeyA 200",
+        "wait 3000",
+        "key KeyA 200",
+        "wait 3000",
+        "key KeyA 200",
+        "wait 3000",
+        "key KeyA 200",
+        "wait 3000",
+        "key KeyA 200",
+        "wait 3000",
+        "key KeyA 200",
+        "wait 3000",
+        "key KeyA 200",
+        "wait 3000",
         "key KeyA 200"
       ]
     },
@@ -177,6 +209,25 @@
       ]
     ],
     "note": "Both consoles boot fresh. Local Multiplayer lists rooms through Download Play (dlp:FKCL), and a room's info comes from the host's dlp server thread, which save states do not restore, so lobby fixtures cannot stand in for live hosting or scanning here.",
-    "afterJoinWaitMs": 20000
+    "afterJoinWaitMs": 20000,
+    "syncCheck": {
+      "x": 0.165,
+      "y": 0.523,
+      "rowHeight": 0.0573,
+      "rows": 8,
+      "width": 0.03,
+      "samples": 12,
+      "intervalMs": 4000,
+      "threshold": 40,
+      "holdKeys": [
+        "KeyA"
+      ],
+      "minShare": 0.6,
+      "readyTimeoutMs": 150000,
+      "rowInset": 0.2,
+      "minRowsAgree": 6,
+      "readyX": 0.155,
+      "readyWidth": 0.05
+    }
   }
 }
