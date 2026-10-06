@@ -297,6 +297,18 @@
             this.peers.set(peerId, {name: '…', mac: null, title: null, channel});
         }
 
+        // Takes over a data channel that is already open, such as one a public
+        // lobby set up, as a link to `peerId`. `mode` is 'direct-host' or 'direct-guest'.
+        adoptPeer(connection, channel, peerId, mode) {
+            if (this.mode !== mode) {
+                this.leave();
+                this.mode = mode;
+            }
+            this.pending.set(peerId, connection);
+            this.wireChannel(channel, peerId);
+            if (channel.readyState === 'open') channel.onopen();
+        }
+
         // Host: make a one-use invite for the next guest.
         async createInvite() {
             if (this.mode !== 'direct-host') {
@@ -354,6 +366,7 @@
 
     const netplay = new Netplay();
     window.AzaharNetplay = netplay;
+    window.AzaharNetplayHelpers = {waitForIce, randomId, PUBLIC_STUN};
     window.addEventListener('pagehide', () => netplay.leave());
 
     // ── Card UI ──────────────────────────────────────────────────────

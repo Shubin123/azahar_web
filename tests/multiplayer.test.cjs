@@ -21,6 +21,7 @@
  *   node tests/multiplayer.test.cjs [--game smash] [--pair full:kiosk]
  *       [--renderer software|webgl2] [--gpu] [--timeout SECONDS]
  *   node tests/multiplayer.test.cjs --link-smoke [--rom PATH]
+ *   add --via lobby to link through a public lobby (local tracker) instead of codes
  */
 'use strict';
 
@@ -30,6 +31,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { listen } = require('../web/server.cjs');
 const { restoreState } = require('./fixture_state.cjs');
+const { startTracker } = require('./lobby_tracker.cjs');
 const cfg = require('./config.cjs');
 
 const PORT = 8797;
@@ -37,6 +39,10 @@ const GAMES = JSON.parse(fs.readFileSync(path.join(__dirname, 'multiplayer_games
 const OUTPUT = path.join(cfg.ROOT, 'tmp_test', 'multiplayer');
 const renderer = cfg.argVal('--renderer', 'software');
 const timeoutMs = Number(cfg.argVal('--timeout', 300)) * 1000;
+// --via lobby links the consoles by hosting and joining a public lobby (through a
+// local tracker) instead of exchanging invite codes.
+const viaLobby = cfg.argVal('--via', 'codes') === 'lobby';
+let tracker = null;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const GPU_ARGS = ['--use-angle=vulkan', '--enable-features=Vulkan', '--ignore-gpu-blocklist', '--enable-gpu'];
 
@@ -84,7 +90,8 @@ async function boot(browser, rom, nick, statePath) {
     const page = await browser.newPage();
     page.errors = [];
     page.on('pageerror', error => page.errors.push(String(error)));
-    await page.goto(`http://127.0.0.1:${PORT}/index.html?renderer=${renderer}&nick=${nick}`,
+    const trackers = tracker ? `&trackers=${encodeURIComponent(tracker.url)}` : '';
+    await page.goto(`http://127.0.0.1:${PORT}/index.html?renderer=${renderer}&nick=${nick}${trackers}`,
         { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => document.getElementById('status')?.textContent.includes('Emulator ready'),
         { timeout: 120000 });
@@ -100,6 +107,7 @@ async function boot(browser, rom, nick, statePath) {
 
 // The same exchange two people make through the Local Play card.
 async function link(host, guest) {
+    if (viaLobby) return linkViaLobby(host, guest);
     const invite = await host.evaluate(() => {
         window.AzaharNetplay.useStun = false;
         return window.AzaharNetplay.createInvite();
@@ -109,6 +117,25 @@ async function link(host, guest) {
         return window.AzaharNetplay.acceptInvite(invite);
     }, invite);
     await host.evaluate(reply => window.AzaharNetplay.acceptReply(reply), reply);
+    for (const page of [host, guest]) {
+        await page.waitForFunction(() => {
+            const state = window.AzaharNetplay.status();
+            return state.joined && state.peers.some(peer => peer.open && peer.mac);
+        }, { timeout: 60000 });
+    }
+    return Promise.all([host, guest].map(page => page.evaluate(() => window.AzaharNetplay.status())));
+}
+
+// Host a public lobby and join it from the guest's lobby list.
+async function linkViaLobby(host, guest) {
+    for (const page of [host, guest]) await page.evaluate(() => { window.AzaharNetplay.useStun = false; });
+    await host.waitForFunction(() => window.AzaharNetplay.titleId(), { timeout: 120000 });
+    await host.evaluate(() => window.AzaharLobbies.host('Multiplayer test'));
+    await guest.evaluate(() => window.AzaharLobbies.browse());
+    await guest.waitForFunction(() => window.AzaharLobbies.status().lobbies.some(l => l.name === 'Multiplayer test'),
+        { timeout: 60000 });
+    await guest.evaluate(() => window.AzaharLobbies.join(
+        window.AzaharLobbies.status().lobbies.find(l => l.name === 'Multiplayer test').host));
     for (const page of [host, guest]) {
         await page.waitForFunction(() => {
             const state = window.AzaharNetplay.status();
@@ -265,6 +292,7 @@ async function linkSmoke() {
 async function main() {
     assert.ok(cfg.chromePath, 'Chrome not found; set CHROME_PATH');
     const server = await listen(PORT, '127.0.0.1');
+    if (viaLobby) tracker = await startTracker();
     const results = [];
     try {
         if (cfg.argFlag('--link-smoke')) {
@@ -282,6 +310,7 @@ async function main() {
         }
     } finally {
         server.close();
+        await tracker?.close();
     }
     const count = kind => results.filter(result => result === kind).length;
     console.log(`multiplayer.test: ${count('pass')} passed, ${count('fail')} failed, ${count('skip')} skipped`);

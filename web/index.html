@@ -283,6 +283,11 @@
         #local-play-status[data-kind="error"] { color: #ff7a8a; }
         #local-play-status[data-kind="ok"], #local-play-status[data-kind="linked"] { color: #8fd6a6; }
         #local-play-peers { margin: 0 0 6px 18px; font-size: 0.78rem; }
+        #public-lobby-list { margin: 6px 0; padding: 0; list-style: none; font-size: 0.78rem; }
+        #public-lobby-list li { display: flex; gap: 6px; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+        #public-lobby-list .btn { width: auto; margin: 0; padding: 4px 10px; }
+        #public-lobby-status[data-kind="error"] { color: #ff7a8a; }
+        #public-lobby-status[data-kind="ok"] { color: #8fd6a6; }
         #local-play-card details { margin-top: 8px; }
         #local-play-card summary { cursor: pointer; font-size: 0.8rem; margin-bottom: 6px; }
         #audio-status { margin-top: 8px; }
@@ -1083,6 +1088,19 @@
                     <input type="checkbox" id="local-play-cross-version" checked>
                     Cross-version play: let a demo find a network hosted by the full game, and the other way round
                 </label>
+                <details id="public-lobbies" open>
+                    <summary>Public lobbies</summary>
+                    <input type="text" id="public-lobby-name" class="renderer-select" maxlength="40"
+                           placeholder="Lobby name (optional)" aria-label="Lobby name">
+                    <div class="local-play-row">
+                        <button type="button" class="btn btn-primary" id="btn-public-lobby-host">Host public lobby</button>
+                        <button type="button" class="btn btn-secondary" id="btn-public-lobby-find">Find lobbies</button>
+                    </div>
+                    <button type="button" class="btn btn-secondary" id="btn-public-lobby-stop" disabled>Stop listing / looking</button>
+                    <div id="public-lobby-status" class="mode-help" aria-live="polite">Not listed and not looking.</div>
+                    <ul id="public-lobby-list"></ul>
+                    <div class="mode-help">Lobbies are found through public WebTorrent trackers, which see the lobby name and connection details; game data still goes directly between players.</div>
+                </details>
                 <details>
                     <summary>More options</summary>
                     <label class="mode-help audio-toggle" style="margin-top:0;">
@@ -1249,6 +1267,7 @@
     <script src="azahar_touch_controls.js"></script>
     <script src="azahar_library.js"></script>
     <script src="azahar_netplay.js"></script>
+    <script src="azahar_lobbies.js"></script>
     <script>
         document.getElementById('btn-browse-library')?.addEventListener('click', () => {
             const lib = document.getElementById('library-section');

@@ -258,6 +258,7 @@ if (runLocalPlay || runMultiplayer) {
   } else {
     if (runLocalPlay) {
       run('Local Play', path.join(TESTS_DIR, 'local_play.test.cjs'), [], { timeout: 300000 });
+      run('Public lobbies', path.join(TESTS_DIR, 'public_lobbies.test.cjs'), [], { timeout: 600000 });
     }
     if (runMultiplayer) {
       // Links two consoles running a real title, then plays each game whose

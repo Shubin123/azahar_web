@@ -52,6 +52,7 @@ Azahar WebAssembly port targeting modern web browsers via Emscripten.
 Games' local wireless modes (the 3DS's "Local Play", service `nwm::UDS`) work between browsers with no server. The engine's `RoomMember` has a direct-link mode in which the page carries 802.11 frames between consoles and each console filters them by its own MAC address, as a room server would. `web/azahar_netplay.js` moves those frames:
 
 - **Direct (WebRTC):** the host presses *Host: create invite* on the Local Play card and sends the code to a friend by any means; the friend pastes it into *Use pasted code* and sends back the reply code, which the host pastes in turn. Each further guest needs one more invite; the host relays frames between guests. A public STUN server is used only to discover each browser's internet address (needed outside one home network; it can be switched off under *More options*). No game data passes through any server.
+- **Public lobbies:** *Host public lobby* lists the room; anyone pressing *Find lobbies* sees its name, game and player count and can *Join*, with no codes to swap. `web/azahar_lobbies.js` finds lobbies through public WebTorrent trackers (`wss://tracker.openwebtorrent.com`, `wss://tracker.webtorrent.dev`, `wss://tracker.files.fm:7073/announce`; `?trackers=` replaces them), which only relay the WebRTC offers and answers; the trackers see lobby names and connection details, but game data still goes directly between players. A browser that is only looking connects to each host to read its lobby card and is not a Local Play peer until it joins; joining reuses that connection as the link.
 - **Same-browser tabs:** *More options → Link tabs* (or `?link=tabs:ROOM`) links tabs of one browser through a `BroadcastChannel`. This is for testing; background tabs pause emulation.
 
 Consoles join under their own MAC address once a title runs. Each console has its own address and ID, so two players must not run copies of the same save state; the card warns when two consoles share an address. Save states can be loaded while linked.
@@ -63,6 +64,7 @@ Useful while debugging: `?logFilter=Service.NWM:Debug` widens the engine log for
 ### Multiplayer tests and lobby fixtures
 
 - `tests/local_play.test.cjs` (no ROM): tabs and WebRTC links, invite/reply codes, host relay, leaving.
+- `tests/public_lobbies.test.cjs`: hosting, finding and joining a public lobby through a local tracker (`tests/lobby_tracker.cjs`); `tests/multiplayer.test.cjs --via lobby` links the consoles of a game pairing through a lobby instead of codes.
 - `tests/multiplayer.test.cjs --link-smoke`: two browsers running a real title link under distinct console addresses.
 - `tests/multiplayer.test.cjs`: for each pairing in `tests/multiplayer_games.json` (Super Smash Bros. full/kiosk, Mario Kart 7), boots two browsers, restores their lobby fixtures, links them with invite/reply codes, runs the guest's join steps, and passes once the host accepts a node and the guest joins. Pairings of different builds also require the cross-version beacon. Missing ROMs, encrypted dumps and missing fixtures are skipped with the reason.
 
