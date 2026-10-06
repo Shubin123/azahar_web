@@ -35,9 +35,9 @@
     // block cache and are copied straight into the destination buffer.
     const TRANSFER_BYTES = 8 * BLOCK_BYTES;
 
-    // Control words: [0] state (0 idle, 1 requested, 2 done), [1] length
-    // requested / returned, [2] error flag. The offset lives in a Float64Array
-    // because images larger than 2 GiB exceed Int32 range.
+    // Control words: [0] state (0 idle, 1 requested, 2 done, -1 terminate),
+    // [1] length requested / returned, [2] error flag. The offset lives in a
+    // Float64Array because images larger than 2 GiB exceed Int32 range.
     const WORKER_SOURCE = `
         'use strict';
         const STAGE_CHUNK = 16 << 20;
@@ -45,16 +45,36 @@
             const { mode, blob, control, offsetBox, data, directory, name } = event.data;
             const bytes = new Uint8Array(data);
             let readAt;
+            let handle;
             if (mode === 'staged') {
                 // Copy the Blob into a private file; reads then come from disk
                 // without the main thread's help.
-                let handle;
                 try {
                     const root = await navigator.storage.getDirectory();
                     const dir = await root.getDirectoryHandle(directory, { create: true });
-                    const file = await dir.getFileHandle(name, { create: true });
-                    handle = await file.createSyncAccessHandle();
-                    handle.truncate(0);
+                    // Clean up any stale staging files from previous sessions
+                    try {
+                        if (dir.keys) {
+                            for await (const entryName of dir.keys()) {
+                                if (entryName !== name) {
+                                    dir.removeEntry(entryName).catch(() => {});
+                                }
+                            }
+                        }
+                    } catch (_) {}
+                    let activeName = name;
+                    for (let attempt = 0; attempt < 3; attempt++) {
+                        try {
+                            const file = await dir.getFileHandle(activeName, { create: true });
+                            handle = await file.createSyncAccessHandle();
+                            break;
+                        } catch (handleError) {
+                            try { handle?.close(); } catch (_) {}
+                            if (attempt === 2) throw handleError;
+                            activeName = \`mounted_\${Date.now()}_\${attempt}_\${Math.random().toString(36).slice(2)}.rom\`;
+                        }
+                    }
+                    try { handle.truncate(0); } catch (_) {}
                     for (let offset = 0; offset < blob.size; offset += STAGE_CHUNK) {
                         const chunk = await blob.slice(offset, offset + STAGE_CHUNK).arrayBuffer();
                         if (handle.write(new Uint8Array(chunk), { at: offset }) !== chunk.byteLength) {
@@ -80,7 +100,13 @@
             postMessage({ ready: true });
             for (;;) {
                 Atomics.wait(control, 0, 0);
-                if (Atomics.load(control, 0) !== 1) continue;
+                const cmd = Atomics.load(control, 0);
+                if (cmd === -1) {
+                    try { handle?.close(); } catch (_) {}
+                    close();
+                    return;
+                }
+                if (cmd !== 1) continue;
                 try {
                     const start = offsetBox[0];
                     const end = Math.min(blob.size, start + control[1]);
@@ -95,10 +121,13 @@
         };
     `;
 
-    // Where WebKit's copy of the mounted file lives: one file, replaced on
-    // every mount and removed on unmount, so copies never accumulate.
+    // Where WebKit's copy of the mounted file lives: uniquely named per mount
+    // to avoid lock contention with terminating workers or previous sessions,
+    // and removed on unmount so copies never accumulate.
     const STAGING_DIRECTORY = 'staging';
-    const STAGING_NAME = 'mounted.rom';
+    function makeStagingName() {
+        return `mounted_${Date.now()}_${Math.random().toString(36).slice(2)}.rom`;
+    }
     // How long the main thread waits for the probe read before deciding that
     // a worker cannot read Blobs while it spins. Reading 64 KiB directly takes
     // well under a millisecond in Chrome.
@@ -118,6 +147,7 @@
         const offsetBox = new Float64Array(new SharedArrayBuffer(8));
         const data = new SharedArrayBuffer(TRANSFER_BYTES);
         const view = new Uint8Array(data);
+        const stagingName = makeStagingName();
 
         // Returns a view of the shared buffer valid until the next call, or
         // null when `timeoutMs` passes without a reply.
@@ -150,6 +180,8 @@
                     resolve({
                         worker,
                         staged: mode === 'staged',
+                        stagedName: stagingName,
+                        control,
                         readRange: (offset, length) => request(offset, length),
                         probe: () => request(0, Math.min(blob.size, 64 << 10), PROBE_TIMEOUT_MS),
                     });
@@ -157,7 +189,7 @@
             };
             worker.onerror = event => reject(new Error(event.message || 'ROM reader worker failed'));
             worker.postMessage({ mode, blob, control, offsetBox, data,
-                                 directory: STAGING_DIRECTORY, name: STAGING_NAME });
+                                 directory: STAGING_DIRECTORY, name: stagingName });
         });
     }
 
@@ -270,20 +302,35 @@
     function unmount(FS, path) {
         const reader = mounted.get(path);
         if (reader) {
+            if (reader.control) {
+                try {
+                    Atomics.store(reader.control, 0, -1);
+                    Atomics.notify(reader.control, 0);
+                } catch (_) {}
+            }
             reader.worker.terminate();
             mounted.delete(path);
-            if (reader.staged) stagedCopyRemoval = removeStagedCopy();
+            if (reader.staged) stagedCopyRemoval = removeStagedCopy(reader.stagedName);
         }
         try { FS.unlink(path); } catch (_) { /* not present */ }
     }
 
     let stagedCopyRemoval = Promise.resolve();
 
-    async function removeStagedCopy() {
+    async function removeStagedCopy(name) {
         try {
             const root = await navigator.storage.getDirectory();
-            const directory = await root.getDirectoryHandle(STAGING_DIRECTORY);
-            await directory.removeEntry(STAGING_NAME);
+            const directory = await root.getDirectoryHandle(STAGING_DIRECTORY, { create: true });
+            if (name) {
+                await directory.removeEntry(name).catch(() => {});
+            }
+            try {
+                if (directory.keys) {
+                    for await (const entryName of directory.keys()) {
+                        directory.removeEntry(entryName).catch(() => {});
+                    }
+                }
+            } catch (_) {}
         } catch (_) { /* already gone, or still held by the closing worker */ }
     }
 

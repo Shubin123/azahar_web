@@ -1068,14 +1068,27 @@ void main() { frag_color = vec4(1.0); }`);
             // takes ownership to avoid a second copy.
             if (romData) {
                 if (romData instanceof Blob && window.AzaharRomFS) {
-                    await window.AzaharRomFS.mount(wasmModule.FS, romPath, romData, {
-                        onProgress: fraction => {
-                            setStatus(`Copying ROM into browser storage (${Math.round(fraction * 100)}%)...`);
-                            showProgress(fraction * 100);
-                        },
-                    });
-                    log(`ROM mounted lazily: ${romPath} (${romData.size} bytes` +
-                        `${window.AzaharRomFS.isStaged?.(romPath) ? ', staged copy for this browser' : ''})`);
+                    try {
+                        await window.AzaharRomFS.mount(wasmModule.FS, romPath, romData, {
+                            onProgress: fraction => {
+                                setStatus(`Copying ROM into browser storage (${Math.round(fraction * 100)}%)...`);
+                                showProgress(fraction * 100);
+                            },
+                        });
+                        log(`ROM mounted lazily: ${romPath} (${romData.size} bytes` +
+                            `${window.AzaharRomFS.isStaged?.(romPath) ? ', staged copy for this browser' : ''})`);
+                    } catch (mountErr) {
+                        if (romData.size <= 512 * 1024 * 1024) {
+                            log(`WARN: Lazy mount failed (${mountErr.message}); falling back to in-memory copy...`);
+                            setStatus('Copying ROM into memory...');
+                            showProgress(null);
+                            const buffer = await romData.arrayBuffer();
+                            wasmModule.FS.writeFile(romPath, new Uint8Array(buffer), { canOwn: true });
+                            log(`ROM written to MEMFS: ${romPath}`);
+                        } else {
+                            throw mountErr;
+                        }
+                    }
                 } else {
                     wasmModule.FS.writeFile(romPath, romData, {canOwn: true});
                     log(`ROM written to MEMFS: ${romPath}`);
