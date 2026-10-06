@@ -152,6 +152,12 @@
         if (width < 1 || height < 1) return;
         const layout = computeLayout(width, height);
         describe(layout);
+        if (layout?.bottom) {
+            stage.style.setProperty('--az-bottom-y', `${Math.round(layout.bottom.y)}px`);
+            stage.style.setProperty('--az-bottom-h', `${Math.round(layout.bottom.h)}px`);
+            stage.style.setProperty('--az-bottom-x', `${Math.round(layout.bottom.x)}px`);
+            stage.style.setProperty('--az-bottom-w', `${Math.round(layout.bottom.w)}px`);
+        }
 
         let scale = window.devicePixelRatio || 1;
         if (!isWebGL2) scale = Math.min(scale, SOFTWARE_MAX_TOP_WIDTH / layout.top.w);
@@ -174,6 +180,10 @@
     }
 
     function restoreNativeLayout() {
+        stage.style.removeProperty('--az-bottom-y');
+        stage.style.removeProperty('--az-bottom-h');
+        stage.style.removeProperty('--az-bottom-x');
+        stage.style.removeProperty('--az-bottom-w');
         const module = window.AzaharUI?.getModule?.();
         module?._azahar_set_screen_layout?.(0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
         describe(null);

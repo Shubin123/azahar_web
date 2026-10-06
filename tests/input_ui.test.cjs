@@ -360,6 +360,38 @@ async function runTests() {
         });
         assert.strictEqual(restored, true, 'Touch controls must restore outside stage when leaving fullscreen');
 
+        console.log('Test 14: UI modules wrap into 2 columns on wide / desktop layouts...');
+        await page.setViewport({ width: 1280, height: 900 });
+        await page.evaluate(() => window.dispatchEvent(new Event('resize')));
+        const cols = await page.evaluate(() => {
+            const panel = document.querySelector('.controls-panel');
+            const style = window.getComputedStyle(panel);
+            return style.gridTemplateColumns.split(' ').filter(Boolean).length;
+        });
+        assert.strictEqual(cols, 2, 'Controls panel must have 2 columns');
+
+        console.log('Test 15: mobile portrait touch controls wrap over left and right of bottom screen...');
+        await page.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true });
+        await page.evaluate(() => window.dispatchEvent(new Event('resize')));
+        const mobileLayout = await page.evaluate(() => {
+            const canvas = document.getElementById('canvas');
+            const left = document.querySelector('.touch-left');
+            const right = document.querySelector('.touch-right');
+            const cRect = canvas.getBoundingClientRect();
+            const lRect = left.getBoundingClientRect();
+            const rRect = right.getBoundingClientRect();
+            return {
+                leftIsOnLeft: lRect.left < cRect.left + cRect.width * 0.4,
+                rightIsOnRight: rRect.right > cRect.left + cRect.width * 0.6,
+                leftOverBottomHalf: lRect.top >= cRect.top + cRect.height * 0.25,
+                rightOverBottomHalf: rRect.top >= cRect.top + cRect.height * 0.25,
+            };
+        });
+        assert.strictEqual(mobileLayout.leftIsOnLeft, true, 'Left controls must sit on the left side of bottom screen');
+        assert.strictEqual(mobileLayout.rightIsOnRight, true, 'Right controls must sit on the right side of bottom screen');
+        assert.strictEqual(mobileLayout.leftOverBottomHalf, true, 'Left controls must wrap over the bottom screen');
+        assert.strictEqual(mobileLayout.rightOverBottomHalf, true, 'Right controls must wrap over the bottom screen');
+
         console.log('\n--- ALL INPUT UI TESTS PASSED! ---');
     } finally {
         await browser.close();
