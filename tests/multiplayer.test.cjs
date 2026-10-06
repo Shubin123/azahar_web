@@ -230,6 +230,18 @@ async function playPairing(key, game, hostBuild, guestBuild) {
             await screenshot(host, directory, 'host');
             await screenshot(guest, directory, 'guest');
         }
+        // Optional next phase, such as the host starting the match from the room.
+        if (game.host.afterJoin || game.guest.afterJoin) {
+            const joinsBefore = (await logText(host)).match(/Node \d+ joined the hosted network/g).length;
+            await Promise.all([runSteps(host, game.host.afterJoin || []), runSteps(guest, game.guest.afterJoin || [])]);
+            await sleep(Number(game.afterJoinWaitMs || 30000));
+            await screenshot(host, directory, 'host-after');
+            await screenshot(guest, directory, 'guest-after');
+            const hostLog = await logText(host);
+            const joins = hostLog.match(/Node \d+ joined the hosted network/g).length - joinsBefore;
+            const hosting = hostLog.match(/Hosting network wlan_comm_id=0x[0-9A-F]+/g) || [];
+            console.log(`  after join: host networks ${[...new Set(hosting)].join(', ')}; ${joins} more join(s) on the host`);
+        }
         const errors = [...host.errors, ...guest.errors];
         assert.deepStrictEqual(errors, [], 'no page errors');
         const stats = await guest.evaluate(() => window.AzaharNetplay.status().stats);
