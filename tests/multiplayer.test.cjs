@@ -164,7 +164,7 @@ function preflight(game, hostBuild, guestBuild) {
         if (build.localWireless === false) reasons.push(`${build.rom}: ${build.note}`);
         else if (!fs.existsSync(rom)) reasons.push(`${build.rom} is missing`);
         else if (!isDecrypted(rom)) reasons.push(`${build.rom} is an encrypted dump; Azahar needs a decrypted one`);
-        else if (!findFixture(rom, plan.fixture)) {
+        else if (plan.fixture && !findFixture(rom, plan.fixture)) {
             reasons.push(`${build.rom} has no ${plan.fixture} fixture under ${path.relative(cfg.ROOT, fixtureDirectory(rom))}`);
         }
     }
@@ -184,8 +184,9 @@ async function playPairing(key, game, hostBuild, guestBuild) {
         const hostRom = path.join(cfg.ROOT, game.builds[hostBuild].rom);
         const guestRom = path.join(cfg.ROOT, game.builds[guestBuild].rom);
         const [host, guest] = await Promise.all([
-            boot(browsers[0], hostRom, 'Host', findFixture(hostRom, game.host.fixture)),
-            boot(browsers[1], guestRom, 'Guest', findFixture(guestRom, game.guest.fixture)),
+            // A side without a fixture boots fresh and reaches its lobby through its steps.
+            boot(browsers[0], hostRom, 'Host', game.host.fixture && findFixture(hostRom, game.host.fixture)),
+            boot(browsers[1], guestRom, 'Guest', game.guest.fixture && findFixture(guestRom, game.guest.fixture)),
         ]);
         const [hostState, guestState] = await link(host, guest);
         assert.notStrictEqual(hostState.mac, guestState.mac,
@@ -210,6 +211,17 @@ async function playPairing(key, game, hostBuild, guestBuild) {
         return 'pass';
     } catch (error) {
         console.log(`FAIL ${label}: ${error.message}`);
+        // Frame counters tell a silent host apart from frames the guest never received.
+        for (const [index, browser] of browsers.entries()) {
+            const [page] = (await browser.pages().catch(() => [])).slice(-1);
+            const stats = page && await page.evaluate(() => window.AzaharNetplay?.status().stats).catch(() => null);
+            if (stats) console.log(`  ${index ? 'guest' : 'host'} frames: ${JSON.stringify(stats)}`);
+            const lines = page && await page.$eval('#log', element => element.textContent.split('\n')
+                .filter(line => /NWM|DLP|dlp:|uds/i.test(line)).slice(-12)
+                .map(line => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/^.*?\] (?=[A-Z])/, '').slice(0, 170)))
+                .catch(() => []);
+            for (const line of lines || []) console.log(`    ${line}`);
+        }
         return 'fail';
     } finally {
         await Promise.all(browsers.map(browser => browser.close().catch(() => {})));

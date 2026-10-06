@@ -676,6 +676,152 @@
             font-family: inherit;
             text-align: center;
         }
+
+        /* ── On-screen controls ──────────────────────────────────── */
+        /* In the page they sit under the screens. Sizes follow one unit, a
+           button's width, scaled to the device. */
+        .touch-controls {
+            --tc-u: clamp(30px, 10.5vmin, 64px);
+            display: flex;
+            justify-content: space-between;
+            gap: 8px;
+            margin-top: 8px;
+            color: #e0e0e0;
+            font-weight: 700;
+            line-height: 1;
+            -webkit-user-select: none;
+            user-select: none;
+            -webkit-touch-callout: none;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .touch-controls[hidden] { display: none !important; }
+        .touch-half {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: calc(var(--tc-u) * .3);
+            padding: calc(var(--tc-u) * .2);
+            touch-action: none;
+        }
+        .touch-shoulders, .touch-system { display: flex; gap: calc(var(--tc-u) * .25); }
+        .touch-btn, .touch-dpad-arm, .touch-dpad-center {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(15, 52, 96, .72);
+            border: 1px solid rgba(137, 180, 250, .35);
+            box-shadow: inset 1px 1px 0 rgba(183,207,255,.15), inset -1px -1px 0 rgba(0,0,0,.4);
+        }
+        .touch-btn.is-pressed, .touch-dpad-arm.is-pressed {
+            background: #e94560;
+            border-color: #ff8a9a;
+            color: #fff;
+        }
+        .touch-shoulder {
+            width: calc(var(--tc-u) * 1.5);
+            height: calc(var(--tc-u) * .8);
+            border-radius: calc(var(--tc-u) * .4);
+            font-size: calc(var(--tc-u) * .36);
+        }
+        .touch-system-btn {
+            min-width: calc(var(--tc-u) * 1.35);
+            height: calc(var(--tc-u) * .6);
+            padding: 0 calc(var(--tc-u) * .2);
+            border-radius: calc(var(--tc-u) * .3);
+            font-size: calc(var(--tc-u) * .25);
+            letter-spacing: .04em;
+        }
+        .touch-face, .touch-dpad {
+            display: grid;
+            grid-template-columns: repeat(3, calc(var(--tc-u) * 1.05));
+            grid-template-rows: repeat(3, calc(var(--tc-u) * 1.05));
+        }
+        .touch-face-btn { border-radius: 50%; font-size: calc(var(--tc-u) * .45); }
+        .touch-face-x { grid-area: 1 / 2; }
+        .touch-face-y { grid-area: 2 / 1; }
+        .touch-face-a { grid-area: 2 / 3; }
+        .touch-face-b { grid-area: 3 / 2; }
+        .touch-dpad-arm { color: rgba(224, 224, 224, .6); font-size: calc(var(--tc-u) * .32); }
+        .touch-dpad-arm.is-pressed { color: #fff; }
+        .touch-dpad-up { grid-area: 1 / 2; border-radius: 6px 6px 0 0; border-bottom: 0; }
+        .touch-dpad-down { grid-area: 3 / 2; border-radius: 0 0 6px 6px; border-top: 0; }
+        .touch-dpad-left { grid-area: 2 / 1; border-radius: 6px 0 0 6px; border-right: 0; }
+        .touch-dpad-right { grid-area: 2 / 3; border-radius: 0 6px 6px 0; border-left: 0; }
+        .touch-dpad-center { grid-area: 2 / 2; border-width: 1px 0; border-color: transparent; box-shadow: none; }
+        .touch-dpad-up::after { content: '▲'; }
+        .touch-dpad-down::after { content: '▼'; }
+        .touch-dpad-left::after { content: '◀'; }
+        .touch-dpad-right::after { content: '▶'; }
+        .touch-stick {
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: calc(var(--tc-u) * 2.4);
+            height: calc(var(--tc-u) * 2.4);
+            border-radius: 50%;
+            background: radial-gradient(circle, rgba(15,52,96,.3), rgba(15,52,96,.75));
+            border: 1px solid rgba(137, 180, 250, .35);
+        }
+        .touch-stick-knob {
+            width: 48%;
+            height: 48%;
+            border-radius: 50%;
+            background: #2a4a7a;
+            border: 1px solid rgba(183, 207, 255, .5);
+            box-shadow: 0 2px 6px rgba(0,0,0,.45);
+            pointer-events: none;
+        }
+        .touch-stick.is-active .touch-stick-knob { background: #e94560; border-color: #ff8a9a; }
+        /* The New 3DS C-Stick is a small nub above and inside the face buttons. */
+        .touch-stick-cstick {
+            width: calc(var(--tc-u) * 1.6);
+            height: calc(var(--tc-u) * 1.6);
+            align-self: flex-start;
+        }
+
+        /* Fullscreen: the controls take a strip under the screens (portrait)
+           or a column on each side (landscape), and the canvas, which the
+           screens are laid out in, gets the rest. */
+        .screen-stage.is-fullscreen.has-touch-controls {
+            display: grid;
+            grid-template: "left screens right" minmax(0, 1fr) / auto minmax(0, 1fr) auto;
+        }
+        .screen-stage.is-fullscreen.has-touch-controls canvas {
+            grid-area: screens;
+            min-width: 0;
+            min-height: 0;
+        }
+        .screen-stage.is-fullscreen .touch-controls { display: contents; }
+        .screen-stage.is-fullscreen .touch-half {
+            justify-content: space-between;
+            padding-top: max(calc(var(--tc-u) * .2), env(safe-area-inset-top));
+            padding-bottom: max(calc(var(--tc-u) * .2), env(safe-area-inset-bottom));
+        }
+        .screen-stage.is-fullscreen .touch-left {
+            grid-area: left;
+            padding-left: max(calc(var(--tc-u) * .2), env(safe-area-inset-left));
+        }
+        .screen-stage.is-fullscreen .touch-right {
+            grid-area: right;
+            padding-right: max(calc(var(--tc-u) * .2), env(safe-area-inset-right));
+        }
+        @media (orientation: portrait) {
+            .screen-stage.is-fullscreen.has-touch-controls {
+                grid-template: "screens screens" minmax(0, 1fr) "left right" auto / 1fr 1fr;
+            }
+            .screen-stage.is-fullscreen .touch-half { justify-content: flex-start; }
+        }
+        /* Keep the fullscreen buttons off the right-hand controls. */
+        .screen-stage.has-touch-controls .fullscreen-overlay {
+            right: 50%;
+            transform: translateX(50%);
+            align-items: center;
+        }
+        /* Phones narrower than the native 400px frame. */
+        @media (max-width: 460px) {
+            .canvas-panel { min-width: 0; }
+        }
     </style>
 </head>
 <body>
@@ -762,6 +908,15 @@
                 <button class="btn btn-secondary" id="btn-run" disabled>▶ Run / Resume</button>
                 <button class="btn btn-secondary" id="btn-stop" disabled>⏹ Stop</button>
                 <button type="button" class="btn btn-secondary" id="btn-keymap">⌨ Keymap</button>
+                <label for="touch-controls-mode" class="mode-help" style="display:block;margin-top:6px;margin-bottom:4px;">
+                    On-screen controls
+                </label>
+                <select id="touch-controls-mode" class="renderer-select" aria-label="On-screen controls">
+                    <option value="auto">Auto — touch screens without a gamepad</option>
+                    <option value="on">Always show</option>
+                    <option value="off">Hide</option>
+                </select>
+                <div id="touch-controls-help" class="mode-help" aria-live="polite"></div>
                 <div class="speed-control">
                     <label for="fast-forward">
                         <span>Fast-forward</span><output id="fast-forward-value">1x</output>
@@ -1012,6 +1167,7 @@
     <script src="azahar_ui.js"></script>
     <script src="azahar_input.js"></script>
     <script src="azahar_fullscreen.js"></script>
+    <script src="azahar_touch_controls.js"></script>
     <script src="azahar_library.js"></script>
     <script src="azahar_netplay.js"></script>
     <script>

@@ -2,7 +2,8 @@
  * Azahar Web — Input reference (azahar_input.js)
  * Documents the keyboard bindings the native core reads (the SDL frontend's
  * default Controls profile), shows them in the keymap menu, and drives the
- * same bindings from gamepads through the browser Gamepad API.
+ * same bindings from gamepads through the browser Gamepad API. Other input
+ * sources (the on-screen touch controls) hold keys through setSourceCodes.
  */
 
 (function () {
@@ -75,6 +76,10 @@
     const padStatusEls = [];
     let pollHandle = null;
     const pressedCodes = new Set();
+    // Keys each input source (gamepads, on-screen controls) currently holds.
+    // A key stays down while any source holds it.
+    const sourceCodes = new Map();
+    let lastPadCount = -1;
 
     function entryByCode(code) {
         return KEYMAP.find(entry => entry.code === code);
@@ -97,8 +102,28 @@
         }));
     }
 
+    function syncKeys() {
+        const wanted = new Set();
+        for (const codes of sourceCodes.values()) {
+            for (const code of codes) wanted.add(code);
+        }
+        for (const code of [...pressedCodes]) {
+            if (!wanted.has(code)) sendKey(code, false);
+        }
+        for (const code of wanted) sendKey(code, true);
+    }
+
+    // Replaces the set of keys one source holds.
+    function setSourceCodes(source, codes) {
+        const next = new Set(codes);
+        if (next.size) sourceCodes.set(source, next);
+        else sourceCodes.delete(source);
+        syncKeys();
+    }
+
     function releaseAll() {
-        for (const code of [...pressedCodes]) sendKey(code, false);
+        sourceCodes.clear();
+        syncKeys();
     }
 
     function connectedPads() {
@@ -138,15 +163,11 @@
         pollHandle = null;
         const pads = connectedPads();
         if (!pads.length) {
-            releaseAll();
+            setSourceCodes('gamepad', []);
             updatePadStatus();
             return;
         }
-        const wanted = document.hidden ? new Set() : readPadCodes(pads);
-        for (const code of [...pressedCodes]) {
-            if (!wanted.has(code)) sendKey(code, false);
-        }
-        for (const code of wanted) sendKey(code, true);
+        setSourceCodes('gamepad', document.hidden ? [] : readPadCodes(pads));
         pollHandle = window.requestAnimationFrame(pollGamepads);
     }
 
@@ -161,6 +182,12 @@
             ? `🎮 ${pads.map(pad => pad.id.replace(/\s*\(.*$/, '') || 'Gamepad').join(', ')} connected`
             : '🎮 No gamepad connected — press a button on your controller to connect it.';
         for (const el of padStatusEls) el.textContent = text;
+        if (pads.length !== lastPadCount) {
+            lastPadCount = pads.length;
+            window.dispatchEvent(new CustomEvent('azahar-gamepads-changed', {
+                detail: { connected: pads.length }
+            }));
+        }
     }
 
     function createPadStatus() {
@@ -265,7 +292,7 @@
         window.addEventListener('gamepadconnected', startPolling);
         window.addEventListener('gamepaddisconnected', () => {
             updatePadStatus();
-            if (!connectedPads().length) releaseAll();
+            if (!connectedPads().length) setSourceCodes('gamepad', []);
         });
         window.addEventListener('blur', releaseAll);
         // Pads already connected before this page loaded report no event
@@ -277,6 +304,8 @@
         KEYMAP,
         openKeymap,
         closeKeymap,
+        setSourceCodes,
+        hasGamepad: () => connectedPads().length > 0,
         getPressedCodes: () => [...pressedCodes]
     };
 

@@ -146,7 +146,9 @@
     function applyLayout() {
         pendingFrame = 0;
         if (!active) return;
-        const width = stage.clientWidth, height = stage.clientHeight;
+        // The canvas fills the stage, less any room the on-screen controls
+        // take beside or below it.
+        const width = canvas.clientWidth, height = canvas.clientHeight;
         if (width < 1 || height < 1) return;
         const layout = computeLayout(width, height);
         describe(layout);
@@ -187,6 +189,10 @@
         return document.fullscreenElement || document.webkitFullscreenElement || null;
     }
 
+    function announce() {
+        window.dispatchEvent(new CustomEvent('azahar-fullscreen-changed', { detail: { active } }));
+    }
+
     function activate(usePseudo) {
         active = true;
         pseudo = usePseudo;
@@ -201,7 +207,9 @@
             resizeObserver = new ResizeObserver(scheduleLayout);
         }
         resizeObserver?.observe(stage);
+        resizeObserver?.observe(canvas);
         window.addEventListener('resize', scheduleLayout);
+        announce();
         scheduleLayout();
         // Keyboard input reaches the game through window listeners; keep the
         // focus off the settings controls the user clicked to get here.
@@ -214,6 +222,7 @@
         if (pendingFrame) cancelAnimationFrame(pendingFrame);
         pendingFrame = 0;
         resizeObserver?.unobserve(stage);
+        resizeObserver?.unobserve(canvas);
         window.removeEventListener('resize', scheduleLayout);
         stage.classList.remove('is-fullscreen', 'is-pseudo-fullscreen');
         document.documentElement.classList.remove('has-pseudo-fullscreen');
@@ -222,6 +231,7 @@
         setOverlayOpen(false);
         if (settingsBox && settingsHome) settingsHome.insertBefore(settingsBox, settingsNext);
         restoreNativeLayout();
+        announce();
     }
 
     async function enter() {

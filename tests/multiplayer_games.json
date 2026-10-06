@@ -21,9 +21,31 @@
         "note": "The kiosk demo shows Group on its main menu, but choosing it only replays the selection animation; the demo never calls the local wireless service (checked with logFilter=Service.NWM:Debug, 2026-10-05)."
       }
     },
-    "host": { "fixture": "lobby-host", "steps": [] },
-    "guest": { "fixture": "lobby-guest", "steps": ["wait 3000", "key KeyA 600"] },
-    "pairings": [["full", "full"], ["full", "kiosk"], ["kiosk", "full"]]
+    "host": {
+      "fixture": "lobby-host",
+      "steps": []
+    },
+    "guest": {
+      "fixture": "lobby-guest",
+      "steps": [
+        "wait 3000",
+        "key KeyA 600"
+      ]
+    },
+    "pairings": [
+      [
+        "full",
+        "full"
+      ],
+      [
+        "full",
+        "kiosk"
+      ],
+      [
+        "kiosk",
+        "full"
+      ]
+    ]
   },
   "mario-kart-7": {
     "title": "Mario Kart 7",
@@ -32,8 +54,38 @@
         "rom": "test_games/Mario_Kart_7_USA_Rev1_Decrypted.3ds"
       }
     },
-    "host": { "fixture": "lobby-host", "steps": [] },
-    "guest": { "fixture": "lobby-guest", "steps": ["wait 3000", "key KeyA 600"] },
-    "pairings": [["full", "full"]]
+    "host": {
+      "fixture": null,
+      "steps": [
+        "wait 12000",
+        "key KeyA 200",
+        "wait 15000",
+        "touch 0.5 0.71 300",
+        "wait 6000",
+        "touch 0.62 0.945 300",
+        "wait 1500",
+        "key KeyA 200",
+        "wait 4000"
+      ]
+    },
+    "guest": {
+      "fixture": null,
+      "steps": [
+        "key KeyA 200",
+        "wait 15000",
+        "touch 0.5 0.71 300",
+        "wait 15000",
+        "touch 0.5 0.56 300",
+        "wait 2000",
+        "key KeyA 300"
+      ]
+    },
+    "pairings": [
+      [
+        "full",
+        "full"
+      ]
+    ],
+    "note": "Both consoles boot fresh. Local Multiplayer lists rooms through Download Play (dlp:FKCL), and a room's info comes from the host's dlp server thread, which save states do not restore, so lobby fixtures cannot stand in for live hosting or scanning here."
   }
 }

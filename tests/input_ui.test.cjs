@@ -193,6 +193,173 @@ async function runTests() {
         assert.ok(keyListenerScripts.some(url => /azahar(_webgl2)?\.js$/.test(url)),
             `SDL keydown listener must be on window, found: ${JSON.stringify(keyListenerScripts)}`);
 
+        console.log('Test 9: on-screen controls include every 3DS button and stick...');
+        const touchButtons = await page.evaluate(() => {
+            const controls = document.getElementById('touch-controls');
+            if (!controls) return null;
+            const buttons = [...controls.querySelectorAll('[data-code]')].map(b => b.dataset.code);
+            const sticks = [...controls.querySelectorAll('.touch-stick')].map(s => s.dataset.stick);
+            return { buttons, sticks };
+        });
+        assert.ok(touchButtons, 'Touch controls deck exists');
+        // Expected buttons: A(KeyA), B(KeyS), X(KeyZ), Y(KeyX), D-pad(KeyT, KeyG, KeyF, KeyH),
+        // Shoulders(KeyQ, KeyW, Digit1, Digit2), System(KeyM, KeyN, KeyB)
+        const expectedCodes = ['KeyA', 'KeyS', 'KeyZ', 'KeyX', 'KeyT', 'KeyG', 'KeyF', 'KeyH',
+            'KeyQ', 'KeyW', 'Digit1', 'Digit2', 'KeyM', 'KeyN', 'KeyB'];
+        for (const code of expectedCodes) {
+            assert.ok(touchButtons.buttons.includes(code), `Touch controls must include button code ${code}`);
+        }
+        assert.ok(touchButtons.sticks.includes('circle'), 'Touch controls must include Circle Pad');
+        assert.ok(touchButtons.sticks.includes('cstick'), 'Touch controls must include C-Stick');
+
+        console.log('Test 10: on-screen controls auto-hide when physical gamepad is connected...');
+        // On desktop with auto mode, touch controls are hidden
+        assert.strictEqual(await page.evaluate(() => window.AzaharTouchControls.isVisible()), false,
+            'Auto mode on desktop hides touch controls');
+        // Force on to test visibility
+        await page.evaluate(() => window.AzaharTouchControls.setMode('on'));
+        assert.strictEqual(await page.evaluate(() => window.AzaharTouchControls.isVisible()), true,
+            'Setting mode to on shows touch controls');
+        // Reset to auto and simulate mobile touch environment
+        await page.evaluate(() => {
+            window.AzaharTouchControls.setMode('auto');
+            // Mock isTouchDevice condition
+            Object.defineProperty(navigator, 'maxTouchPoints', { value: 5, configurable: true });
+        });
+        // With maxTouchPoints and mobile width, verify auto mode shows touch controls
+        await page.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true });
+        await page.evaluate(() => window.dispatchEvent(new Event('resize')));
+        await page.waitForFunction(() => window.AzaharTouchControls.isVisible(), { timeout: 3000 });
+        assert.strictEqual(await page.evaluate(() => window.AzaharTouchControls.isVisible()), true,
+            'Auto mode on mobile shows touch controls when no controller is connected');
+
+        // Connect physical gamepad -> touch controls must automatically hide
+        await page.evaluate(() => {
+            window.__pad = { id: 'Wireless Controller', connected: true, index: 0, mapping: 'standard',
+                buttons: Array.from({ length: 17 }, () => ({ pressed: false, value: 0 })), axes: [0, 0, 0, 0] };
+            window.__pads = [window.__pad];
+            navigator.getGamepads = () => window.__pads;
+            window.dispatchEvent(new Event('gamepadconnected'));
+        });
+        await page.waitForFunction(() => !window.AzaharTouchControls.isVisible(), { timeout: 3000 });
+        assert.strictEqual(await page.evaluate(() => window.AzaharTouchControls.isVisible()), false,
+            'Connecting physical gamepad hides on-screen controls');
+
+        // Disconnect physical gamepad -> touch controls must automatically reappear
+        await page.evaluate(() => {
+            window.__pads = [];
+            navigator.getGamepads = () => [];
+            window.dispatchEvent(new Event('gamepaddisconnected'));
+        });
+        await page.waitForFunction(() => window.AzaharTouchControls.isVisible(), { timeout: 3000 });
+        assert.strictEqual(await page.evaluate(() => window.AzaharTouchControls.isVisible()), true,
+            'Disconnecting physical gamepad restores on-screen controls');
+
+        console.log('Test 11: touching buttons and multi-touch dispatches correct keys...');
+        // Clear log
+        await page.evaluate(() => { window.__keyLog = []; });
+        // Press button A
+        await page.evaluate(() => {
+            const btnA = document.querySelector('.touch-face-a');
+            const rect = btnA.getBoundingClientRect();
+            btnA.dispatchEvent(new PointerEvent('pointerdown', {
+                pointerId: 10, bubbles: true, cancelable: true,
+                clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2
+            }));
+        });
+        await waitPressed(['KeyA'], 'touch button A');
+        assert.strictEqual(await page.evaluate(() => document.querySelector('.touch-face-a').classList.contains('is-pressed')), true);
+
+        // While button A is held, also press button B (multi-touch with pointerId 11)
+        await page.evaluate(() => {
+            const btnB = document.querySelector('.touch-face-b');
+            const rect = btnB.getBoundingClientRect();
+            btnB.dispatchEvent(new PointerEvent('pointerdown', {
+                pointerId: 11, bubbles: true, cancelable: true,
+                clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2
+            }));
+        });
+        await waitPressed(['KeyA', 'KeyS'], 'multi-touch A and B');
+        assert.strictEqual(await page.evaluate(() => document.querySelector('.touch-face-b').classList.contains('is-pressed')), true);
+
+        // Release button A
+        await page.evaluate(() => {
+            const btnA = document.querySelector('.touch-face-a');
+            btnA.dispatchEvent(new PointerEvent('pointerup', { pointerId: 10, bubbles: true, cancelable: true }));
+        });
+        await waitPressed(['KeyS'], 'released button A while holding B');
+        assert.strictEqual(await page.evaluate(() => document.querySelector('.touch-face-a').classList.contains('is-pressed')), false);
+
+        // Release button B
+        await page.evaluate(() => {
+            const btnB = document.querySelector('.touch-face-b');
+            btnB.dispatchEvent(new PointerEvent('pointerup', { pointerId: 11, bubbles: true, cancelable: true }));
+        });
+        await waitPressed([], 'released button B');
+
+        console.log('Test 12: Circle Pad stick tilt and D-pad input...');
+        // Tilt Circle Pad stick right and up
+        await page.evaluate(() => {
+            const stick = document.querySelector('.touch-stick-circle');
+            const rect = stick.getBoundingClientRect();
+            // Start pointer at center
+            stick.dispatchEvent(new PointerEvent('pointerdown', {
+                pointerId: 12, bubbles: true, cancelable: true, clientX: rect.x + rect.width / 2, clientY: rect.y + rect.height / 2
+            }));
+            // Move pointer right and up
+            stick.dispatchEvent(new PointerEvent('pointermove', {
+                pointerId: 12, bubbles: true, cancelable: true,
+                clientX: rect.x + rect.width * 0.9, clientY: rect.y + rect.height * 0.1
+            }));
+        });
+        await waitPressed(['ArrowRight', 'ArrowUp'], 'circle pad up-right tilt');
+
+        // Release stick
+        await page.evaluate(() => {
+            const stick = document.querySelector('.touch-stick-circle');
+            stick.dispatchEvent(new PointerEvent('pointerup', { pointerId: 12, bubbles: true, cancelable: true }));
+        });
+        await waitPressed([], 'released circle pad');
+
+        // Press D-pad
+        await page.evaluate(() => {
+            const dpadLeft = document.querySelector('.touch-dpad-left');
+            const rect = dpadLeft.getBoundingClientRect();
+            dpadLeft.dispatchEvent(new PointerEvent('pointerdown', {
+                pointerId: 13, bubbles: true, cancelable: true,
+                clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2
+            }));
+        });
+        await waitPressed(['KeyF'], 'D-pad left');
+        await page.evaluate(() => {
+            const dpadLeft = document.querySelector('.touch-dpad-left');
+            dpadLeft.dispatchEvent(new PointerEvent('pointerup', { pointerId: 13, bubbles: true, cancelable: true }));
+        });
+        await waitPressed([], 'released D-pad');
+
+        console.log('Test 13: fullscreen view layout with on-screen controls...');
+        await page.setViewport({ width: 844, height: 390, isMobile: true, hasTouch: true });
+        await page.evaluate(() => window.dispatchEvent(new Event('resize')));
+        // Enter fullscreen
+        await page.click('#btn-fullscreen-stage');
+        await page.waitForFunction(() => window.AzaharFullscreen.isActive());
+        // In fullscreen with touch controls, deck is inside stage
+        const inStage = await page.evaluate(() => {
+            const deck = document.getElementById('touch-controls');
+            const stage = document.getElementById('screen-stage');
+            return deck.parentElement === stage && stage.classList.contains('has-touch-controls');
+        });
+        assert.strictEqual(inStage, true, 'Touch controls must move into stage during fullscreen');
+        // Exit fullscreen
+        await page.click('#btn-fullscreen-exit');
+        await page.waitForFunction(() => !window.AzaharFullscreen.isActive());
+        const restored = await page.evaluate(() => {
+            const deck = document.getElementById('touch-controls');
+            const stage = document.getElementById('screen-stage');
+            return deck.parentElement !== stage;
+        });
+        assert.strictEqual(restored, true, 'Touch controls must restore outside stage when leaving fullscreen');
+
         console.log('\n--- ALL INPUT UI TESTS PASSED! ---');
     } finally {
         await browser.close();

@@ -30,6 +30,8 @@ web/                    # Ready-to-serve web application
   index.html            # Main page (accelerated WebGL2 first)
   index_webgl2.html     # Legacy redirect into index.html renderer selection
   azahar_ui.js          # UI controller (ROM loading, run loop, FPS display)
+  azahar_input.js       # Gamepad and keyboard input mappings
+  azahar_touch_controls.js # On-screen mobile controls for touch screens without a controller
   azahar_savestates.js  # IndexedDB persistence for compressed per-game save slots
   azahar_fullscreen.js  # Fullscreen view: screen layout within the user's size bounds
   coi-serviceworker.js  # COOP/COEP header injection for static hosts
