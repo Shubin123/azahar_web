@@ -360,15 +360,102 @@ async function runTests() {
         });
         assert.strictEqual(restored, true, 'Touch controls must restore outside stage when leaving fullscreen');
 
-        console.log('Test 14: UI modules wrap into 2 columns on wide / desktop layouts...');
+        console.log('Test 14: widgets fill a grid of as many columns as fit, without overflow or overlap...');
         await page.setViewport({ width: 1280, height: 900 });
-        await page.evaluate(() => window.dispatchEvent(new Event('resize')));
-        const cols = await page.evaluate(() => {
-            const panel = document.querySelector('.controls-panel');
-            const style = window.getComputedStyle(panel);
-            return style.gridTemplateColumns.split(' ').filter(Boolean).length;
+        await page.evaluate(() => { localStorage.removeItem('azahar-layout'); window.AzaharLayout.reset(); });
+        const gridCheck = () => page.evaluate(() => {
+            const panel = document.getElementById('widget-grid');
+            const pRect = panel.getBoundingClientRect();
+            const cards = [...panel.querySelectorAll(':scope > .card')].filter(c => !c.hidden);
+            const rects = cards.map(c => c.getBoundingClientRect());
+            const overlaps = [];
+            rects.forEach((a, i) => rects.slice(i + 1).forEach((b, j) => {
+                if (a.left < b.right - 1 && b.left < a.right - 1 && a.top < b.bottom - 1 && b.top < a.bottom - 1)
+                    overlaps.push(`${cards[i].dataset.widget}/${cards[i + 1 + j].dataset.widget}`);
+            }));
+            return {
+                cols: window.getComputedStyle(panel).gridTemplateColumns.split(' ').filter(Boolean).length,
+                layoutCols: window.AzaharLayout.columns(),
+                outside: cards.filter((c, i) => rects[i].left < pRect.left - 1 || rects[i].right > pRect.right + 1)
+                    .map(c => c.dataset.widget),
+                textOverflow: cards.filter(c => c.scrollWidth > c.clientWidth + 1).map(c => c.dataset.widget),
+                overlaps,
+            };
         });
-        assert.strictEqual(cols, 2, 'Controls panel must have 2 columns');
+        let grid = await gridCheck();
+        assert.ok(grid.cols >= 3, `Expected at least 3 widget columns at 1280px, got ${grid.cols}`);
+        assert.strictEqual(grid.layoutCols, grid.cols, 'Layout column math must match the CSS grid');
+        assert.deepStrictEqual(grid.outside, [], 'No widget may extend past the grid');
+        assert.deepStrictEqual(grid.textOverflow, [], 'No widget content may spill sideways');
+        assert.deepStrictEqual(grid.overlaps, [], 'Widgets must not overlap');
+
+        console.log('Test 14b: the hamburger menu shows, hides and sizes widgets...');
+        await page.click('#btn-layout-menu');
+        const menuOpen = await page.evaluate(() => ({
+            open: !document.getElementById('layout-menu').hidden,
+            items: document.querySelectorAll('#layout-widget-list li').length,
+            cards: document.querySelectorAll('#widget-grid > .card[data-widget]').length,
+        }));
+        assert.strictEqual(menuOpen.open, true, 'Hamburger must open the layout menu');
+        assert.strictEqual(menuOpen.items, menuOpen.cards, 'Menu must list every widget');
+        await page.click('#layout-widget-list li[data-widget-id="audio"] input[type="checkbox"]');
+        assert.strictEqual(await page.evaluate(() => document.getElementById('audio-card').hidden), true,
+            'Unchecking a widget must hide it');
+        await page.select('#layout-widget-list li[data-widget-id="renderer"] select', '2');
+        const spanWidth = await page.evaluate(() => {
+            const card = document.querySelector('.card[data-widget="renderer"]');
+            const rom = document.querySelector('.card[data-widget="rom"]');
+            return card.getBoundingClientRect().width / rom.getBoundingClientRect().width;
+        });
+        assert.ok(spanWidth > 1.9 && spanWidth < 2.2, `A 2-column widget must be ~2x as wide, got ${spanWidth}`);
+        await page.evaluate(() => {
+            const r = document.getElementById('layout-widget-width');
+            r.value = '440';
+            r.dispatchEvent(new Event('input'));
+        });
+        grid = await gridCheck();
+        assert.ok(grid.cols < 3, `Wider widgets must mean fewer columns, got ${grid.cols}`);
+        assert.deepStrictEqual(grid.overlaps, [], 'Widgets must not overlap after changing width');
+        await page.keyboard.press('Escape');
+        assert.strictEqual(await page.evaluate(() => document.getElementById('layout-menu').hidden), true,
+            'Escape must close the layout menu');
+
+        console.log('Test 14c: dragging a widget corner resizes it, and the layout survives a reload...');
+        const handle = await page.$('.card[data-widget="log"] .widget-resize');
+        await page.evaluate(el => el.scrollIntoView({ block: 'center' }), handle);
+        const hBox = await handle.boundingBox();
+        await page.mouse.move(hBox.x + 5, hBox.y + 5);
+        await page.mouse.down();
+        await page.mouse.move(hBox.x + 5, hBox.y + 125, { steps: 4 });
+        await page.mouse.up();
+        const logHeight = (await page.evaluate(() => window.AzaharLayout.getState().widgets.log.height));
+        assert.ok(logHeight > 150, `Corner drag must make the log taller, got ${logHeight}`);
+        grid = await gridCheck();
+        assert.deepStrictEqual(grid.overlaps, [], 'Widgets must not overlap after a resize');
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await page.waitForFunction(() => window.AzaharLayout);
+        const persisted = await page.evaluate(() => ({
+            audioHidden: document.getElementById('audio-card').hidden,
+            width: window.AzaharLayout.getState().widgetWidth,
+            logHeight: document.querySelector('.card[data-widget="log"]').style.height,
+        }));
+        assert.deepStrictEqual(persisted, { audioHidden: true, width: 440, logHeight: `${logHeight}px` },
+            'Layout must persist across reloads');
+
+        console.log('Test 14d: reset restores the default layout...');
+        await page.click('#btn-layout-menu');
+        await page.click('#btn-layout-reset');
+        const afterReset = await page.evaluate(() => ({
+            audioHidden: document.getElementById('audio-card').hidden,
+            width: window.AzaharLayout.getState().widgetWidth,
+            stored: localStorage.getItem('azahar-layout'),
+            rendererSpan: document.querySelector('.card[data-widget="renderer"]').style.gridColumn,
+        }));
+        assert.deepStrictEqual(afterReset, { audioHidden: false, width: 260, stored: null, rendererSpan: '' },
+            'Reset must restore defaults and clear the saved layout');
+        await page.keyboard.press('Escape');
+        grid = await gridCheck();
+        assert.ok(grid.cols >= 3, 'Default layout must be back to 3+ columns');
 
         console.log('Test 15: mobile portrait touch controls wrap over left and right of bottom screen...');
         await page.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true });

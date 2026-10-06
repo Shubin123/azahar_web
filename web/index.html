@@ -40,10 +40,11 @@
         .main-layout {
             display: flex;
             flex-wrap: wrap;
-            gap: 16px;
-            max-width: 1200px;
+            gap: var(--widget-gap, 16px);
+            max-width: 2400px;
             width: 100%;
             justify-content: center;
+            align-items: flex-start;
         }
         .canvas-panel {
             flex: 0 0 804px;
@@ -65,24 +66,32 @@
                and avoids browser filtering that blurs HUD and control text. */
             image-rendering: pixelated;
         }
+        /* Widget grid: as many columns of at least --widget-w as fit. Widgets
+           span 1+ columns and keep their own height, so a tall widget never
+           stretches its row neighbours; dense packing back-fills the gaps. */
         .controls-panel {
-            flex: 1 1 580px;
+            --widget-w: 260px;
+            --widget-gap: 12px;
+            flex: 1 1 calc(var(--widget-w) * 2 + var(--widget-gap));
+            min-width: 0;
             width: 100%;
-            max-width: 100%;
             display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 12px;
+            grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--widget-w)), 1fr));
+            grid-auto-flow: row dense;
+            /* Masonry: rows are 4px units and each widget spans as many as its
+               height needs (set by azahar_layout.js), so short widgets pack
+               under each other instead of leaving holes. */
+            grid-auto-rows: 4px;
+            column-gap: var(--widget-gap);
+            row-gap: 0;
+            align-items: start;
             align-content: start;
         }
+        .main-layout.widgets-below .controls-panel { flex-basis: 100%; }
         @media (max-width: 840px) {
             .canvas-panel {
                 flex: 1 1 auto;
                 max-width: 100%;
-            }
-        }
-        @media (max-width: 540px) {
-            .controls-panel {
-                grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr));
             }
         }
         .card {
@@ -90,6 +99,8 @@
             border: 1px solid #0f3460;
             border-radius: 8px;
             padding: 16px;
+            min-width: 0;
+            overflow-wrap: break-word;
             box-shadow: inset 1px 1px 0 rgba(183,207,255,.12),
                         inset -1px -1px 0 rgba(0,0,0,.45), 0 5px 14px rgba(0,0,0,.2);
         }
@@ -106,6 +117,118 @@
             color: #e94560;
             border-bottom: 1px solid #0f3460;
             padding-bottom: 6px;
+        }
+
+        /* ── Widgets ─────────────────────────────────────────────── */
+        .controls-panel > .card { position: relative; display: flex; flex-direction: column; }
+        .controls-panel > .card.has-fixed-height { overflow: auto; }
+        .controls-panel > .card.is-collapsed { height: auto !important; overflow: hidden; }
+        .controls-panel > .card.is-collapsed > :not(h2) { display: none !important; }
+        .controls-panel > .card.is-collapsed > h2 { margin-bottom: 0; border-bottom: 0; padding-bottom: 0; }
+        .controls-panel > .card > h2 {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            cursor: grab;
+            user-select: none;
+            flex: none;
+        }
+        .widget-title { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .widget-tools { display: flex; gap: 3px; flex: none; opacity: .35; transition: opacity .2s; }
+        .card:hover .widget-tools, .widget-tools:focus-within { opacity: 1; }
+        @media (pointer: coarse) { .widget-tools { opacity: .8; } }
+        .widget-tool {
+            width: 22px;
+            height: 22px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0;
+            border: 1px solid #0f3460;
+            border-radius: 4px;
+            background: #0d1730;
+            color: #c9d4ea;
+            font-size: .72rem;
+            line-height: 1;
+            cursor: pointer;
+        }
+        .widget-tool:hover, .widget-tool:focus-visible { border-color: #e94560; color: #fff; }
+        .widget-resize {
+            position: absolute;
+            right: 2px;
+            bottom: 2px;
+            width: 14px;
+            height: 14px;
+            cursor: nwse-resize;
+            touch-action: none;
+            opacity: .45;
+            background: linear-gradient(135deg, transparent 0 45%, #89b4fa 45% 52%, transparent 52% 65%,
+                                        #89b4fa 65% 72%, transparent 72%);
+        }
+        .widget-resize:hover { opacity: 1; }
+        .card.is-collapsed .widget-resize { display: none; }
+        .card.is-dragging { opacity: .45; outline: 2px dashed #e94560; }
+        .card.is-drop-target { outline: 2px solid #89b4fa; outline-offset: 2px; }
+        .card.is-resizing { outline: 2px dashed #89b4fa; outline-offset: 2px; }
+
+        /* Hamburger + layout drawer */
+        header { position: relative; width: 100%; max-width: 2400px; padding: 0 46px; }
+        .menu-toggle {
+            position: absolute;
+            left: 0;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 38px;
+            height: 34px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            gap: 5px;
+            padding: 0 9px;
+            border: 1px solid #0f3460;
+            border-radius: 6px;
+            background: #16213e;
+            cursor: pointer;
+        }
+        .menu-toggle span { display: block; height: 2px; background: #e0e0e0; border-radius: 1px; }
+        .menu-toggle:hover, .menu-toggle[aria-expanded="true"] { border-color: #e94560; }
+        .layout-menu {
+            position: fixed;
+            top: 0;
+            left: 0;
+            bottom: 0;
+            z-index: 900;
+            width: min(340px, 100vw);
+            overflow-y: auto;
+            padding: 16px;
+            background: #16213e;
+            border-right: 1px solid #0f3460;
+            box-shadow: 6px 0 24px rgba(0,0,0,.5);
+        }
+        .layout-menu[hidden], .layout-menu-backdrop[hidden] { display: none; }
+        .layout-menu-backdrop { position: fixed; inset: 0; z-index: 899; background: rgba(0,0,0,.45); }
+        .layout-menu-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+        .layout-menu-header h2 { font-size: 1rem; color: #e94560; }
+        .btn.layout-menu-close { width: auto; margin: 0; padding: 4px 10px; }
+        .layout-menu-subhead { font-size: .85rem; color: #89b4fa; margin: 14px 0 6px; }
+        .layout-widget-list { list-style: none; display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+        .layout-widget-list li {
+            display: grid;
+            grid-template-columns: auto 1fr auto;
+            align-items: center;
+            gap: 6px;
+            padding: 5px 6px;
+            background: #0d1730;
+            border: 1px solid #253d69;
+            border-radius: 5px;
+            font-size: .8rem;
+        }
+        .layout-widget-list li.is-hidden .layout-widget-name { color: #66738c; text-decoration: line-through; }
+        .layout-widget-list input[type="checkbox"] { accent-color: #e94560; }
+        .layout-widget-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .layout-widget-actions { display: flex; gap: 3px; }
+        .layout-widget-actions select {
+            background: #0a0a1a; color: #e0e0e0; border: 1px solid #0f3460; border-radius: 4px; font-size: .72rem;
         }
         .btn {
             display: inline-block;
@@ -324,7 +447,7 @@
 
         /* ── Game Library Section ────────────────────────────────── */
         .library-section {
-            max-width: 1100px;
+            max-width: 2400px;
             width: 100%;
             margin-top: 20px;
             margin-bottom: 30px;
@@ -910,9 +1033,42 @@
 </head>
 <body>
     <header>
+        <button type="button" class="menu-toggle" id="btn-layout-menu" aria-label="Layout menu"
+                aria-expanded="false" aria-controls="layout-menu" title="Layout menu">
+            <span></span><span></span><span></span>
+        </button>
         <h1>🎮 Azahar Web</h1>
         <p>Nintendo 3DS Emulator — WebAssembly Proof-of-Concept</p>
     </header>
+
+    <aside class="layout-menu" id="layout-menu" hidden aria-label="Layout menu">
+        <div class="layout-menu-header">
+            <h2>☰ Layout</h2>
+            <button type="button" class="btn btn-secondary layout-menu-close" id="btn-layout-menu-close" aria-label="Close layout menu">✕</button>
+        </div>
+        <div class="speed-control">
+            <label for="layout-widget-width">
+                <span>Widget width</span><output id="layout-widget-width-value">260px</output>
+            </label>
+            <input id="layout-widget-width" type="range" min="200" max="480" step="10" value="260"
+                   aria-label="Minimum widget width">
+        </div>
+        <div class="speed-control">
+            <label for="layout-gap">
+                <span>Spacing</span><output id="layout-gap-value">12px</output>
+            </label>
+            <input id="layout-gap" type="range" min="4" max="28" step="2" value="12" aria-label="Spacing between widgets">
+        </div>
+        <label class="mode-help audio-toggle">
+            <input type="checkbox" id="layout-beside-screen" checked>
+            Place widgets beside the screen when there is room
+        </label>
+        <h3 class="layout-menu-subhead">Widgets</h3>
+        <ul class="layout-widget-list" id="layout-widget-list"></ul>
+        <div class="mode-help">Drag a widget by its title to move it, drag its corner to resize it, or use the buttons here. Double-click a corner to reset that widget's size.</div>
+        <button type="button" class="btn btn-primary" id="btn-layout-reset" style="margin-top:10px;">↺ Reset to default layout</button>
+    </aside>
+    <div class="layout-menu-backdrop" id="layout-menu-backdrop" hidden></div>
 
     <div class="main-layout">
         <div class="canvas-panel">
@@ -940,8 +1096,8 @@
             </p>
         </div>
 
-        <div class="controls-panel">
-            <div class="card">
+        <div class="controls-panel" id="widget-grid">
+            <div class="card" data-widget="renderer">
                 <h2>Renderer</h2>
                 <select id="renderer-mode" class="renderer-select" aria-label="Renderer mode">
                     <option value="auto">Auto — best for this machine</option>
@@ -971,7 +1127,7 @@
                     <option value="3">Fast — 3x3 blocks (blurry)</option>
                 </select>
             </div>
-            <div class="card">
+            <div class="card" data-widget="rom">
                 <h2>📂 ROM File</h2>
                 <button type="button" class="btn btn-secondary" id="btn-browse-library" style="margin-bottom:8px;">
                     📚 Browse Shared Library (1,945 Games)
@@ -985,7 +1141,7 @@
                 <progress id="progress" max="100" value="0" hidden></progress>
             </div>
 
-            <div class="card">
+            <div class="card" data-widget="controls">
                 <h2>▶ Controls</h2>
                 <button class="btn btn-primary" id="btn-init" disabled>Initialize Emulator</button>
                 <button class="btn btn-success" id="btn-step" disabled>Step Frame</button>
@@ -1011,7 +1167,7 @@
                 </div>
             </div>
 
-            <div class="card" id="fullscreen-card">
+            <div class="card" id="fullscreen-card" data-widget="fullscreen">
                 <h2>⛶ Fullscreen</h2>
                 <button type="button" class="btn btn-secondary" id="btn-fullscreen">⛶ Fullscreen</button>
                 <div id="fullscreen-settings">
@@ -1042,7 +1198,7 @@
                 <div class="mode-help" style="margin-top:7px;">Alt+Enter toggles fullscreen.</div>
             </div>
 
-            <div class="card" id="audio-card">
+            <div class="card" id="audio-card" data-widget="audio">
                 <h2>🔊 Audio</h2>
                 <button type="button" class="btn btn-secondary" id="btn-sound" aria-pressed="false">🔊 Sound: On</button>
                 <div class="speed-control">
@@ -1068,7 +1224,7 @@
                 <div id="audio-status" class="mode-help" aria-live="polite">Audio starts when a game loads.</div>
             </div>
 
-            <div class="card" id="local-play-card">
+            <div class="card" id="local-play-card" data-widget="local-play" data-default-span="2">
                 <h2>📡 Local Play</h2>
                 <input type="text" id="local-play-name" class="renderer-select" maxlength="10"
                        placeholder="Your name" aria-label="Your name" autocomplete="nickname">
@@ -1118,7 +1274,7 @@
                 </div>
             </div>
 
-            <div class="card" id="save-state-card">
+            <div class="card" id="save-state-card" data-widget="save-states">
                 <h2>Save States</h2>
                 <div class="save-toolbar">
                     <select id="save-state-slot" class="renderer-select" aria-label="Save-state slot">
@@ -1143,7 +1299,7 @@
                 </div>
             </div>
 
-            <div class="card">
+            <div class="card" data-widget="log" data-default-span="2">
                 <h2>📋 Log</h2>
                 <div class="log-box" id="log"></div>
             </div>
@@ -1268,6 +1424,7 @@
     <script src="azahar_library.js"></script>
     <script src="azahar_netplay.js"></script>
     <script src="azahar_lobbies.js"></script>
+    <script src="azahar_layout.js"></script>
     <script>
         document.getElementById('btn-browse-library')?.addEventListener('click', () => {
             const lib = document.getElementById('library-section');
