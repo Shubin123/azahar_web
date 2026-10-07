@@ -8,7 +8,7 @@
 //
 // Default builds: web/ only (prints a table). With two or more builds, exits 1 when a
 // later build is slower than the first by more than --tolerance percentage points of
-// emulation speed in any scene.
+// emulation speed in any scene, or renders 7% fewer frames per emulated second.
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
@@ -58,16 +58,22 @@ for (const scene of scenes) {
         const mean = key => ok.length ? ok.reduce((sum, run) => sum + key(run), 0) / ok.length : NaN;
         return { build: path.relative(root, build) || '.', runs: ok.length, errors: runs.filter(run => run.error),
             speed: mean(run => run.speedPercent), fps: mean(run => run.gameFps),
+            // Frames per emulated second: the game's own frame rate, whatever the speed.
+            guestFps: mean(run => run.gameFps / Math.max(1, run.speedPercent) * 100),
             callbackMs: mean(run => run.callbackMs.mean), p95Ms: mean(run => run.callbackMs.p95),
             hitches: mean(run => run.hitches50ms) };
     });
     const reference = perBuild[0];
     for (const entry of perBuild) {
         const delta = entry.speed - reference.speed;
-        const slower = entry !== reference && (delta < -tolerance || !entry.runs);
+        // Slower emulation, or the game itself dropping frames (a lowered CPU clock can
+        // keep the speed while the game loses frames).
+        const fewerFrames = entry.guestFps < reference.guestFps * 0.93;
+        const slower = entry !== reference && (delta < -tolerance || fewerFrames || !entry.runs);
         if (slower) regressions++;
         console.log(`${scene.name.padEnd(24)} ${entry.build.padEnd(28)} speed ${entry.speed.toFixed(1).padStart(6)}%` +
-            ` fps ${entry.fps.toFixed(1).padStart(5)} cb ${entry.callbackMs.toFixed(1).padStart(5)}ms` +
+            ` fps ${entry.fps.toFixed(1).padStart(5)} game-time fps ${entry.guestFps.toFixed(1).padStart(5)}` +
+            ` cb ${entry.callbackMs.toFixed(1).padStart(5)}ms` +
             ` p95 ${entry.p95Ms.toFixed(1).padStart(5)}ms hitches ${entry.hitches.toFixed(0).padStart(3)}` +
             (entry === reference ? '' : ` (${delta >= 0 ? '+' : ''}${delta.toFixed(1)})`) +
             (slower ? '  REGRESSION' : '') + (entry.errors.length ? `  ${entry.errors.length} failed run(s)` : ''));

@@ -1,25 +1,65 @@
 {
   "_comment": "Gameplay scenes for tests/gameplay_perf.cjs. ROMs live in test_games/ and states in tmp_test/fixtures/ (both ignored; capture with tests/capture_fixture.cjs). Scenes whose files are missing are skipped.",
   "scenes": [
-    { "name": "mk7-race", "rom": "test_games/Mario_Kart_7_USA_Rev1_Decrypted.3ds",
-      "state": "tmp_test/fixtures/Mario_Kart_7_USA_Rev1_Decrypted/race/0004000000030800.01.cst" },
-    { "name": "mk7-lobby", "rom": "test_games/Mario_Kart_7_USA_Rev1_Decrypted.3ds",
-      "state": "tmp_test/fixtures/Mario_Kart_7_USA_Rev1_Decrypted/lobby-host/0004000000030800.01.cst" },
-    { "name": "smash-battle", "rom": "test_games/Smash_Bros_USA_Rev7_Decrypted.3ds",
-      "state": "tmp_test/fixtures/Smash_Bros_USA_Rev7_Decrypted/battle/00040000000EDF00.01.cst" },
-    { "name": "smash-char-select", "rom": "test_games/Smash_Bros_USA_Rev7_Decrypted.3ds",
-      "state": "tmp_test/fixtures/Smash_Bros_USA_Rev7_Decrypted/char-select/00040000000EDF00.01.cst" },
-    { "name": "smash-demo-battlefield", "rom": "test_games/Smash_Bros_Kiosk_Decrypted.3ds",
-      "state": "tmp_test/fixtures/Smash_Bros_Kiosk_Decrypted/battlefield-playable/000400000014E600.01.cst" },
-    { "name": "pokemon-x-sycamore", "rom": "test_games/Pokemon_X_Decrypted.3ds",
-      "state": "tmp_test/fixtures/pokemon-x/sycamore/0004000000055D00.01.cst" },
-    { "name": "cubic-ninja-level", "rom": "test_games/Cubic_Ninja_(USA)_(En,Fr,Es)_Decrypted.3ds",
-      "state": "tmp_test/fixtures/Cubic_Ninja__USA___En_Fr_Es__Decrypted/level/0004000000046500.01.cst" },
-    { "name": "animal-crossing-town", "rom": "test_games/Animal_Crossing_-_New_Leaf_(USA)_(En,Fr,Es)_Decrypted.3ds",
-      "state": "tmp_test/fixtures/Animal_Crossing_-_New_Leaf__USA___En_Fr_Es__Decrypted/title-town/0004000000086300.01.cst" },
-    { "name": "fire-emblem-avatar", "rom": "test_games/Fire_Emblem_-_Awakening_(USA)_Decrypted.3ds",
-      "state": "tmp_test/fixtures/Fire_Emblem_-_Awakening__USA__Decrypted/avatar-3d/00040000000A0500.01.cst" },
-    { "name": "fire-emblem-movie", "rom": "test_games/Fire_Emblem_-_Awakening_(USA)_Decrypted.3ds",
-      "state": "tmp_test/fixtures/Fire_Emblem_-_Awakening__USA__Decrypted/intro-movie/00040000000A0500.01.cst" }
+    {
+      "name": "mk7-race",
+      "rom": "test_games/Mario_Kart_7_USA_Rev1_Decrypted.3ds",
+      "state": "tmp_test/fixtures/Mario_Kart_7_USA_Rev1_Decrypted/race/0004000000030800.01.cst"
+    },
+    {
+      "name": "mk7-lobby",
+      "rom": "test_games/Mario_Kart_7_USA_Rev1_Decrypted.3ds",
+      "state": "tmp_test/fixtures/Mario_Kart_7_USA_Rev1_Decrypted/lobby-host/0004000000030800.01.cst"
+    },
+    {
+      "name": "smash-battle",
+      "rom": "test_games/Smash_Bros_USA_Rev7_Decrypted.3ds",
+      "state": "tmp_test/fixtures/Smash_Bros_USA_Rev7_Decrypted/battle/00040000000EDF00.01.cst"
+    },
+    {
+      "name": "smash-char-select",
+      "rom": "test_games/Smash_Bros_USA_Rev7_Decrypted.3ds",
+      "state": "tmp_test/fixtures/Smash_Bros_USA_Rev7_Decrypted/char-select/00040000000EDF00.01.cst"
+    },
+    {
+      "name": "smash-demo-battlefield",
+      "rom": "test_games/Smash_Bros_Kiosk_Decrypted.3ds",
+      "state": "tmp_test/fixtures/Smash_Bros_Kiosk_Decrypted/battlefield-playable/000400000014E600.01.cst"
+    },
+    {
+      "name": "pokemon-x-sycamore",
+      "rom": "test_games/Pokemon_X_Decrypted.3ds",
+      "state": "tmp_test/fixtures/pokemon-x/sycamore/0004000000055D00.01.cst"
+    },
+    {
+      "name": "cubic-ninja-level",
+      "rom": "test_games/Cubic_Ninja_(USA)_(En,Fr,Es)_Decrypted.3ds",
+      "state": "tmp_test/fixtures/Cubic_Ninja__USA___En_Fr_Es__Decrypted/level/0004000000046500.01.cst"
+    },
+    {
+      "name": "animal-crossing-town",
+      "rom": "test_games/Animal_Crossing_-_New_Leaf_(USA)_(En,Fr,Es)_Decrypted.3ds",
+      "state": "tmp_test/fixtures/Animal_Crossing_-_New_Leaf__USA___En_Fr_Es__Decrypted/title-town/0004000000086300.01.cst"
+    },
+    {
+      "name": "fire-emblem-avatar",
+      "rom": "test_games/Fire_Emblem_-_Awakening_(USA)_Decrypted.3ds",
+      "state": "tmp_test/fixtures/Fire_Emblem_-_Awakening__USA__Decrypted/avatar-3d/00040000000A0500.01.cst"
+    },
+    {
+      "name": "fire-emblem-movie",
+      "rom": "test_games/Fire_Emblem_-_Awakening_(USA)_Decrypted.3ds",
+      "state": "tmp_test/fixtures/Fire_Emblem_-_Awakening__USA__Decrypted/intro-movie/00040000000A0500.01.cst"
+    },
+    {
+      "name": "fire-emblem-prologue-movie",
+      "rom": "test_games/Fire_Emblem_-_Awakening_(USA)_Decrypted.3ds",
+      "state": "tmp_test/fixtures/Fire_Emblem_-_Awakening__USA__Decrypted/prologue-movie/00040000000A0500.01.cst"
+    },
+    {
+      "name": "fire-emblem-map",
+      "rom": "test_games/Fire_Emblem_-_Awakening_(USA)_Decrypted.3ds",
+      "state": "tmp_test/fixtures/Fire_Emblem_-_Awakening__USA__Decrypted/map/00040000000A0500.01.cst"
+    }
   ]
 }

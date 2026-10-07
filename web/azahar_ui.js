@@ -1376,6 +1376,110 @@ void main() { frag_color = vec4(1.0); }`);
         }
     }
 
+    // ── Adaptive CPU clock ───────────────────────────────────────
+    // Emulated time only advances by executing instructions, so a game thread that
+    // spins while it waits costs as much as real work: Fire Emblem: Awakening's movies
+    // gave 97% of the emulated CPU to such a thread and ran at 33% speed. While the
+    // browser cannot keep up, the emulated clock is lowered as long as the game keeps
+    // its frame rate in emulated time (the movies then run at full speed and 30 FPS),
+    // and restored as soon as the game drops frames, the scene changes, or the browser
+    // keeps up again. `?cpuClock=N` pins the clock; `?adaptiveClock=0` disables this.
+    const CPU_CLOCK_MIN = 25;
+    const cpuClockQuery = new URLSearchParams(location.search);
+    const cpuClock = {
+        enabled: !cpuClockQuery.has('cpuClock') && cpuClockQuery.get('adaptiveClock') !== '0',
+        percent: 100, slowSamples: 0, fastSamples: 0, pending: null, refFps: 0,
+        ceiling: 100, ceilingUntil: 0, changes: 0,
+    };
+
+    function setCpuClock(percent) {
+        if (percent === cpuClock.percent) return;
+        cpuClock.percent = wasmModule._azahar_set_cpu_clock(percent);
+        cpuClock.changes++;
+        if (cpuClock.percent === 100) cpuClock.refFps = 0;
+    }
+
+    // Called with each FPS sample (every ~500 ms) at 1x speed.
+    function tuneCpuClock(now, gameFps, speed) {
+        if (!cpuClock.enabled || !wasmModule._azahar_set_cpu_clock) return;
+        // Speed deficits are intended while fast-forwarding or while Local Play paces
+        // this console; leave the clock alone then.
+        if (selectedFastForward !== 1 || (window.AzaharNetplay?.speedPermille ?? 1000) < 1000) {
+            setCpuClock(100);
+            return;
+        }
+        if (!(speed > 0) || !(gameFps > 0)) return;
+        const guestFps = gameFps / (speed / 100);
+        // Judge a lowered clock once it has settled: the game must keep its frame rate.
+        if (cpuClock.pending) {
+            if (now < cpuClock.pending.judgeAt) return;
+            const {from, refFps} = cpuClock.pending;
+            // One low sample can be the switch itself; judge on two in a row.
+            if (guestFps < refFps * 0.93 && !cpuClock.pending.lowOnce) {
+                cpuClock.pending.lowOnce = true;
+                return;
+            }
+            cpuClock.pending = null;
+            if (guestFps < refFps * 0.93) {
+                // The game needed those cycles: go back, and remember that this clock is too
+                // low for a while (longer each time no clock in between is left to try).
+                const tried = cpuClock.percent;
+                setCpuClock(from);
+                cpuClock.failed = Math.max(now < (cpuClock.failedUntil || 0) ? cpuClock.failed : 0, tried);
+                if (from - cpuClock.failed <= 5) cpuClock.failures = (cpuClock.failures || 0) + 1;
+                cpuClock.failedUntil = now + 30000 * 2 ** Math.min(4, cpuClock.failures || 0);
+                return;
+            }
+            cpuClock.refFps = refFps;
+        }
+        if (cpuClock.percent < 100 && cpuClock.refFps &&
+            Math.abs(guestFps - cpuClock.refFps) > cpuClock.refFps * 0.15) {
+            // A different frame rate means a different scene (a movie ended): start over.
+            setCpuClock(100);
+            cpuClock.ceilingUntil = 0;
+            cpuClock.failedUntil = 0;
+            cpuClock.failures = 0;
+            return;
+        }
+        // A raise that cost speed is undone, and not retried above it for a while.
+        if (cpuClock.lastRaiseAt && now - cpuClock.lastRaiseAt < 3000 && speed < 97) {
+            cpuClock.ceiling = cpuClock.lastRaiseFrom;
+            cpuClock.ceilingUntil = now + 20000;
+            cpuClock.lastRaiseAt = 0;
+            setCpuClock(cpuClock.lastRaiseFrom);
+            return;
+        }
+        if (speed < 92) {
+            cpuClock.fastSamples = 0;
+            if (++cpuClock.slowSamples < 2) return;
+            cpuClock.slowSamples = 0;
+            // When the interpreter is the limit, speed scales with 1/clock: aim straight
+            // for the clock that would reach full speed, but stay above the highest clock
+            // at which the game lost frames (a binary search between it and the current).
+            const failed = now < (cpuClock.failedUntil || 0) ? cpuClock.failed : CPU_CLOCK_MIN - 5;
+            const estimate = Math.round(cpuClock.percent * Math.min(0.8, speed / 100 * 1.05) / 5) * 5;
+            const midpoint = Math.round((failed + cpuClock.percent) / 10) * 5;
+            const next = Math.min(cpuClock.percent - 5, Math.max(failed + 5, estimate,
+                failed >= CPU_CLOCK_MIN ? midpoint : 0));
+            if (next >= cpuClock.percent || next < CPU_CLOCK_MIN) return;
+            cpuClock.pending = {from: cpuClock.percent, refFps: cpuClock.refFps || guestFps,
+                judgeAt: now + 1500};
+            setCpuClock(next);
+            return;
+        }
+        cpuClock.slowSamples = 0;
+        if (speed >= 99 && cpuClock.percent < 100) {
+            if (++cpuClock.fastSamples < 4) return;
+            cpuClock.fastSamples = 0;
+            const ceiling = now < cpuClock.ceilingUntil ? cpuClock.ceiling : 100;
+            const next = Math.min(ceiling, cpuClock.percent + 5);
+            if (next <= cpuClock.percent) return;
+            cpuClock.lastRaiseAt = now;
+            cpuClock.lastRaiseFrom = cpuClock.percent;
+            setCpuClock(next);
+        }
+    }
+
     // Called after every emulated callback. `stepMs` is the core's share and
     // `totalMs` the whole callback, including presentation and page work.
     function tuneFrameBudget(now, stepMs, totalMs) {
@@ -1479,6 +1583,7 @@ void main() { frag_color = vec4(1.0); }`);
                             if (fpsEl.textContent !== fpsText) fpsEl.textContent = fpsText;
                         }
                         checkDisplayThroughput(now);
+                        tuneCpuClock(now, gameFps, emulationSpeed);
                         stepWorkMs = 0;
                         stepWorkFrames = 0;
                     }
@@ -1665,6 +1770,8 @@ void main() { frag_color = vec4(1.0); }`);
         },
         getCanvas: () => canvas,
         getModule: () => (initialized ? wasmModule : null),
+        getCpuClock: () => ({ enabled: cpuClock.enabled, percent: cpuClock.percent,
+            changes: cpuClock.changes, refFps: cpuClock.refFps }),
         getFrameBudget: () => ({ enabled: frameBudget.enabled, periodMs: frameBudget.periodMs,
             budgetMs: frameBudget.appliedMs, refreshes: frameBudget.refreshes }),
     };

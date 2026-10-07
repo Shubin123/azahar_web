@@ -765,3 +765,30 @@ Findings:
 - At 60 Hz a CPU-bound scene may use more than 14 ms per frame when the frame still
   ends before the next refresh (Fire Emblem's intro movie: 31.5% to 33.4%); it never
   goes below 14 ms, which made the software renderer slower.
+
+## Fire Emblem: Awakening and the adaptive CPU clock (2026-10-07)
+
+Scenes: avatar creation and the prologue map ran at 100% (60 FPS on the map). The
+pre-rendered movies (intro and prologue) ran at 31-33% speed, about 10 FPS.
+
+The movies are not limited by decoding. Counting interpreted instructions per guest
+thread (by TLS address) showed 97% of the emulated CPU in one low-priority thread that
+polls a `std::map` under a lock while the main thread waits for its next frame; the
+main thread, which decodes (ARMv6 SIMD: `uadd8`/`usub8`/`sel`), used 2.6%. Emulated
+time only advances by executing instructions, so the spin cost as much as real work.
+
+| `?cpuClock=` | speed | game FPS | FPS in emulated time |
+|---:|---:|---:|---:|
+| 100 | 32.8% | 9.8 | 30 |
+| 50 | 72.6% | 21.7 | 30 |
+| 35 | 100.4% | 29.6 | 29.5 |
+| 25 | 100% | 20.3 | 20 (frames lost) |
+
+The page now adapts the clock (`azahar_set_cpu_clock`): only while speed is under 92%,
+it lowers the clock (first straight to clock x speed, then bisecting) and keeps a step
+only if the game's frame rate in emulated time stays within 7% (two samples in a row).
+A raise that costs speed is undone; a changed frame rate (a movie ending) restores 100%
+at once; fast-forward and Local Play pacing disable it. Movies: 97-98% speed at 29-30
+FPS within the suite's warmup; after a movie the clock returns to 100% within ~4 s.
+`?cpuClock=N` pins the clock, `?adaptiveClock=0` disables adapting.
+`tests/gameplay_perf.cjs` also flags a 7% drop in frames per emulated second.

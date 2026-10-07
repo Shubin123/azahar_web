@@ -142,6 +142,7 @@ async function main() {
                 speedPercent: mean(probe.speeds),
                 gameFps: mean(probe.fps),
                 frameBudget: window.AzaharUI.getFrameBudget?.(),
+                cpuClock: window.AzaharUI.getCpuClock?.(),
                 adapter: (() => {
                     const gl = document.querySelector('#canvas').getContext('webgl2');
                     const info = gl && gl.getExtension('WEBGL_debug_renderer_info');
