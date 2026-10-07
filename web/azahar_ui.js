@@ -42,7 +42,10 @@
     const RENDERER_VERDICT_KEY = 'azahar-renderer-verdict';
     // Version 2: the engine stopped stalling ANGLE Metal (streamed uploads now
     // orphan their buffers), so software verdicts measured before are stale.
-    const RENDERER_VERDICT_VERSION = 2;
+    // Version 3: the measurement mistook shader-compilation stalls on loading
+    // screens (Smash Bros. starting a battle) for a slow GPU, pinning capable
+    // machines to the much slower software renderer; earlier verdicts are void.
+    const RENDERER_VERDICT_VERSION = 3;
 
     function readRendererVerdict() {
         try {
@@ -86,9 +89,15 @@
     // Scene loads and the first frames after a title screen briefly starve the
     // callback rate on a backend that is otherwise keeping up. Only a run of
     // consecutive bad samples is evidence of a sustained limit, so the switch
-    // needs ~6 s of them rather than one unlucky half-second.
-    const throughputBadSamplesRequired = 12;
+    // needs ~15 s of them rather than one unlucky half-second. Samples taken
+    // while the GPU builds new shaders (and for a few seconds after) say nothing
+    // about steady speed and do not count: the browser compiles them in the GPU
+    // process, which delays frames without loading the page.
+    const throughputBadSamplesRequired = 30;
+    const shaderQuietMs = 3000;
     let throughputBadSamples = 0;
+    let shaderBuildCount = -1;
+    let shaderBuildAt = 0;
 
     const rendererMode = document.getElementById('renderer-mode');
     const rendererModeHelp = document.getElementById('renderer-mode-help');
@@ -134,13 +143,18 @@
     // "each frame is expensive", which need opposite remedies.
     let stepWorkMs = 0;
     let stepWorkFrames = 0;
-    // Optionally fits each callback's emulation to the display's refresh period. A
-    // callback that runs just past a refresh waits idle for the next one, which on a
-    // high-refresh display can leave the main thread unused. It is opt-in
-    // (`?frameBudget=adaptive`) until measured on real high-refresh hardware; the
-    // fixed 14 ms budget remains the default.
+    // Fits each callback's emulation to the display's refresh period. When the core
+    // uses its whole budget (the scene is CPU-bound), the budget grows until the
+    // callback nearly fills one refresh: a fixed 14 ms left ~15% of a 60 Hz frame
+    // idle. It shrinks again (to no less than 14 ms) when a callback would run into
+    // the next refresh.
+    // High-refresh displays keep the fixed budget unless `?frameBudget=adaptive`;
+    // `?frameBudget=fixed` keeps 14 ms everywhere.
+    const FRAME_BUDGET_MARGIN_MS = 1.5;
+    const frameBudgetMode = new URLSearchParams(location.search).get('frameBudget');
     const frameBudget = {
-        enabled: new URLSearchParams(location.search).get('frameBudget') === 'adaptive',
+        enabled: frameBudgetMode !== 'fixed',
+        highRefresh: frameBudgetMode === 'adaptive',
         budgetMs: 14, appliedMs: 14, lastAt: 0, intervals: [], periodMs: 1000 / 60, refreshes: 0,
     };
     let gameGraphicsAt = 0;
@@ -339,31 +353,88 @@
     // ── Logging ───────────────────────────────────────────────────
     // Appending to textContent copied the whole log and forced a layout per line, so a
     // chatty session slowed down as its log grew (one Local Play host fell from 100% to
-    // 6% speed). Lines are separate text nodes, the view keeps the newest LOG_VIEW_LINES,
-    // and scrolling is batched. The full history is AzaharUI.getLog().
+    // 6% speed). Even a text node per line laid the page out on every frame while a game
+    // repeated a warning thousands of times a second (Smash Bros. character select ran
+    // at 64% speed, half of it in layout). Lines are therefore queued and written at
+    // most every LOG_FLUSH_MS, and a message repeated back to back (ignoring the core's
+    // timestamp) is counted instead of printed again. The view keeps about the newest
+    // LOG_VIEW_LINES; the full history is AzaharUI.getLog().
     const LOG_VIEW_LINES = 5000;
     const LOG_HISTORY_LINES = 50000;
+    const LOG_FLUSH_MS = 250;
     const logHistory = [];
-    let logScrollPending = false;
-    function log(msg) {
-        const time = new Date().toLocaleTimeString();
-        const line = `[${time}] ${msg}\n`;
+    const logPending = [];
+    const logViewChunks = []; // line counts of the text nodes in the view, oldest first
+    let logViewLines = 0;
+    let logFlushPending = false;
+    let logRepeatKey = null;
+    let logRepeats = 0;
+    let logClockSecond = -1;
+    let logClockText = '';
+
+    function logTime() {
+        const now = Date.now();
+        const second = Math.floor(now / 1000);
+        if (second !== logClockSecond) {
+            logClockSecond = second;
+            logClockText = new Date(now).toLocaleTimeString();
+        }
+        return logClockText;
+    }
+
+    function pushLogLine(line) {
         logHistory.push(line);
         if (logHistory.length > LOG_HISTORY_LINES + 5000) logHistory.splice(0, 5000);
-        logEl.appendChild(document.createTextNode(line));
-        if (logEl.childNodes.length > LOG_VIEW_LINES) logEl.removeChild(logEl.firstChild);
-        if (!logScrollPending) {
-            logScrollPending = true;
-            setTimeout(() => {
-                logScrollPending = false;
-                logEl.scrollTop = logEl.scrollHeight;
-            }, 100);
+        logPending.push(line);
+        if (logPending.length > LOG_VIEW_LINES) logPending.splice(0, logPending.length - LOG_VIEW_LINES);
+        if (!logFlushPending) {
+            logFlushPending = true;
+            setTimeout(flushLog, LOG_FLUSH_MS);
         }
     }
 
+    function flushLogRepeats() {
+        if (!logRepeats) return;
+        const count = logRepeats;
+        logRepeats = 0;
+        pushLogLine(`[${logTime()}] (the previous message repeated ${count} more time${count === 1 ? '' : 's'})\n`);
+    }
+
+    function flushLog() {
+        logFlushPending = false;
+        flushLogRepeats();
+        if (!logPending.length) return;
+        logEl.appendChild(document.createTextNode(logPending.join('')));
+        logViewChunks.push(logPending.length);
+        logViewLines += logPending.length;
+        logPending.length = 0;
+        while (logViewLines > LOG_VIEW_LINES && logViewChunks.length > 1) {
+            logViewLines -= logViewChunks.shift();
+            logEl.removeChild(logEl.firstChild);
+        }
+        logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function log(msg) {
+        // The core prefixes "[ 368.613250]"; repeats differ only there.
+        const key = String(msg).replace(/\[\s*\d+\.\d+\]/, '');
+        if (key === logRepeatKey) {
+            logRepeats++;
+            if (!logFlushPending) {
+                logFlushPending = true;
+                setTimeout(flushLog, LOG_FLUSH_MS);
+            }
+            return;
+        }
+        flushLogRepeats();
+        logRepeatKey = key;
+        pushLogLine(`[${logTime()}] ${msg}\n`);
+    }
+
+    // Writing even identical text replaces the node and lays the page out again.
     function setStatus(msg, cls) {
-        statusEl.textContent = msg;
-        statusEl.className = cls || '';
+        if (statusEl.textContent !== msg) statusEl.textContent = msg;
+        if (statusEl.className !== (cls || '')) statusEl.className = cls || '';
     }
 
     function showProgress(value) {
@@ -708,11 +779,31 @@
      * which needs no GPU-process work at all, runs faster. A busy callback
      * means the opposite, and switching would make things worse.
      */
+    // Shaders and programs the accelerated renderer has built so far (0 if unknown).
+    function rendererShaderBuilds() {
+        if (!wasmModule?._azahar_get_renderer_stats) return 0;
+        const pointer = wasmModule._malloc(10 * 8);
+        try {
+            if (wasmModule._azahar_get_renderer_stats(pointer, 10) !== 0) return 0;
+            const stats = new Float64Array(wasmModule.HEAPU8.buffer, pointer, 10);
+            return stats[0] === 2 ? stats[1] : 0;
+        } finally {
+            wasmModule._free(pointer);
+        }
+    }
+
     function checkDisplayThroughput(now) {
         if (!isWebGL2Artifact || softwareFallbackStarted || !throughputFallbackAllowed) return;
         if (!gameGraphicsDetected || !gameGraphicsAt) return;
         if (now - gameGraphicsAt < throughputWindowMs) return;
         if (!stepWorkFrames || displayFps <= 0) return;
+        const builds = rendererShaderBuilds();
+        if (builds !== shaderBuildCount) {
+            shaderBuildCount = builds;
+            shaderBuildAt = now;
+            throughputBadSamples = 0;
+        }
+        if (now - shaderBuildAt < shaderQuietMs) return;
         const dutyCycle = (stepWorkMs / stepWorkFrames) * displayFps / 1000;
         if (displayFps >= 20 || dutyCycle >= 0.35 || emulationSpeed >= 60) {
             throughputBadSamples = 0;
@@ -1296,24 +1387,27 @@ void main() { frag_color = vec4(1.0); }`);
             frameBudget.periodMs = Math.max(2, Math.min(...frameBudget.intervals));
         }
         frameBudget.lastAt = now;
-        if (frameBudget.intervals.length < 30 || window.AzaharNetplay?.shouldHold?.()) return;
+        if (frameBudget.intervals.length < 30) return;
         const period = frameBudget.periodMs;
-        // A 60 Hz-class display keeps the measured fixed budget.
         let budget = 14;
-        if (period < 12) {
+        if (period >= 12 || frameBudget.highRefresh) {
             // Span about 1/60 s of refreshes and finish a little before the last one,
             // never giving the core less than half of that span.
             const refreshes = frameBudget.refreshes = Math.max(1, Math.round((1000 / 60) / period));
-            const targetMs = refreshes * period - Math.max(1.5, period * 0.1);
+            const targetMs = refreshes * period - FRAME_BUDGET_MARGIN_MS;
             budget = frameBudget.budgetMs;
             if (totalMs > targetMs) {
                 budget -= Math.min(4, (totalMs - targetMs) * 0.5);
             } else if (stepMs >= budget - 0.5) {
                 // Grow only while the core used its whole budget; finishing early means
                 // game speed, not the budget, limited it.
-                budget += Math.min(1, (targetMs - totalMs) * 0.25);
+                budget += Math.min(0.5, (targetMs - totalMs) * 0.25);
             }
-            budget = Math.min(30, Math.max(refreshes * period * 0.5, budget));
+            // At 60 Hz never go below the fixed budget: where presenting is expensive
+            // (the software renderer) callbacks overrun a refresh anyway, and a smaller
+            // budget only did less work per frame (Mario Kart 7 fell from 51% to 44%).
+            const floor = period >= 12 ? 14 : refreshes * period * 0.5;
+            budget = Math.min(30, Math.max(floor, budget));
         }
         frameBudget.budgetMs = budget;
         if (Math.abs(budget - frameBudget.appliedMs) >= 0.25) {
@@ -1380,8 +1474,9 @@ void main() { frag_color = vec4(1.0); }`);
                             wasmModule._free(buf);
                         }
                         if (displayFps > 0) {
-                            fpsEl.textContent = gameFps.toFixed(0) + ' game FPS' +
+                            const fpsText = gameFps.toFixed(0) + ' game FPS' +
                                 (emulationSpeed > 0 ? ' | ' + emulationSpeed.toFixed(0) + '% speed' : '');
+                            if (fpsEl.textContent !== fpsText) fpsEl.textContent = fpsText;
                         }
                         checkDisplayThroughput(now);
                         stepWorkMs = 0;
@@ -1458,7 +1553,8 @@ void main() { frag_color = vec4(1.0); }`);
         stretchingInput?.addEventListener('change', () => audio.setStretching(stretchingInput.checked));
         // Buffer level and dropouts change continuously while playing.
         window.setInterval(() => {
-            if (statusText) statusText.textContent = describe(audio.getState());
+            const text = describe(audio.getState());
+            if (statusText && statusText.textContent !== text) statusText.textContent = text;
         }, 500);
     }
 
@@ -1563,7 +1659,10 @@ void main() { frag_color = vec4(1.0); }`);
         showProgress,
         hideProgress,
         log,
-        getLog: () => logHistory.join(''),
+        getLog: () => {
+            flushLogRepeats();
+            return logHistory.join('');
+        },
         getCanvas: () => canvas,
         getModule: () => (initialized ? wasmModule : null),
         getFrameBudget: () => ({ enabled: frameBudget.enabled, periodMs: frameBudget.periodMs,

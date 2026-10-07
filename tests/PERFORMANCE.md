@@ -726,3 +726,42 @@ Not covered without a device: real iOS memory limits and thermal throttling,
 Safari's OPFS quota on a full device, and audio start-up on iOS. Library
 titles already stored in OPFS are copied a second time on WebKit; reading
 the stored file directly would avoid that.
+
+## Gameplay regression suite (2026-10-07)
+
+`tests/perf_scenes.json` lists saved states taken in actual play (Mario Kart 7 race,
+Smash Bros. battle and character select, Pokémon X, Cubic Ninja, Animal Crossing,
+Fire Emblem). Capture more with `tests/capture_fixture.cjs` (`save SCENE`).
+
+```sh
+# Compare a reference build directory with the current one; exits 1 on a regression.
+node tests/gameplay_perf.cjs --builds ../azahar_web_main/web,web --gpu --query autoFallback=0
+# One scene with a CPU profile, or a trace of the page and GPU process:
+node tests/perf_probe.cjs --rom ROM --state STATE --gpu --profile out.cpuprofile
+node tests/perf_probe.cjs --rom ROM --state STATE --gpu --trace out.trace.json
+# Two linked consoles: what Local Play pacing costs, with a simulated network,
+# a stalled peer (--stall-b) or a slower one (--slow-b 0.8).
+node tests/netplay_perf.cjs --rom ROM --state STATE --gpu --netsim "delay=40,jitter=30"
+```
+
+Findings:
+
+- **Log spam laid the page out every frame.** Smash Bros. menus write an out-of-range
+  shader uniform every frame and the core logged each one; each line was a DOM update
+  and a full layout of the widget grid. Character select ran at 63% speed, half of the
+  main thread in layout. The log now flushes every 250 ms, collapses repeats, and the
+  core throttles that message: 100%.
+- **The renderer fallback mistook GPU stalls for a slow GPU** and remembered it, pinning
+  machines to the software renderer, which was slower in the same scene (33% vs 64%).
+  Samples within 3 s of a shader build no longer count, the switch needs ~15 s of bad
+  samples, and earlier verdicts are discarded.
+- **Local Play pacing slowed healthy consoles** to 87-93% on a realistic network: it
+  ignored travel time and treated jitter as drift. Pacing now measures round trips and
+  late reports, smooths the lead, ignores leads under 150 ms, and only the console ahead
+  follows its peer. Two healthy consoles: 99.6-99.9% with any simulated network; a
+  peer at 80%: the other follows at 81% within ~200 ms, with no resyncs.
+- **Idle netplay costs nothing.** With no link, `main` matched the pre-netplay build
+  (`28860f8`) in every scene, including cold boots.
+- At 60 Hz a CPU-bound scene may use more than 14 ms per frame when the frame still
+  ends before the next refresh (Fire Emblem's intro movie: 31.5% to 33.4%); it never
+  goes below 14 ms, which made the software renderer slower.

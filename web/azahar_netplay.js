@@ -22,20 +22,32 @@
     // clocks and one that gets ahead of a peer by more than the tolerance waits for it.
     // A peer that stops reporting (hidden tab, lost link) is not waited for; pacing
     // resumes when its reports return.
-    // A console ahead by more than PACE_START_US runs slower, down to PACE_MIN_SCALE of real
-    // time at PACE_FULL_US, so it keeps talking to its peers while they catch up; games treat a
-    // silent peer as disconnected. Only a lead past PACE_HOLD_US pauses it, for at most
-    // MAX_HOLD_MS at a time with at least HOLD_COOLDOWN_MS of running in between. A lead that
-    // will not close for PACE_REBASE_MS is accepted as the new baseline (a resync).
+    // Clock reports cross the network, so a peer's clock is estimated from its last report,
+    // the travel time (half the measured round trip) and its measured rate. Measured leads
+    // are smoothed and only a lead past PACE_DEADZONE_US, or past three times the measured
+    // jitter, slows this console: network noise must not throttle consoles that both run at
+    // full speed. The console that is ahead then runs at its peer's measured speed, slower
+    // still in proportion to the excess lead (never under PACE_MIN_SCALE); with the dead
+    // zone only one console of a pair is ever ahead, so they cannot drag each other down.
+    // Only a lead
+    // past PACE_HOLD_US pauses it, for at most MAX_HOLD_MS at a time with HOLD_COOLDOWN_MS of
+    // running in between. A peer that is loading or stalled (running under
+    // PEER_STALLED_RATE) is not followed; its clock is resynced when it runs again, as is a
+    // lead held past PACE_HOLD_US for PACE_REBASE_MS.
     const CLOCK_REPORT_MS = 100;
     const CLOCK_STALE_MS = 1500;
-    const PACE_START_US = 20000;
-    const PACE_FULL_US = 250000;
+    // Two consoles that both run at full speed still drift apart by up to ~150 ms as each
+    // dips for a moment (measured on Smash Bros. battles); pacing waits beyond that.
+    const PACE_DEADZONE_US = 150000;
+    const PACE_SMOOTHING_MS = 800;
+    const PACE_CORRECTION_PER_US = 0.25 / 250000;
     const PACE_MIN_SCALE = 0.5;
-    const PACE_HOLD_US = 600000;
+    const PACE_HOLD_US = 1000000;
     const MAX_HOLD_MS = 250;
     const HOLD_COOLDOWN_MS = 100;
     const PACE_REBASE_MS = 8000;
+    const PEER_STALLED_RATE = 300;
+    const OFFSET_SAMPLES = 9;
 
     // "drop=0.05,delay=60,jitter=40,burst=800/15000" -> {drop, delay, jitter, burst}
     function parseNetsim(text) {
@@ -143,12 +155,15 @@
 
         sendControl(message) {
             const text = JSON.stringify({...message, from: this.id});
+            // Control messages share the link with frames, so simulated delays apply to both.
             if (this.mode === 'tabs') {
-                this.channel?.postMessage({...message, from: this.id});
+                this.transmit(() => this.channel?.postMessage({...message, from: this.id}));
                 return;
             }
             for (const peer of this.peers.values()) {
-                if (peer.channel?.readyState === 'open') peer.channel.send(text);
+                this.transmit(() => {
+                    if (peer.channel?.readyState === 'open') peer.channel.send(text);
+                });
             }
         }
 
@@ -157,65 +172,146 @@
             const peer = this.peers.get(peerKey);
             if (!peer) return;
             if (this.mode === 'tabs') {
-                this.channel?.postMessage({...message, from: this.id, to: peerKey});
-            } else if (peer.channel?.readyState === 'open') {
-                peer.channel.send(JSON.stringify({...message, from: this.id}));
+                this.transmit(() => this.channel?.postMessage({...message, from: this.id, to: peerKey}));
+            } else {
+                const text = JSON.stringify({...message, from: this.id});
+                this.transmit(() => {
+                    if (peer.channel?.readyState === 'open') peer.channel.send(text);
+                });
             }
         }
 
         reportClock() {
             if (!this.joined) return;
             const t = this.guestTimeUs();
-            if (t) this.sendControl({kind: 'clock', t});
+            if (!t) return;
+            // Echo each peer's last report so it can measure the round trip.
+            const now = performance.now();
+            const echoes = {};
+            for (const peer of this.peers.values()) {
+                if (peer.ping && peer.netId != null) {
+                    echoes[peer.netId] = {sentAt: peer.ping.sentAt, hold: now - peer.ping.receivedAt};
+                }
+            }
+            this.sendControl({kind: 'clock', t, sentAt: now, echoes});
         }
 
-        receiveClock(peer, t) {
+        receiveClock(peer, message) {
             const now = performance.now();
+            const t = message.t;
+            if (typeof message.sentAt === 'number') peer.ping = {sentAt: message.sentAt, receivedAt: now};
+            const echo = message.echoes?.[this.id];
+            if (echo) {
+                const rtt = now - echo.sentAt - echo.hold;
+                if (rtt >= 0 && rtt < 5000) {
+                    peer.rtts = [...(peer.rtts || []).slice(-49), rtt];
+                    peer.minRttMs = Math.min(...peer.rtts);
+                    const previousRtt = peer.rttMs ?? rtt;
+                    peer.rttMs = previousRtt + (rtt - previousRtt) * 0.2;
+                    peer.jitterMs = (peer.jitterMs ?? 0) + (Math.abs(rtt - previousRtt) - (peer.jitterMs ?? 0)) * 0.2;
+                }
+            }
             const previous = peer.clock;
-            // Measured game-clock rate of the peer, in game µs per wall ms.
-            const rate = previous && now > previous.at ? (t - previous.t) / (now - previous.at) : 1000;
-            peer.clock = {t, at: now, rate: Math.max(0, Math.min(1200, rate))};
+            // The sender's own timestamps give its rate free of network jitter, and how much
+            // later than the quickest recent report this one arrived (a resend after a loss,
+            // a queue): `delta` is the one-way delay plus a constant clock difference.
+            const sentAt = typeof message.sentAt === 'number' ? message.sentAt : null;
+            let late = 0;
+            if (sentAt != null) {
+                const delta = now - sentAt;
+                peer.deltas = [...(peer.deltas || []).slice(-49), delta];
+                late = Math.max(0, delta - Math.min(...peer.deltas));
+            }
+            const span = previous && (sentAt != null && previous.sentAt != null ?
+                sentAt - previous.sentAt : now - previous.at);
+            const sample = previous && span > 20 ? (t - previous.t) / span : 1000;
+            const rate = previous ? previous.rate + (Math.max(0, Math.min(1200, sample)) - previous.rate) * 0.3 : 1000;
+            peer.clock = {t, at: now, rate, sentAt, late};
+            const stalled = rate < PEER_STALLED_RATE;
+            if (stalled) peer.wasStalled = true;
             // Consoles boot at different times, so only drift since the link matters. Both
             // sides of a pair must agree on the expected offset, or each could think it is
             // ahead and both would wait: the console with the lower id measures it (on the
-            // first report, after an outage or when asked) and the other adopts its mirror.
+            // first report, after an outage or stall, or when asked) and the other adopts
+            // its mirror.
             const outage = previous && now - previous.at > CLOCK_STALE_MS;
-            if (this.id < peer.netId && (peer.clockOffset == null || outage)) {
+            const resumed = peer.wasStalled && !stalled;
+            if (resumed) {
+                peer.wasStalled = false;
+                peer.clockOffset = null;
+                peer.smoothedLead = null;
+                if (this.id > peer.netId) this.sendControlTo(peer.key, {kind: 'clock-rebase'});
+            }
+            // Wait for a round-trip measurement (or give up on one after a second) so the
+            // baseline does not include the travel time.
+            peer.reports = (peer.reports || 0) + 1;
+            const travelKnown = peer.rttMs != null || peer.reports > 10;
+            if (outage) peer.offsetSamples = [];
+            if (this.id < peer.netId && (peer.clockOffset == null || outage) && !stalled && travelKnown) {
+                // One report is off by its own jitter, and a baseline error would last the whole
+                // session, so take the median of several.
                 const local = this.guestTimeUs();
                 if (local != null) {
-                    peer.clockOffset = local - t;
-                    this.sendControlTo(peer.key, {kind: 'clock-base', offset: peer.clockOffset});
+                    if (outage) peer.clockOffset = null;
+                    peer.offsetSamples = [...(peer.offsetSamples || []), local - this.peerClockEstimate(peer, now)];
+                    if (peer.offsetSamples.length >= OFFSET_SAMPLES) {
+                        const sorted = [...peer.offsetSamples].sort((a, b) => a - b);
+                        peer.clockOffset = sorted[Math.floor(sorted.length / 2)];
+                        peer.offsetSamples = [];
+                        peer.smoothedLead = null;
+                        this.sendControlTo(peer.key, {kind: 'clock-base', offset: peer.clockOffset});
+                    }
                 }
             }
         }
 
+        // The peer's game clock now: its last report advanced by the time since it was sent.
+        peerClockEstimate(peer, now) {
+            const clock = peer.clock;
+            // Quickest round trip seen, halved, plus how late this report was.
+            const travel = (peer.minRttMs ?? peer.rttMs ?? 0) / 2 + (clock.late || 0);
+            return clock.t + (now - clock.at + travel) * Math.min(clock.rate, 1200);
+        }
+
         receiveClockBase(peer, offset) {
-            if (this.id > peer.netId) peer.clockOffset = -offset;
+            if (this.id > peer.netId) {
+                peer.clockOffset = -offset;
+                peer.smoothedLead = null;
+            }
         }
 
         handleClockControl(peer, message) {
             if (!peer) return;
-            if (message.kind === 'clock') this.receiveClock(peer, message.t);
+            if (message.kind === 'clock') this.receiveClock(peer, message);
             else if (message.kind === 'clock-base') this.receiveClockBase(peer, message.offset);
-            else if (message.kind === 'clock-rebase' && this.id < peer.netId) peer.clockOffset = null;
+            else if (message.kind === 'clock-rebase' && this.id < peer.netId) {
+                peer.clockOffset = null;
+                peer.offsetSamples = [];
+            }
         }
 
-        // How far this console's game clock is ahead of its slowest live peer, in µs, against
-        // the baseline agreed when the link started (or last resynced).
+        // How far this console's game clock is ahead of the peer that is furthest behind, in
+        // µs, against the baseline agreed when the link started (or last resynced), with the
+        // rate and jitter tolerance that go with it. Leads are smoothed over PACE_SMOOTHING_MS.
         clockLead() {
             const local = this.guestTimeUs();
             if (local == null) return null;
             const now = performance.now();
-            let lead = null;
+            let worst = null;
             for (const peer of this.peers.values()) {
                 const clock = peer.clock;
                 if (!clock || peer.netId == null || peer.clockOffset == null ||
-                    now - clock.at > CLOCK_STALE_MS) continue;
-                const estimate = clock.t + (now - clock.at) * clock.rate;
-                const peerLead = local - estimate - peer.clockOffset;
-                lead = lead == null ? peerLead : Math.max(lead, peerLead);
+                    now - clock.at > CLOCK_STALE_MS || clock.rate < PEER_STALLED_RATE) continue;
+                const lead = local - this.peerClockEstimate(peer, now) - peer.clockOffset;
+                const dt = now - (peer.leadAt || now);
+                peer.leadAt = now;
+                peer.smoothedLead = peer.smoothedLead == null ? lead :
+                    peer.smoothedLead + (lead - peer.smoothedLead) * Math.min(1, dt / PACE_SMOOTHING_MS);
+                const tolerance = Math.max(PACE_DEADZONE_US, 3000 * (peer.jitterMs || 0));
+                const excess = peer.smoothedLead - tolerance;
+                if (!worst || excess > worst.excess) worst = {excess, lead: peer.smoothedLead, rate: clock.rate};
             }
-            return lead;
+            return worst;
         }
 
         setSpeedScale(scale) {
@@ -230,29 +326,35 @@
         shouldHold() {
             const lead = this.pacing && this.joined && this.peers.size ? this.clockLead() : null;
             const now = performance.now();
-            if (lead == null || lead <= PACE_START_US) {
+            const elapsed = now - (this.lastPaceAt || now);
+            this.lastPaceAt = now;
+            if (!lead || lead.excess <= 0) {
                 this.leadSince = 0;
                 this.setSpeedScale(1);
                 return this.endHold(false);
             }
-            if (!this.leadSince) this.leadSince = now;
-            if (now - this.leadSince > PACE_REBASE_MS) {
-                // The peer is not catching up (a stall, a much slower device): resync from here
-                // rather than throttle forever. Authorities re-measure; others ask theirs to.
+            // A lead held past PACE_HOLD_US for PACE_REBASE_MS will not close (the peer
+            // cannot keep up even with this console paused at times): resync from here
+            // rather than hold forever. Authorities re-measure; others ask theirs to.
+            if (lead.lead <= PACE_HOLD_US) this.leadSince = 0;
+            else if (!this.leadSince) this.leadSince = now;
+            if (this.leadSince && now - this.leadSince > PACE_REBASE_MS) {
                 this.pacingStats.gaveUp++;
                 this.leadSince = 0;
                 for (const [key, peer] of this.peers) {
                     peer.clockOffset = null;
+                    peer.smoothedLead = null;
                     if (this.id > peer.netId) this.sendControlTo(key, {kind: 'clock-rebase'});
                 }
                 this.setSpeedScale(1);
                 return this.endHold(false);
             }
-            const fraction = Math.min(1, (lead - PACE_START_US) / (PACE_FULL_US - PACE_START_US));
-            this.setSpeedScale(1 - (1 - PACE_MIN_SCALE) * fraction);
-            if (this.speedPermille < 1000) this.pacingStats.throttledMs += now - (this.lastPaceAt || now);
-            this.lastPaceAt = now;
-            if (lead <= PACE_HOLD_US) return this.endHold(false);
+            // Run at the peer's measured speed, slower still in proportion to the lead. Only
+            // the console that is ahead does this, so two consoles cannot drag each other down.
+            const peerSpeed = Math.min(1, lead.rate / 1000);
+            this.setSpeedScale(Math.max(PACE_MIN_SCALE, peerSpeed - lead.excess * PACE_CORRECTION_PER_US));
+            if (this.speedPermille < 1000) this.pacingStats.throttledMs += elapsed;
+            if (lead.lead <= PACE_HOLD_US) return this.endHold(false);
             if (this.holdSince && now - this.holdSince > MAX_HOLD_MS) {
                 this.cooldownUntil = now + HOLD_COOLDOWN_MS;
                 return this.endHold(false);

@@ -16,11 +16,12 @@ const { createWebServer } = require('../web/server.cjs');
 const { restoreState } = require('./fixture_state.cjs');
 
 const rom = path.resolve(cfg.argVal('--rom', ''));
-const state = path.resolve(cfg.argVal('--state', ''));
+const stateArg = cfg.argVal('--state', '');
+const state = stateArg ? path.resolve(stateArg) : null; // none: measure from a cold boot
 const seconds = Number(cfg.argVal('--seconds', '20'));
 const warmup = Number(cfg.argVal('--warmup', '5'));
 const query = cfg.argVal('--query', '');
-const label = cfg.argVal('--label', path.basename(state));
+const label = cfg.argVal('--label', state ? path.basename(state) : 'cold-boot');
 const uncapped = process.argv.includes('--uncapped');
 const vsyncHz = Number(cfg.argVal('--vsync-hz', '0'));
 const gpu = process.argv.includes('--gpu') || process.env.AZAHAR_FIXTURE_GPU === '1';
@@ -47,8 +48,10 @@ async function main() {
         await page.waitForFunction(() => !document.querySelector('#btn-load').disabled);
         await page.click('#btn-load');
         await page.waitForFunction(() => !document.querySelector('#btn-stop').disabled, { timeout: 180000 });
-        await restoreState(page, state);
-        await sleep(warmup * 1000);
+        if (state) {
+            await restoreState(page, state);
+            await sleep(warmup * 1000);
+        }
         await page.evaluate(vsyncHz => {
             const probe = window.__perfProbe = { durations: [], speeds: [], fps: [], start: performance.now() };
             const request = AzaharScheduler.request.bind(AzaharScheduler);
@@ -94,7 +97,13 @@ async function main() {
             await session.send('Profiler.setSamplingInterval', { interval: 200 });
             await session.send('Profiler.start');
         }
+        const tracePath = cfg.argVal('--trace', null);
+        if (tracePath) {
+            await page.tracing.start({ path: tracePath, categories: ['devtools.timeline', 'blink', 'gpu',
+                'cc', 'viz', 'toplevel', 'disabled-by-default-devtools.timeline', 'v8.execute'] });
+        }
         await sleep(seconds * 1000);
+        if (tracePath) await page.tracing.stop();
         if (session) {
             const { profile } = await session.send('Profiler.stop');
             fs.writeFileSync(profilePath, JSON.stringify(profile));
