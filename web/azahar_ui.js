@@ -134,6 +134,15 @@
     // "each frame is expensive", which need opposite remedies.
     let stepWorkMs = 0;
     let stepWorkFrames = 0;
+    // Optionally fits each callback's emulation to the display's refresh period. A
+    // callback that runs just past a refresh waits idle for the next one, which on a
+    // high-refresh display can leave the main thread unused. It is opt-in
+    // (`?frameBudget=adaptive`) until measured on real high-refresh hardware; the
+    // fixed 14 ms budget remains the default.
+    const frameBudget = {
+        enabled: new URLSearchParams(location.search).get('frameBudget') === 'adaptive',
+        budgetMs: 14, appliedMs: 14, lastAt: 0, intervals: [], periodMs: 1000 / 60, refreshes: 0,
+    };
     let gameGraphicsAt = 0;
     let saveStateStore = null;
     let saveStateBusy = false;
@@ -1276,6 +1285,42 @@ void main() { frag_color = vec4(1.0); }`);
         }
     }
 
+    // Called after every emulated callback. `stepMs` is the core's share and
+    // `totalMs` the whole callback, including presentation and page work.
+    function tuneFrameBudget(now, stepMs, totalMs) {
+        if (!frameBudget.enabled || !wasmModule._azahar_set_work_budget_ms) return;
+        // Callbacks start on refreshes, so the shortest recent gap is the refresh period.
+        if (frameBudget.lastAt) {
+            frameBudget.intervals.push(now - frameBudget.lastAt);
+            if (frameBudget.intervals.length > 120) frameBudget.intervals.shift();
+            frameBudget.periodMs = Math.max(2, Math.min(...frameBudget.intervals));
+        }
+        frameBudget.lastAt = now;
+        if (frameBudget.intervals.length < 30 || window.AzaharNetplay?.shouldHold?.()) return;
+        const period = frameBudget.periodMs;
+        // A 60 Hz-class display keeps the measured fixed budget.
+        let budget = 14;
+        if (period < 12) {
+            // Span about 1/60 s of refreshes and finish a little before the last one,
+            // never giving the core less than half of that span.
+            const refreshes = frameBudget.refreshes = Math.max(1, Math.round((1000 / 60) / period));
+            const targetMs = refreshes * period - Math.max(1.5, period * 0.1);
+            budget = frameBudget.budgetMs;
+            if (totalMs > targetMs) {
+                budget -= Math.min(4, (totalMs - targetMs) * 0.5);
+            } else if (stepMs >= budget - 0.5) {
+                // Grow only while the core used its whole budget; finishing early means
+                // game speed, not the budget, limited it.
+                budget += Math.min(1, (targetMs - totalMs) * 0.25);
+            }
+            budget = Math.min(30, Math.max(refreshes * period * 0.5, budget));
+        }
+        frameBudget.budgetMs = budget;
+        if (Math.abs(budget - frameBudget.appliedMs) >= 0.25) {
+            frameBudget.appliedMs = wasmModule._azahar_set_work_budget_ms(budget);
+        }
+    }
+
     function startRunning() {
         if (!romLoaded || running) return;
 
@@ -1303,11 +1348,13 @@ void main() { frag_color = vec4(1.0); }`);
                 return;
             }
 
+            const callbackStartedAt = performance.now();
             try {
                 frameCount++;
                 const stepStartedAt = performance.now();
                 const result = wasmModule._azahar_step_frame();
-                stepWorkMs += performance.now() - stepStartedAt;
+                const stepMs = performance.now() - stepStartedAt;
+                stepWorkMs += stepMs;
                 stepWorkFrames++;
 
                 if (result === 0) {
@@ -1340,6 +1387,7 @@ void main() { frag_color = vec4(1.0); }`);
                         stepWorkMs = 0;
                         stepWorkFrames = 0;
                     }
+                    tuneFrameBudget(now, stepMs, performance.now() - callbackStartedAt);
                     runAnimationFrame = AzaharScheduler.request(tick);
                 } else if (result === 1) {
                     log('Emulation ended.');
@@ -1517,7 +1565,9 @@ void main() { frag_color = vec4(1.0); }`);
         log,
         getLog: () => logHistory.join(''),
         getCanvas: () => canvas,
-        getModule: () => (initialized ? wasmModule : null)
+        getModule: () => (initialized ? wasmModule : null),
+        getFrameBudget: () => ({ enabled: frameBudget.enabled, periodMs: frameBudget.periodMs,
+            budgetMs: frameBudget.appliedMs, refreshes: frameBudget.refreshes }),
     };
 
     // ── Auto-init on page load ───────────────────────────────────
