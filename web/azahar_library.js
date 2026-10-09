@@ -649,7 +649,6 @@
         const proxyUrl = `/api/rom-proxy?url=${encodeURIComponent(directUrl)}`;
         const isRarArchive = /\.rar$/i.test(game.romName || '');
 
-        let response = null;
         let usedProxy = false;
         let storeWriter = null;
         try {
@@ -671,103 +670,147 @@
                 throw new Error('This local game is no longer cached. Choose the file again.');
             }
 
-            if (!response) {
+            // Prefers archive.org directly; falls back to the server proxy if
+            // CORS or the network fails.
+            async function openDownload() {
                 try {
-                    response = await fetch(directUrl, {
+                    const direct = await fetch(directUrl, {
                         signal: controller.signal,
                         headers: { 'Accept-Encoding': 'identity' }
                     });
-                    if (!response.ok) {
-                        throw new Error(`Direct download returned HTTP ${response.status}`);
+                    if (!direct.ok) {
+                        throw new Error(`Direct download returned HTTP ${direct.status}`);
                     }
+                    return direct;
                 } catch (directErr) {
                     if (controller.signal.aborted) throw directErr;
                     console.warn('Direct fetch from archive.org failed, trying local proxy:', directErr.message);
                     if (downloadSpeedEl) downloadSpeedEl.textContent = 'Connecting via proxy...';
-                    response = await fetch(proxyUrl, { signal: controller.signal });
-                    if (!response.ok) {
-                        throw new Error(`Proxy download returned HTTP ${response.status}`);
+                    const proxied = await fetch(proxyUrl, { signal: controller.signal });
+                    if (!proxied.ok) {
+                        throw new Error(`Proxy download returned HTTP ${proxied.status}`);
                     }
                     usedProxy = true;
+                    return proxied;
                 }
             }
 
-            const contentLengthHeader = response.headers.get('content-length');
-            const totalBytes = contentLengthHeader ? Number.parseInt(contentLengthHeader, 10) : (game.size || 0);
-            activeDownload.totalBytes = totalBytes;
+            // Reads the body into `writer` when given, otherwise into memory.
+            // Resolves to { data, storeError }: a failed browser-storage write
+            // (Chrome reports disk, memory and lock failures as a generic
+            // InvalidStateError) is returned rather than thrown, so the caller
+            // can download again without storage.
+            async function receiveBody(response, writer) {
+                const contentLengthHeader = response.headers.get('content-length');
+                const totalBytes = contentLengthHeader ? Number.parseInt(contentLengthHeader, 10) : (game.size || 0);
+                activeDownload.totalBytes = totalBytes;
+                const reader = response.body.getReader();
+                const chunks = [];
+                let loadedBytes = 0;
+                let lastUpdate = Date.now();
+                let lastLoaded = 0;
+                let speed = 0;
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    if (writer) {
+                        try {
+                            await writer.write(value);
+                        } catch (storeError) {
+                            void reader.cancel().catch(() => {});
+                            return { data: null, storeError };
+                        }
+                    } else {
+                        chunks.push(value);
+                    }
+                    loadedBytes += value.length;
+                    activeDownload.loadedBytes = loadedBytes;
+
+                    const now = Date.now();
+                    if (now - lastUpdate >= 200) {
+                        const elapsed = (now - lastUpdate) / 1000;
+                        speed = (loadedBytes - lastLoaded) / elapsed;
+                        lastUpdate = now;
+                        lastLoaded = loadedBytes;
+
+                        const percent = totalBytes > 0 ? Math.min(100, Math.round((loadedBytes / totalBytes) * 100)) : 0;
+                        const statsText = `${percent}% (${formatBytes(loadedBytes)} / ${formatBytes(totalBytes)})`;
+
+                        if (downloadBarEl) downloadBarEl.style.width = `${percent}%`;
+                        if (downloadStatsEl) downloadStatsEl.textContent = statsText;
+
+                        let speedText = formatSpeed(speed);
+                        if (totalBytes > loadedBytes && speed > 0) {
+                            const etaSec = Math.round((totalBytes - loadedBytes) / speed);
+                            speedText += ` • ~${etaSec}s remaining`;
+                        }
+                        if (usedProxy) speedText += ' (proxy)';
+                        if (downloadSpeedEl) downloadSpeedEl.textContent = speedText;
+
+                        if (window.AzaharUI) {
+                            window.AzaharUI.setStatus(`Downloading ${game.title}... ${statsText}`);
+                            window.AzaharUI.showProgress(percent);
+                        }
+                    }
+                }
+
+                // Combine chunks
+                if (downloadSpeedEl) downloadSpeedEl.textContent = 'Preparing ROM for emulator...';
+                if (window.AzaharUI) {
+                    window.AzaharUI.setStatus('Preparing ROM for emulator...');
+                    window.AzaharUI.showProgress(100);
+                }
+                if (writer) {
+                    try {
+                        return { data: await writer.close(), storeError: null };
+                    } catch (storeError) {
+                        return { data: null, storeError };
+                    }
+                }
+                // RAR extraction needs contiguous bytes. A plain image stays a
+                // Blob, which the browser may page to disk and which is
+                // mounted lazily, so it never needs one multi-GiB ArrayBuffer.
+                if (!isRarArchive) return { data: new Blob(chunks), storeError: null };
+                const bytes = new Uint8Array(loadedBytes);
+                let offset = 0;
+                for (const chunk of chunks) {
+                    bytes.set(chunk, offset);
+                    offset += chunk.length;
+                }
+                chunks.length = 0;
+                return { data: bytes, storeError: null };
+            }
 
             // Stream plain images straight to disk: a multi-GiB title cannot
             // be assembled in one ArrayBuffer. RAR archives are decompressed
             // in memory and still need their bytes.
             const store = !isRarArchive ? playableStore() : null;
             const downloadKey = store && await playableKey(directUrl);
-            storeWriter = downloadKey ? await store.createWriter(downloadKey) : null;
-            const reader = response.body.getReader();
-            const chunks = [];
-            let loadedBytes = 0;
-            let lastUpdate = Date.now();
-            let lastLoaded = 0;
-            let speed = 0;
-
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-
-                if (storeWriter) await storeWriter.write(value);
-                else chunks.push(value);
-                loadedBytes += value.length;
-                activeDownload.loadedBytes = loadedBytes;
-
-                const now = Date.now();
-                if (now - lastUpdate >= 200) {
-                    const elapsed = (now - lastUpdate) / 1000;
-                    speed = (loadedBytes - lastLoaded) / elapsed;
-                    lastUpdate = now;
-                    lastLoaded = loadedBytes;
-
-                    const percent = totalBytes > 0 ? Math.min(100, Math.round((loadedBytes / totalBytes) * 100)) : 0;
-                    const statsText = `${percent}% (${formatBytes(loadedBytes)} / ${formatBytes(totalBytes)})`;
-
-                    if (downloadBarEl) downloadBarEl.style.width = `${percent}%`;
-                    if (downloadStatsEl) downloadStatsEl.textContent = statsText;
-
-                    let speedText = formatSpeed(speed);
-                    if (totalBytes > loadedBytes && speed > 0) {
-                        const etaSec = Math.round((totalBytes - loadedBytes) / speed);
-                        speedText += ` • ~${etaSec}s remaining`;
-                    }
-                    if (usedProxy) speedText += ' (proxy)';
-                    if (downloadSpeedEl) downloadSpeedEl.textContent = speedText;
-
-                    if (window.AzaharUI) {
-                        window.AzaharUI.setStatus(`Downloading ${game.title}... ${statsText}`);
-                        window.AzaharUI.showProgress(percent);
-                    }
-                }
+            let storeError = null;
+            try {
+                storeWriter = downloadKey ? await store.createWriter(downloadKey) : null;
+            } catch (error) {
+                storeError = error;
             }
 
-            // Combine chunks
-            if (downloadSpeedEl) downloadSpeedEl.textContent = 'Preparing ROM for emulator...';
-            if (window.AzaharUI) {
-                window.AzaharUI.setStatus('Preparing ROM for emulator...');
-                window.AzaharUI.showProgress(100);
-            }
-
-            let playableBytes = null;
-            let playableName = game.romName;
-            const streamedToStore = Boolean(storeWriter);
-            if (storeWriter) {
-                playableBytes = await storeWriter.close();
+            let received = storeError ? { data: null, storeError } : await receiveBody(await openDownload(), storeWriter);
+            const streamedToStore = Boolean(storeWriter) && !received.storeError;
+            if (received.storeError) {
+                // Browser storage refused the download (full disk, private
+                // window, file locked by antivirus, ...). Start over in memory.
+                console.warn('Could not save the download to browser storage; downloading it again into memory:', received.storeError);
+                if (storeWriter) void storeWriter.abort();
                 storeWriter = null;
-            } else {
-                playableBytes = new Uint8Array(loadedBytes);
-                let offset = 0;
-                for (const chunk of chunks) {
-                    playableBytes.set(chunk, offset);
-                    offset += chunk.length;
-                }
-                chunks.length = 0;
+                if (controller.signal.aborted) throw new DOMException('The operation was aborted', 'AbortError');
+                if (downloadSpeedEl) downloadSpeedEl.textContent = 'Browser storage failed; downloading again into memory...';
+                received = await receiveBody(await openDownload(), null);
             }
+            storeWriter = null;
+
+            let playableBytes = received.data;
+            let playableName = game.romName;
             // eShop items are RAR archives containing a playable CIA. Extract
             // the game in a worker so decompression does not block the UI.
             if (isRarArchive) {
