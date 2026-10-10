@@ -116,6 +116,10 @@
     // ── State ─────────────────────────────────────────────────────
     let wasmModule = null;
     let romData = null;
+    // Keep only a disk-backed source (or the library URL) for renderer recovery.
+    // The mounted ROM itself may have been released from romData already.
+    let romRecoveryFile = null;
+    let romRecoveryUrl = '';
     let romMounted = false;
     let romName = '';
     let romPath = '/rom.bin';
@@ -755,7 +759,7 @@
         // Preserve harness/user-flow controls across the fresh-document
         // renderer switch. In particular, losing autostart=0 would begin
         // execution while an uploaded save state is still being installed.
-        for (const name of ['autostart', 'resolution', 'speed', 'scheduler']) {
+        for (const name of ['autostart', 'resolution', 'speed', 'scheduler', 'play']) {
             if (currentUrl.searchParams.has(name)) {
                 destination.searchParams.set(name, currentUrl.searchParams.get(name));
             }
@@ -765,7 +769,26 @@
         // fresh-document fallback. This makes automated backend gates
         // diagnostic without weakening the user-facing recovery path.
         destination.searchParams.set('webgl2-fallback-reason', reason);
-        window.setTimeout(() => window.location.replace(destination.toString()), 0);
+        if (running) stopRunning();
+        window.setTimeout(async () => {
+            if (romRecoveryUrl) {
+                destination.searchParams.set('play', romRecoveryUrl);
+            } else if (romRecoveryFile && window.AzaharLibrary?.cachePlayable) {
+                setStatus('Preparing ROM for compatibility renderer...', '');
+                const key = `local-file:${romName}:${romRecoveryFile.size}:${romRecoveryFile.lastModified || 0}`;
+                try {
+                    if (await window.AzaharLibrary.cachePlayable(key, romRecoveryFile, romName, romName)) {
+                        destination.searchParams.set('play', key);
+                    } else {
+                        log('ROM could not be stored for renderer recovery; choose the file again after restart.');
+                    }
+                } catch (error) {
+                    log(`ROM recovery storage failed: ${error.message}; choose the file again after restart.`);
+                }
+            }
+            // A fresh canvas is still required, even when storage is unavailable.
+            window.location.replace(destination.toString());
+        }, 0);
     }
 
     /**
@@ -937,6 +960,8 @@ void main() { frag_color = vec4(1.0); }`);
                 throw new Error('Reload the page to load another game.');
             }
             romData = bytes;
+            romRecoveryFile = bytes;
+            romRecoveryUrl = '';
             romMounted = false;
             log(`File selected: ${romName} (${romData.size} bytes)`);
             setStatus(initialized ? `ROM ready: ${romName}` :
@@ -1710,7 +1735,7 @@ void main() { frag_color = vec4(1.0); }`);
     }
 
     // `bytes` is a Uint8Array, or a Blob/File that is mounted lazily.
-    async function loadRomBytes(bytes, name, shouldAutoStart = true) {
+    async function loadRomBytes(bytes, name, shouldAutoStart = true, sourceUrl = '') {
         if (coreUsed) {
             throw new Error('A title was already loaded in this session; start a fresh session first.');
         }
@@ -1730,6 +1755,8 @@ void main() { frag_color = vec4(1.0); }`);
             fileLabel.textContent = `📄 ${romName} (${(romSize(bytes) / 1024 / 1024).toFixed(1)} MB)`;
         }
         romData = bytes;
+        romRecoveryUrl = sourceUrl;
+        romRecoveryFile = !sourceUrl && bytes instanceof Blob ? bytes : null;
         romMounted = false;
         log(`Loading ROM: ${romName} (${romSize(bytes)} bytes)`);
         await loadAndRunRom();

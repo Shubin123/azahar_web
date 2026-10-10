@@ -19,6 +19,17 @@ serve_web.bat
 
 Open `http://localhost:8765` in Chrome, then load a **decrypted** `.3ds` ROM file.
 
+On Windows, `launch_chrome_vulkan.bat` starts the local server and opens Chrome
+with the Vulkan ANGLE backend in a separate local profile. This is useful on
+drivers where Chrome's default D3D11 backend stalls; it keeps the normal Chrome
+profile and the site's renderer defaults intact. If Vulkan is unavailable, use
+the standard local server and the Compatibility renderer.
+
+Automatic recovery to Compatibility reopens the current ROM in a fresh session.
+Picked files are copied into browser storage only when that recovery is needed;
+if storage is unavailable, select the file again. Recovery restarts the title,
+so load a browser save slot to restore saved progress.
+
 ### Deploy to GitHub Pages
 
 The `web/` folder is self-contained and `.github/workflows/pages.yml` publishes it on every relevant `main` push. The included `coi-serviceworker.js` handles the required cross-origin isolation headers automatically on static hosts. The single `index.html` page provides Auto, accelerated WebGL2, and compatibility renderer modes, 1x-4x internal-resolution scaling, a 1x-4x fast-forward target for cutscenes, a fullscreen view (Alt+Enter) that keeps both screens' shapes and sizes the bottom screen between user-set minimum and maximum percentages of the top screen, and per-game persistent browser save slots; switching renderers performs the fresh-page reload required by browser canvas contexts.
@@ -127,6 +138,9 @@ node tests/fullscreen.test.cjs            # add --renderer=software for the CPU 
 
 # Save, restore, reload, and delete an IndexedDB-backed save through the UI
 node tests/run.cjs --save-states --artifact webgl2
+
+# Verify a picked ROM and cached replay survive renderer recovery
+npm run test:renderer-recovery -- --rom path/to/your_rom.3ds
 
 # Safari/iOS engine: WebKit with iPhone emulation (optional Playwright install)
 npm install --no-save playwright && npx playwright install webkit

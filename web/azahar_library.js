@@ -594,14 +594,14 @@
         listEl.replaceChildren(fragment);
     }
 
-    async function loadPlayableBytes(data, name) {
+    async function loadPlayableBytes(data, name, sourceUrl) {
         if (downloadCardEl) downloadCardEl.hidden = true;
         activeDownload = null;
         renderCurrentPage();
         if (!window.AzaharUI?.loadRomBytes) {
             throw new Error('Azahar UI is not ready to accept ROM bytes.');
         }
-        await window.AzaharUI.loadRomBytes(data, name, true);
+        await window.AzaharUI.loadRomBytes(data, name, true, sourceUrl);
         clearPendingPlay();
         const canvas = window.AzaharUI.getCanvas ? window.AzaharUI.getCanvas() : document.getElementById('canvas');
         if (canvas) canvas.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -663,7 +663,7 @@
                     window.AzaharUI.setStatus(`Loading cached ${game.title}...`);
                     window.AzaharUI.showProgress(100);
                 }
-                await loadPlayableBytes(cachedPlayable.data, cachedPlayable.name);
+                await loadPlayableBytes(cachedPlayable.data, cachedPlayable.name, directUrl);
                 return;
             }
             if (isLocalFileUrl(directUrl)) {
@@ -841,7 +841,7 @@
             if (controller.signal.aborted) throw new DOMException('The operation was aborted', 'AbortError');
 
             // Load into Azahar
-            await loadPlayableBytes(playableBytes, playableName);
+            await loadPlayableBytes(playableBytes, playableName, directUrl);
 
         } catch (err) {
             if (storeWriter) {
@@ -1122,6 +1122,7 @@
         streamRom,
         cancelDownload,
         playInFreshSession,
+        cachePlayable: rememberPlayable,
         getAllGames: () => allGames,
         listReadyPlayables,
         getFilteredGames: () => filteredGames
