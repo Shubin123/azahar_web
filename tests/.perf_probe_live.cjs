@@ -31,7 +31,7 @@ const gpu = process.argv.includes('--gpu') || process.env.AZAHAR_FIXTURE_GPU ===
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function main() {
-    const web = createWebServer(process.env.AZAHAR_WEB_DIR || cfg.webDir);
+    const web = createWebServer(process.env.AZAHAR_WEB_DIR || cfg.webDir); const BASE = process.env.AZAHAR_PAGE_BASE;
     await new Promise(resolve => web.listen(0, '127.0.0.1', resolve));
     const puppeteer = require('puppeteer-core');
     const browser = await puppeteer.launch({ executablePath: cfg.chromePath, headless: true,
@@ -43,7 +43,8 @@ async function main() {
         const page = await browser.newPage();
         const errors = [];
         page.on('pageerror', error => errors.push(String(error)));
-        await page.goto(`http://127.0.0.1:${web.address().port}/?speed=${speed}${query ? `&${query}` : ''}`,
+        if (process.env.AZAHAR_CONSOLE_OUT) page.on('console', m => { const t = m.text(); if (t.startsWith('[HIST')) fs.appendFileSync(process.env.AZAHAR_CONSOLE_OUT, t + '\n'); });
+        await page.goto(`${BASE || `http://127.0.0.1:${web.address().port}/`}?speed=${speed}${query ? `&${query}` : ''}`,
             { waitUntil: 'networkidle0' });
         await page.waitForFunction(() => document.querySelector('#status').textContent.includes('Emulator ready'),
             { timeout: 120000 });
@@ -81,6 +82,21 @@ async function main() {
             } else {
                 AzaharScheduler.request = callback => request(measured(callback));
             }
+            // Pacing: hash a downscaled top screen after every callback.
+            probe.changes = [];
+            const small = document.createElement('canvas'); small.width = 96; small.height = 58;
+            const ctx = small.getContext('2d', { willReadFrequently: true });
+            const canvas = document.querySelector('#canvas');
+            let last = 0, sinceChange = 0;
+            const inner = AzaharScheduler.request;
+            AzaharScheduler.request = callback => inner(now => {
+                callback(now);
+                ctx.drawImage(canvas, 0, 0, canvas.width, canvas.height / 2, 0, 0, 96, 58);
+                const d = ctx.getImageData(0, 0, 96, 58).data;
+                let h = 0; for (let i = 0; i < d.length; i += 4) h = (h * 31 + d[i] + d[i + 1] * 7 + d[i + 2] * 13) | 0;
+                sinceChange++;
+                if (h !== last) { probe.changes.push(sinceChange); sinceChange = 0; last = h; }
+            });
             const module = window.AzaharUI.getModule();
             probe.timer = setInterval(() => {
                 const buffer = module._malloc(64);
@@ -144,6 +160,8 @@ async function main() {
                 hitches100ms: probe.durations.filter(d => d > 100).length,
                 speedPercent: mean(probe.speeds),
                 gameFps: mean(probe.fps),
+                pacing: (() => { const c = {}; for (const x of probe.changes.slice(1)) c[x] = (c[x] || 0) + 1; return c; })(),
+                visibleFps: probe.changes.length / elapsed,
                 frameBudget: window.AzaharUI.getFrameBudget?.(),
                 cpuClock: window.AzaharUI.getCpuClock?.(),
                 adapter: (() => {
