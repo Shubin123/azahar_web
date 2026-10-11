@@ -41,6 +41,7 @@
     const WORKER_SOURCE = `
         'use strict';
         const STAGE_CHUNK = 16 << 20;
+        const READ_ATTEMPTS = 3;
         onmessage = async (event) => {
             const { mode, blob, control, offsetBox, data, directory, name } = event.data;
             const bytes = new Uint8Array(data);
@@ -49,9 +50,11 @@
             if (mode === 'staged') {
                 // Copy the Blob into a private file; reads then come from disk
                 // without the main thread's help.
+                let dir;
+                let activeName = name;
                 try {
                     const root = await navigator.storage.getDirectory();
-                    const dir = await root.getDirectoryHandle(directory, { create: true });
+                    dir = await root.getDirectoryHandle(directory, { create: true });
                     // Clean up any stale staging files from previous sessions
                     try {
                         if (dir.keys) {
@@ -62,7 +65,6 @@
                             }
                         }
                     } catch (_) {}
-                    let activeName = name;
                     for (let attempt = 0; attempt < 3; attempt++) {
                         try {
                             const file = await dir.getFileHandle(activeName, { create: true });
@@ -85,6 +87,9 @@
                     handle.flush();
                 } catch (error) {
                     try { handle?.close(); } catch (_) {}
+                    // Do not leave a partial multi-GiB copy behind (a full
+                    // disk is the usual reason staging fails).
+                    if (dir) await dir.removeEntry(activeName).catch(() => {});
                     postMessage({ error: String(error && error.message || error) });
                     return;
                 }
@@ -98,6 +103,7 @@
                 };
             }
             postMessage({ ready: true });
+            const sleeper = new Int32Array(new SharedArrayBuffer(4));
             for (;;) {
                 Atomics.wait(control, 0, 0);
                 const cmd = Atomics.load(control, 0);
@@ -107,14 +113,30 @@
                     return;
                 }
                 if (cmd !== 1) continue;
-                try {
-                    const start = offsetBox[0];
-                    const end = Math.min(blob.size, start + control[1]);
-                    control[1] = readAt(start, end);
-                    control[2] = 0;
-                } catch (error) {
-                    control[1] = 0;
+                const start = offsetBox[0];
+                const end = Math.min(blob.size, start + control[1]);
+                // Cloud- and FUSE-backed files (ChromeOS Drive, USB, Android
+                // and Linux files) can fail a read transiently; retry briefly.
+                let failure = null;
+                for (let attempt = 0; attempt < READ_ATTEMPTS; attempt++) {
+                    if (attempt) Atomics.wait(sleeper, 0, 0, 100 * attempt * attempt);
+                    try {
+                        control[1] = readAt(start, end);
+                        failure = null;
+                        break;
+                    } catch (error) {
+                        failure = error;
+                    }
+                }
+                if (failure) {
+                    // Hand the reason back in the data buffer for the UI.
+                    const text = new TextEncoder().encode(
+                        String((failure.name ? failure.name + ': ' : '') + (failure.message || failure)).slice(0, 512));
+                    bytes.set(text);
+                    control[1] = text.length;
                     control[2] = 1;
+                } else {
+                    control[2] = 0;
                 }
                 Atomics.store(control, 0, 2);
             }
@@ -164,7 +186,13 @@
             const failed = control[2] !== 0;
             const received = control[1];
             Atomics.store(control, 0, 0);
-            if (failed) throw new Error(`ROM read failed at byte ${offset}`);
+            if (failed) {
+                // TextDecoder refuses views of shared memory; copy first.
+                const reason = new TextDecoder().decode(view.slice(0, received));
+                const error = new Error(`ROM read failed at byte ${offset}${reason ? ` (${reason})` : ''}`);
+                error.name = 'RomReadError';
+                throw error;
+            }
             return view.subarray(0, received);
         }
 
@@ -195,7 +223,24 @@
 
     // Reads the Blob directly when a worker can do so while the main thread
     // waits; otherwise (WebKit) serves reads from a staged copy.
-    async function openReader(blob, onProgress) {
+    //
+    // `preferStaged` copies the file into private storage before the game
+    // starts. A picked file is only a reference: on ChromeOS, files in Google
+    // Drive, on USB drives, or in Android/Linux folders can become unreadable
+    // (NotReadableError) after the first reads, which stopped games a few
+    // frames into Run. A staged copy is read from the browser's own storage.
+    // Only picked Files are staged: library titles already live in private
+    // storage, and files too large for the free quota are read directly.
+    async function openReader(blob, onProgress, preferStaged) {
+        if (preferStaged && blob.size > 0 && typeof File !== 'undefined' && blob instanceof File &&
+            !storeFiles.has(blob) && navigator.storage?.getDirectory && await hasRoomFor(blob.size)) {
+            try {
+                await stagedCopyRemoval;
+                return await startReader(blob, 'staged', onProgress);
+            } catch (error) {
+                console.warn(`ROM staging failed (${error.message}); reading the file directly.`);
+            }
+        }
         const direct = await startReader(blob, 'direct');
         if (blob.size === 0 || direct.probe() !== null) return direct;
         // The probe read is still pending; discard the worker and its buffers.
@@ -272,12 +317,26 @@
     }
 
     const mounted = new Map();
+    // Files that already live in this origin's private storage (library
+    // downloads); staging them again would only duplicate them.
+    const storeFiles = new WeakSet();
+
+    async function hasRoomFor(bytes) {
+        try {
+            const {quota, usage} = await navigator.storage.estimate();
+            if (!quota) return true;
+            // Leave headroom for saves and the library index.
+            return quota - (usage || 0) > bytes + (256 << 20);
+        } catch (_) {
+            return true;
+        }
+    }
 
     // options.onProgress(fraction) reports the copy when the file has to be
-    // staged in browser storage first (WebKit).
+    // staged in browser storage first (WebKit, or options.preferStaged).
     async function mount(FS, path, blob, options = {}) {
         unmount(FS, path);
-        const reader = await openReader(blob, options.onProgress);
+        const reader = await openReader(blob, options.onProgress, options.preferStaged);
         const contents = createBlockCache(blob.size, reader.readRange);
 
         const slash = path.lastIndexOf('/');
@@ -362,7 +421,9 @@
             write: chunk => writable.write(chunk),
             async close() {
                 await writable.close();
-                return handle.getFile();
+                const file = await handle.getFile();
+                storeFiles.add(file);
+                return file;
             },
             async abort() {
                 await writable.abort().catch(() => {});
@@ -397,6 +458,7 @@
             const directory = await storeDirectory();
             const meta = JSON.parse(await (await (await directory.getFileHandle(`${key}.json`)).getFile()).text());
             const file = await (await directory.getFileHandle(`${key}.rom`)).getFile();
+            storeFiles.add(file);
             return { file, meta };
         } catch (_) {
             return null;

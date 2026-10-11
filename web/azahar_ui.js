@@ -753,6 +753,9 @@
         if (!isWebGL2Artifact || softwareFallbackStarted) return;
         softwareFallbackStarted = true;
         log(`WebGL2 fallback: ${reason}`);
+        // Stop first: stopping writes its own status, which used to replace
+        // this explanation with a bare "Stopped at step N".
+        if (running) stopRunning();
         setStatus(`WebGL2 unavailable (${reason}). Restarting in software...`, 'error');
         const destination = new URL(softwareFallbackUrl, window.location.href);
         const currentUrl = new URL(window.location.href);
@@ -769,7 +772,6 @@
         // fresh-document fallback. This makes automated backend gates
         // diagnostic without weakening the user-facing recovery path.
         destination.searchParams.set('webgl2-fallback-reason', reason);
-        if (running) stopRunning();
         window.setTimeout(async () => {
             if (romRecoveryUrl) {
                 destination.searchParams.set('play', romRecoveryUrl);
@@ -925,6 +927,31 @@ void main() { frag_color = vec4(1.0); }`);
 
     function romSize(data) {
         return data instanceof Blob ? data.size : data.length;
+    }
+
+    // ChromeOS picks files through Drive, USB, and Android/Linux mounts whose
+    // File references can stop being readable once the game starts, so picked
+    // ROMs are copied into browser storage first there. Elsewhere this starts
+    // only after a read actually failed. `?romStaging=0|1` overrides both.
+    const ROM_STAGING_KEY = 'azahar-rom-staging';
+    const isChromeOS = /\bCrOS\b/.test(navigator.userAgent) ||
+        navigator.userAgentData?.platform === 'Chrome OS';
+
+    function shouldStageRom() {
+        const forced = new URLSearchParams(location.search).get('romStaging');
+        if (forced === '0' || forced === '1') return forced === '1';
+        if (isChromeOS) return true;
+        try {
+            return localStorage.getItem(ROM_STAGING_KEY) === '1';
+        } catch (_) {
+            return false;
+        }
+    }
+
+    function rememberRomStaging() {
+        try {
+            localStorage.setItem(ROM_STAGING_KEY, '1');
+        } catch (_) {}
     }
 
     function memfsRomPath(filename) {
@@ -1213,6 +1240,7 @@ void main() { frag_color = vec4(1.0); }`);
                 if (romData instanceof Blob && window.AzaharRomFS) {
                     try {
                         await window.AzaharRomFS.mount(wasmModule.FS, romPath, romData, {
+                            preferStaged: shouldStageRom(),
                             onProgress: fraction => {
                                 setStatus(`Copying ROM into browser storage (${Math.round(fraction * 100)}%)...`);
                                 showProgress(fraction * 100);
@@ -1316,9 +1344,8 @@ void main() { frag_color = vec4(1.0); }`);
                 updateCanvasFromWasm();
                 setStatus(`Frame ${frameCount} OK`, 'ok');
             } else if (result === 1) {
-                setStatus('Emulation ended (shutdown)', 'error');
                 log('Emulator requested shutdown.');
-                stopRunning();
+                stopRunning('Emulation ended (shutdown)', 'error');
             } else {
                 setStatus(`Frame step error (code ${result})`, 'error');
                 log(`ERROR: azahar_step_frame returned ${result}`);
@@ -1616,21 +1643,16 @@ void main() { frag_color = vec4(1.0); }`);
                     runAnimationFrame = AzaharScheduler.request(tick);
                 } else if (result === 1) {
                     log('Emulation ended.');
-                    setStatus('Emulation ended.', '');
-                    stopRunning();
+                    stopRunning('Emulation ended.', '');
                 } else {
-                    log(`Frame error: ${result}`);
-                    setStatus(`Frame error (code ${result})`, 'error');
-                    stopRunning();
+                    handleRunFailure(`frame error (code ${result})`, null);
                 }
             } catch (err) {
-                // Preserve the WebAssembly function/offset stack in the UI.
+                // Preserve the WebAssembly function/offset stack in the log.
                 // A bare `unreachable` message hides the native renderer path
                 // that trapped, making scene-transition failures impossible
                 // to diagnose from an uploaded static deployment.
-                log(`Run error: ${err.stack || err.message}`);
-                setStatus(`Error: ${err.message}`, 'error');
-                stopRunning();
+                handleRunFailure(err.message, err);
             }
         }
 
@@ -1694,7 +1716,7 @@ void main() { frag_color = vec4(1.0); }`);
         stopRunning();
     });
 
-    function stopRunning() {
+    function stopRunning(message, cls = 'error') {
         running = false;
         if (runAnimationFrame !== null) {
             AzaharScheduler.cancel(runAnimationFrame);
@@ -1705,7 +1727,38 @@ void main() { frag_color = vec4(1.0); }`);
         btnRun.disabled = !romLoaded;
         btnStop.disabled = true;
         btnStep.disabled = !romLoaded;
-        if (romLoaded) setStatus(`Stopped at step ${frameCount}`, '');
+        // Callers that stop because something failed pass the reason; a bare
+        // "Stopped at step N" used to replace it and hide why the game stopped.
+        if (message) setStatus(message, cls);
+        else if (romLoaded) setStatus(`Stopped at step ${frameCount}`, '');
+    }
+
+    function isRomReadError(err) {
+        return err?.name === 'RomReadError' || /ROM read failed/.test(err?.message || '');
+    }
+
+    // The run loop failed: keep the reason visible, and recover where we can.
+    function handleRunFailure(detail, err) {
+        const step = frameCount;
+        log(`Run error at step ${step}: ${err ? (err.stack || err.message) : detail}`);
+        if (isRomReadError(err)) {
+            // Switching renderers cannot help: the file itself stopped being
+            // readable. Copy picked files into browser storage from now on.
+            rememberRomStaging();
+            stopRunning(`Stopped at step ${step}: the ROM file could not be read. ` +
+                'Files in Google Drive, on USB drives, or in Android/Linux folders can stop ' +
+                'being readable; choose the file again (or copy it to Downloads first). ' +
+                'The next load copies it into browser storage before starting.');
+            return;
+        }
+        // A WebGL2 failure before the first visible frame means this GPU path
+        // cannot run the title on this machine/driver. The compatibility
+        // renderer gets a fresh page and the same ROM.
+        if (isWebGL2Artifact && !gameGraphicsDetected && !softwareFallbackStarted) {
+            restartInSoftware(`accelerated renderer failed at step ${step}: ${detail}`);
+            return;
+        }
+        stopRunning(`Stopped at step ${step}: ${detail}`);
     }
 
     // ── Canvas Update ────────────────────────────────────────────
