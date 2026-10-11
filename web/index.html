@@ -3,7 +3,7 @@
 <head>
   <link rel="icon" type="image/svg+xml" href="./app-icon.svg">
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>Azahar Web — Nintendo 3DS Emulator</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -331,11 +331,15 @@
             height: 100vh;
             height: 100dvh;
             background: #000;
+            overflow: hidden;
+            touch-action: none;
         }
         .screen-stage.is-pseudo-fullscreen {
             position: fixed;
             inset: 0;
             z-index: 1000;
+            width: 100vw;
+            height: 100dvh;
         }
         html.has-pseudo-fullscreen, html.has-pseudo-fullscreen body { overflow: hidden; }
         .screen-stage.is-fullscreen canvas {
@@ -852,7 +856,9 @@
             display: flex;
             align-items: center;
             justify-content: center;
-            background: rgba(15, 52, 96, .72);
+            background: rgba(15, 52, 96, .65);
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
             border: 1px solid rgba(137, 180, 250, .35);
             box-shadow: inset 1px 1px 0 rgba(183,207,255,.15), inset -1px -1px 0 rgba(0,0,0,.4);
         }
@@ -906,6 +912,8 @@
             border-radius: 50%;
             background: radial-gradient(circle, rgba(15,52,96,.3), rgba(15,52,96,.75));
             border: 1px solid rgba(137, 180, 250, .35);
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
         }
         .touch-stick-knob {
             width: 48%;
@@ -924,40 +932,100 @@
             align-self: flex-start;
         }
 
-        /* Mobile touch controls: wrap over the left and right of the bottom screen */
-        @media (max-width: 768px), (pointer: coarse) {
+        /* ── Mobile Layout & Touch Controls ───────────────────────── */
+        /* Normal page view: on mobile, conserve padding and give canvas full usable width */
+        @media (max-width: 768px) {
+            body {
+                padding: max(8px, env(safe-area-inset-top)) max(6px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(6px, env(safe-area-inset-left));
+            }
+            header {
+                padding: 0 38px;
+                margin-bottom: 8px;
+            }
+            header h1 { font-size: 1.25rem; }
+            header p { font-size: 0.75rem; }
+            .canvas-panel {
+                min-width: 0;
+                max-width: 100%;
+                width: 100%;
+            }
+        }
+
+        /* Mobile landscape: prevent canvas overflowing off-screen and arrange controls comfortably */
+        @media (orientation: landscape) and (max-height: 580px) {
+            body {
+                padding: max(4px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) max(4px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+            }
+            header {
+                margin-bottom: 4px;
+                padding: 0 38px;
+            }
+            header h1 { font-size: 1.1rem; }
+            header p { display: none; }
+            .canvas-panel {
+                flex: 0 1 auto;
+                max-width: 100%;
+                min-width: 0;
+            }
+            .canvas-panel canvas {
+                max-height: calc(100vh - 48px);
+                width: auto;
+                aspect-ratio: 400 / 480;
+                object-fit: contain;
+            }
+            .canvas-panel > .touch-controls {
+                position: static;
+                display: flex;
+                justify-content: center;
+                gap: 16px;
+                margin-top: 6px;
+                --tc-u: clamp(16px, 4.6vh, 22px);
+            }
+        }
+
+        /* Normal page view (portrait): touch controls overlay over the bottom half with zero overflow */
+        @media (max-width: 768px) and (orientation: portrait), (pointer: coarse) and (orientation: portrait) {
             .canvas-panel {
                 position: relative;
+                min-width: 0;
             }
             .canvas-panel > .touch-controls {
                 position: absolute;
-                top: 50%;
-                bottom: 24px;
+                top: 48%;
+                bottom: 22px;
                 left: 0;
                 right: 0;
                 margin-top: 0;
                 pointer-events: none;
                 display: flex;
                 justify-content: space-between;
-                align-items: center;
+                align-items: flex-end;
                 z-index: 5;
+                --tc-u: clamp(18px, 5.2vw, 25px);
             }
             .canvas-panel > .touch-controls .touch-half {
                 pointer-events: auto;
+                justify-content: flex-end;
+                padding: calc(var(--tc-u) * .1);
+                padding-bottom: 2px;
             }
         }
 
-        /* Fullscreen: in landscape, 3 columns (left controls, dual screens, right controls).
-           In portrait, screens are stacked and the controls wrap over the left and right
-           of the bottom screen. */
+        /* Fullscreen: in landscape, 3 columns (left controls, dual screens in canvas, right controls).
+           In portrait, screens sit cleanly at the top and controls sit below, unobstructed and ergonomic. */
         .screen-stage.is-fullscreen.has-touch-controls {
             display: grid;
             grid-template: "left screens right" minmax(0, 1fr) / auto minmax(0, 1fr) auto;
+            overflow: hidden;
+            touch-action: none;
         }
         .screen-stage.is-fullscreen.has-touch-controls canvas {
             grid-area: screens;
             min-width: 0;
             min-height: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
         }
         .screen-stage.is-fullscreen .touch-controls { display: contents; }
         .screen-stage.is-fullscreen .touch-half {
@@ -973,45 +1041,62 @@
             grid-area: right;
             padding-right: max(calc(var(--tc-u) * .2), env(safe-area-inset-right));
         }
-        @media (orientation: portrait) {
+
+        @media (orientation: landscape) {
             .touch-controls {
-                --tc-u: clamp(20px, 6.2vw, 32px);
-            }
-            .screen-stage.is-fullscreen.has-touch-controls {
-                display: block;
-                position: relative;
-            }
-            .screen-stage.is-fullscreen.has-touch-controls canvas {
-                width: 100%;
-                height: 100%;
-                display: block;
-            }
-            .screen-stage.is-fullscreen.has-touch-controls .touch-controls {
-                display: flex;
-                position: absolute;
-                top: var(--az-bottom-y, 50%);
-                height: var(--az-bottom-h, auto);
-                min-height: min-content;
-                left: 0;
-                right: 0;
-                pointer-events: none;
-                justify-content: space-between;
-                align-items: center;
-                z-index: 10;
+                --tc-u: clamp(16px, 5.5vh, 26px);
             }
             .screen-stage.is-fullscreen.has-touch-controls .touch-half {
-                pointer-events: auto;
-                justify-content: center;
+                justify-content: space-evenly;
+                gap: calc(var(--tc-u) * .12);
+            }
+        }
+
+        @media (orientation: portrait) {
+            .touch-controls {
+                --tc-u: clamp(18px, 5.5vw, 28px);
+            }
+            .screen-stage.is-fullscreen.has-touch-controls {
+                display: grid;
+                grid-template: "screens screens" minmax(0, 1fr) "left right" auto / 1fr 1fr;
+                width: 100vw;
+                height: 100dvh;
+                position: relative;
+                overflow: hidden;
+            }
+            .screen-stage.is-fullscreen.has-touch-controls canvas {
+                grid-area: screens;
+                width: 100%;
+                height: 100%;
+                min-width: 0;
+                min-height: 0;
+                display: block;
+                object-fit: contain;
+            }
+            .screen-stage.is-fullscreen.has-touch-controls .touch-controls {
+                display: contents;
+            }
+            .screen-stage.is-fullscreen.has-touch-controls .touch-half {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: flex-end;
                 gap: calc(var(--tc-u) * .2);
                 padding: calc(var(--tc-u) * .15);
+                padding-bottom: max(calc(var(--tc-u) * .35), env(safe-area-inset-bottom));
+                pointer-events: auto;
+                z-index: 10;
             }
             .screen-stage.is-fullscreen.has-touch-controls .touch-left {
+                grid-area: left;
                 padding-left: max(calc(var(--tc-u) * .2), env(safe-area-inset-left));
             }
             .screen-stage.is-fullscreen.has-touch-controls .touch-right {
+                grid-area: right;
                 padding-right: max(calc(var(--tc-u) * .2), env(safe-area-inset-right));
             }
         }
+
         /* Move the stage fullscreen button to top-right when touch controls are shown
            so it does not collide with the right-hand touch buttons. */
         .screen-stage.has-touch-controls .stage-fullscreen-btn {
