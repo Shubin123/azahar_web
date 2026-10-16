@@ -6,7 +6,8 @@
   "type": "commonjs",
   "scripts": {
     "test": "node tests/run.cjs",
-    "test:library": "node tests/game_library.test.cjs && node tests/library_replay.test.cjs",
+    "test:library": "node tests/game_library.test.cjs && node tests/download_flow.test.cjs && node tests/library_replay.test.cjs",
+    "test:downloads": "node tests/game_library.test.cjs && node tests/download_flow.test.cjs",
     "test:input": "node tests/input_ui.test.cjs",
     "test:saves": "node tests/lan_saves.test.cjs",
     "serve": "node web/server.cjs",
