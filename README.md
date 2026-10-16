@@ -19,6 +19,29 @@ serve_web.bat
 
 Open `http://localhost:8765` in Chrome, then load a **decrypted** `.3ds` ROM file.
 
+### Play on Other Devices and Share Saves (LAN)
+
+```bash
+npm run serve:lan        # node web/server.cjs --lan
+```
+
+This serves the page to your whole network over HTTPS and prints the address
+to open on each device (e.g. `https://192.168.1.20:8765/`). HTTPS is required
+because browsers only let the emulator use threads on a secure page; the server
+makes a self-signed certificate with `openssl` on first run (kept in `.tls/`),
+so each device shows a certificate warning once — accept it to continue. To
+avoid the warning, pass a trusted certificate, e.g. from
+[mkcert](https://github.com/FiloSottile/mkcert):
+`TLS_CERT=cert.pem TLS_KEY=key.pem npm run serve:lan`.
+
+Save states are then shared between every browser that opens the page from
+this server. Each browser still keeps its own copy and syncs with the server
+on startup, after every save or delete, when the tab comes back into view, and
+every 20 seconds; the newest change to a slot wins, and deleting a slot deletes
+it everywhere. The server stores them in `saves/` (override with `SAVE_DIR`).
+Pages opened from a static host such as GitHub Pages keep saves in that
+browser only. Games' own in-game saves are not persisted yet; use save states.
+
 On Windows, `launch_chrome_vulkan.bat` starts the local server and opens Chrome
 with the Vulkan ANGLE backend in a separate local profile. This is useful on
 drivers where Chrome's default D3D11 backend stalls; it keeps the normal Chrome

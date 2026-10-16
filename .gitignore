@@ -39,3 +39,7 @@ node_modules/
 # OS files
 Thumbs.db
 .DS_Store
+
+# Save states shared by web/server.cjs with browsers on the network
+/saves/
+/.tls/

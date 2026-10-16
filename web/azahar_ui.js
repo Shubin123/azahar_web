@@ -164,6 +164,8 @@
     let gameGraphicsAt = 0;
     let saveStateStore = null;
     let saveStateBusy = false;
+    let lanSaveSync = null;
+    let lanSyncStatus = '';
     let currentProgramId = '';
     const saveStateDirectory = '/home/web_user/.local/share/azahar-emu/states';
     const resolutionQuery = new URLSearchParams(location.search).get('resolution');
@@ -591,8 +593,44 @@
         const durability = persistence.persistent ? 'persistent storage granted' :
             (persistence.supported ? 'standard browser storage' : 'browser-managed storage');
         saveStorageInfo.textContent = `${records.length} save${records.length === 1 ? '' : 's'}, ` +
-            `${formatBytes(totalBytes)} total - ${durability}.`;
+            `${formatBytes(totalBytes)} total - ${durability}.` +
+            (lanSyncStatus ? ` ${lanSyncStatus}` : '');
         updateSaveControls();
+    }
+
+    async function syncLanSaves() {
+        // Never swap records underneath a save or load in progress; the
+        // operation itself triggers a sync when it finishes.
+        if (!lanSaveSync || saveStateBusy) return;
+        try {
+            const result = await lanSaveSync.sync();
+            const time = new Date().toLocaleTimeString();
+            lanSyncStatus = `Shared on the network, synced ${time}.`;
+            const changes = [];
+            if (result.uploaded) changes.push(`${result.uploaded} sent`);
+            if (result.downloaded) changes.push(`${result.downloaded} received`);
+            if (result.deleted) changes.push(`${result.deleted} deleted`);
+            if (changes.length) log(`Network save sync: ${changes.join(', ')}.`);
+        } catch (error) {
+            lanSyncStatus = `Network sync failed: ${error.message}.`;
+        }
+        await refreshSaveStateList();
+    }
+
+    async function initializeLanSaveSync() {
+        if (!window.AzaharLanSaveSync) return;
+        lanSaveSync = await window.AzaharLanSaveSync.connect(saveStateStore);
+        if (!lanSaveSync) return;
+        const help = document.getElementById('save-state-help');
+        if (help) {
+            help.textContent = 'Saves are compressed by Azahar and shared with every browser that opens ' +
+                'this page from the same server. Load the matching ROM before restoring.';
+        }
+        await syncLanSaves();
+        window.setInterval(() => void syncLanSaves(), 20000);
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') void syncLanSaves();
+        });
     }
 
     async function initializeSaveStateStorage() {
@@ -603,6 +641,7 @@
         try {
             saveStateStore = await window.AzaharSaveStateStore.open();
             await refreshSaveStateList();
+            await initializeLanSaveSync();
         } catch (error) {
             saveStorageInfo.textContent = `Save storage unavailable: ${error.message}`;
             setSaveStateMessage('Browser saves are disabled.', true);
@@ -672,7 +711,9 @@
                 programId: currentProgramId,
                 slot,
                 romName,
-                savedAt: header.timestamp || Date.now(),
+                // Milliseconds, not the header's whole seconds: network sync
+                // orders saves by this, and a slot can be saved twice a second.
+                savedAt: Date.now(),
                 size: storedBytes.byteLength,
                 data: new Blob([storedBytes], {type: 'application/octet-stream'}),
             });
@@ -688,6 +729,7 @@
         } finally {
             setSaveStateBusy(false);
         }
+        void syncLanSaves();
     }
 
     async function loadStoredState(key) {
@@ -738,6 +780,7 @@
         } finally {
             setSaveStateBusy(false);
         }
+        void syncLanSaves();
     }
 
     btnSaveState?.addEventListener('click', () => void saveCurrentState());

@@ -7,7 +7,10 @@
 const http = require('node:http');
 const https = require('node:https');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
+const {spawnSync} = require('node:child_process');
+const {createLanSaveStore} = require('./lan_saves.cjs');
 
 function proxyArchiveUrl(targetUrl, request, response, isolationHeaders, redirectCount = 0) {
     if (redirectCount > 5) {
@@ -100,13 +103,9 @@ function createWebServer(root = WEB_ROOT, virtualFiles = {}, options = {}) {
         'Cross-Origin-Embedder-Policy': 'require-corp',
         'Cross-Origin-Resource-Policy': 'same-origin',
     };
-    return http.createServer((request, response) => {
-        if (request.method !== 'GET' && request.method !== 'HEAD') {
-            response.writeHead(405, {Allow: 'GET, HEAD'});
-            response.end();
-            return;
-        }
-
+    // Shared saves are opt-in so test servers never touch a real save folder.
+    const lanSaves = options.saveDir ? createLanSaveStore(options.saveDir) : null;
+    const handler = (request, response) => {
         let pathname;
         try {
             pathname = decodeURIComponent(new URL(request.url, 'http://localhost').pathname);
@@ -120,6 +119,17 @@ function createWebServer(root = WEB_ROOT, virtualFiles = {}, options = {}) {
         // /web/index.html URL when this script is launched from the workspace.
         if (pathname === '/web' || pathname.startsWith('/web/')) {
             pathname = pathname.slice('/web'.length) || '/index.html';
+        }
+
+        if (lanSaves && (pathname === '/api/saves' || pathname.startsWith('/api/saves/'))) {
+            lanSaves.handle(request, response, pathname, isolationHeaders);
+            return;
+        }
+
+        if (request.method !== 'GET' && request.method !== 'HEAD') {
+            response.writeHead(405, {Allow: 'GET, HEAD'});
+            response.end();
+            return;
         }
 
         if (pathname === '/api/rom-proxy') {
@@ -172,7 +182,8 @@ function createWebServer(root = WEB_ROOT, virtualFiles = {}, options = {}) {
                 fs.createReadStream(file).pipe(response);
             }
         });
-    });
+    };
+    return options.tls ? https.createServer(options.tls, handler) : http.createServer(handler);
 }
 
 function listen(port = 8765, host = '127.0.0.1', options = {}) {
@@ -186,12 +197,66 @@ function listen(port = 8765, host = '127.0.0.1', options = {}) {
     });
 }
 
+function lanAddresses() {
+    return Object.values(os.networkInterfaces()).flat()
+        .filter(entry => entry && entry.family === 'IPv4' && !entry.internal)
+        .map(entry => entry.address);
+}
+
+// Other devices must load the page over HTTPS: browsers only allow the
+// SharedArrayBuffer the emulator needs in a secure context, and plain HTTP
+// is secure only on localhost. TLS_CERT/TLS_KEY take a trusted certificate
+// (for example from mkcert); otherwise a self-signed one is made once with
+// openssl, which each device accepts on its first visit.
+function loadTlsCredentials(directory) {
+    if (process.env.TLS_CERT && process.env.TLS_KEY) {
+        return {cert: fs.readFileSync(process.env.TLS_CERT), key: fs.readFileSync(process.env.TLS_KEY)};
+    }
+    const cert = path.join(directory, 'cert.pem');
+    const key = path.join(directory, 'key.pem');
+    const names = ['DNS:localhost', `DNS:${os.hostname()}`, 'IP:127.0.0.1',
+        ...lanAddresses().map(address => `IP:${address}`)];
+    const namesFile = path.join(directory, 'names.txt');
+    let previousNames = '';
+    try { previousNames = fs.readFileSync(namesFile, 'utf8'); } catch (_) {}
+    // Regenerate when this machine's addresses change so the certificate
+    // still names the address other devices type.
+    if (!fs.existsSync(cert) || !fs.existsSync(key) || previousNames !== names.join(',')) {
+        fs.mkdirSync(directory, {recursive: true});
+        const result = spawnSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+            '-sha256', '-days', '825', '-subj', '/CN=Azahar Web LAN',
+            '-addext', `subjectAltName=${names.join(',')}`, '-keyout', key, '-out', cert],
+        {stdio: 'pipe'});
+        if (result.status !== 0) return null;
+        fs.writeFileSync(namesFile, names.join(','));
+    }
+    return {cert: fs.readFileSync(cert), key: fs.readFileSync(key)};
+}
+
 if (require.main === module) {
+    const lan = process.argv.includes('--lan');
     const port = Number.parseInt(process.env.PORT || '8765', 10);
-    const host = process.env.HOST || '127.0.0.1';
-    listen(port, host).then(server => {
+    const host = process.env.HOST || (lan ? '0.0.0.0' : '127.0.0.1');
+    const saveDir = process.env.SAVE_DIR || path.join(__dirname, '..', 'saves');
+    let tls = null;
+    if (lan) {
+        tls = loadTlsCredentials(path.join(__dirname, '..', '.tls'));
+        if (!tls) {
+            console.warn('openssl was not found, so the LAN server uses plain HTTP. Other devices\n' +
+                'cannot run the emulator over HTTP; set TLS_CERT and TLS_KEY to serve HTTPS.');
+        }
+    }
+    listen(port, host, {saveDir, tls}).then(server => {
         const address = server.address();
-        console.log(`Azahar web server: http://${address.address}:${address.port}/`);
+        const scheme = tls ? 'https' : 'http';
+        const shown = address.address === '0.0.0.0' ? 'localhost' : address.address;
+        console.log(`Azahar web server: ${scheme}://${shown}:${address.port}/`);
+        if (address.address === '0.0.0.0') {
+            for (const lanAddress of lanAddresses()) {
+                console.log(`  on your network: ${scheme}://${lanAddress}:${address.port}/`);
+            }
+        }
+        console.log(`Shared save states: ${path.resolve(saveDir)}`);
     }).catch(error => {
         console.error(error.stack || error);
         process.exitCode = 1;
