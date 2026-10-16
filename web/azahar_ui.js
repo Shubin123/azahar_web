@@ -149,17 +149,34 @@
     let stepWorkFrames = 0;
     // Fits each callback's emulation to the display's refresh period. When the core
     // uses its whole budget (the scene is CPU-bound), the budget grows until the
-    // callback nearly fills one refresh: a fixed 14 ms left ~15% of a 60 Hz frame
-    // idle. It shrinks again (to no less than 14 ms) when a callback would run into
-    // the next refresh.
-    // High-refresh displays keep the fixed budget unless `?frameBudget=adaptive`;
-    // `?frameBudget=fixed` keeps 14 ms everywhere.
+    // callback nearly fills its refreshes: a fixed 14 ms left ~15% of a 60 Hz frame
+    // idle. It shrinks again when a callback would run into the next refresh.
+    // High-refresh displays (120 Hz and up) get one callback per refresh, so the
+    // page presents at the display's rate. A scene that cannot keep full speed that
+    // way spans 1/60 s of refreshes per callback instead: each callback has fixed
+    // presentation costs, and the game itself never draws more than 60 frames/s.
+    // Single refreshes are retried later, waiting longer after each failed retry.
+    // `?frameBudget=refresh` always uses one refresh, `?frameBudget=60hz` always
+    // spans 1/60 s, and `?frameBudget=fixed` keeps 14 ms everywhere.
     const FRAME_BUDGET_MARGIN_MS = 1.5;
+    // A callback this short ends before the next refresh even at 240 Hz, so the gap
+    // after it is one refresh period. Without these probes a CPU-bound scene on a
+    // 120 Hz display would only ever show 16.7 ms gaps and look like a 60 Hz one.
+    const FRAME_BUDGET_PROBE_MS = 1;
+    const FRAME_BUDGET_PROBE_EVERY = 600;
+    // Guest speed is measured over this window; below SLOW twice in a row is slow.
+    const FRAME_BUDGET_SPEED_WINDOW_MS = 1000;
+    const FRAME_BUDGET_SLOW = 0.95;
+    // A spanned scene first retries single refreshes after this long.
+    const FRAME_BUDGET_RETRY_MS = 3000;
     const frameBudgetMode = new URLSearchParams(location.search).get('frameBudget');
     const frameBudget = {
         enabled: frameBudgetMode !== 'fixed',
-        highRefresh: frameBudgetMode === 'adaptive',
+        span: frameBudgetMode === 'refresh' || frameBudgetMode === '60hz' ? frameBudgetMode : 'auto',
         budgetMs: 14, appliedMs: 14, lastAt: 0, intervals: [], periodMs: 1000 / 60, refreshes: 0,
+        callbacks: 0, probeStage: 0, probeGapMs: Infinity,
+        spanned: false, spanChangedAt: 0, retryMs: FRAME_BUDGET_RETRY_MS, overheadMs: 0,
+        speedBuffer: 0, speedAt: 0, speedGuestUs: 0, speed: 1, slowWindows: 0,
     };
     let gameGraphicsAt = 0;
     let saveStateStore = null;
@@ -1575,42 +1592,102 @@ void main() { frag_color = vec4(1.0); }`);
         }
     }
 
+    // Updates `frameBudget.speed`, guest time per wall time relative to the
+    // selected fast-forward, once per window. Returns whether it did.
+    function sampleGuestSpeed(now) {
+        const fb = frameBudget;
+        if (fb.speedAt && now - fb.speedAt < FRAME_BUDGET_SPEED_WINDOW_MS) return false;
+        if (!fb.speedBuffer) fb.speedBuffer = wasmModule._malloc(11 * 8);
+        if (wasmModule._azahar_get_perf_stats(fb.speedBuffer, 11) !== 0) return false;
+        const stats = new Float64Array(wasmModule.HEAPU8.buffer, fb.speedBuffer, 11);
+        const guestUs = stats[10];
+        const multiplier = stats[9] || 1;
+        const wallMs = now - fb.speedAt;
+        const guestDeltaUs = guestUs - fb.speedGuestUs;
+        const valid = fb.speedAt && guestDeltaUs >= 0 && wallMs < FRAME_BUDGET_SPEED_WINDOW_MS * 1.5;
+        fb.speedAt = now;
+        fb.speedGuestUs = guestUs;
+        // Paused or held windows (Local Play waits, hidden tabs) say nothing.
+        if (!valid) return false;
+        fb.speed = guestDeltaUs / (wallMs * 1000 * multiplier);
+        fb.slowWindows = fb.speed < FRAME_BUDGET_SLOW ? fb.slowWindows + 1 : 0;
+        return true;
+    }
+
     // Called after every emulated callback. `stepMs` is the core's share and
     // `totalMs` the whole callback, including presentation and page work.
     function tuneFrameBudget(now, stepMs, totalMs) {
         if (!frameBudget.enabled || !wasmModule._azahar_set_work_budget_ms) return;
+        const fb = frameBudget;
         // Callbacks start on refreshes, so the shortest recent gap is the refresh period.
-        if (frameBudget.lastAt) {
-            frameBudget.intervals.push(now - frameBudget.lastAt);
-            if (frameBudget.intervals.length > 120) frameBudget.intervals.shift();
-            frameBudget.periodMs = Math.max(2, Math.min(...frameBudget.intervals));
+        if (fb.lastAt) {
+            const gap = now - fb.lastAt;
+            // The previous callback was a probe, so this gap is a single refresh.
+            if (fb.probeStage === 2) fb.probeGapMs = gap;
+            fb.intervals.push(gap);
+            if (fb.intervals.length > 120) fb.intervals.shift();
+            fb.periodMs = Math.max(2, Math.min(fb.probeGapMs, ...fb.intervals));
         }
-        frameBudget.lastAt = now;
-        if (frameBudget.intervals.length < 30) return;
-        const period = frameBudget.periodMs;
-        let budget = 14;
-        if (period >= 12 || frameBudget.highRefresh) {
-            // Span about 1/60 s of refreshes and finish a little before the last one,
-            // never giving the core less than half of that span.
-            const refreshes = frameBudget.refreshes = Math.max(1, Math.round((1000 / 60) / period));
-            const targetMs = refreshes * period - FRAME_BUDGET_MARGIN_MS;
-            budget = frameBudget.budgetMs;
-            if (totalMs > targetMs) {
-                budget -= Math.min(4, (totalMs - targetMs) * 0.5);
-            } else if (stepMs >= budget - 0.5) {
-                // Grow only while the core used its whole budget; finishing early means
-                // game speed, not the budget, limited it.
-                budget += Math.min(0.5, (targetMs - totalMs) * 0.25);
+        fb.lastAt = now;
+        fb.callbacks++;
+        const wasProbe = fb.probeStage === 1;
+        fb.probeStage = wasProbe ? 2 : 0;
+        if (fb.callbacks === 1 || fb.callbacks === 15 || fb.callbacks % FRAME_BUDGET_PROBE_EVERY === 0) {
+            fb.probeStage = 1;
+            fb.appliedMs = wasmModule._azahar_set_work_budget_ms(FRAME_BUDGET_PROBE_MS);
+            return;
+        }
+        // A probe's timings say nothing about the scene; restore the budget after it.
+        if (wasProbe) {
+            fb.appliedMs = wasmModule._azahar_set_work_budget_ms(fb.budgetMs);
+            return;
+        }
+        if (fb.intervals.length < 30) return;
+        const period = fb.periodMs;
+        const highRefresh = period < 12;
+        const spanRefreshes = Math.max(1, Math.round((1000 / 60) / period));
+        const saturated = stepMs >= fb.budgetMs - 0.5;
+        fb.overheadMs += (Math.max(0, totalMs - stepMs) - fb.overheadMs) * 0.05;
+        let spanned = fb.span === '60hz' || (fb.span === 'auto' && fb.spanned);
+        if (highRefresh && fb.span === 'auto' && sampleGuestSpeed(now)) {
+            const sinceChange = now - fb.spanChangedAt;
+            if (!spanned && fb.slowWindows >= 2) {
+                // A retry that failed quickly waits twice as long before the next one.
+                fb.retryMs = sinceChange < fb.retryMs + 5000 ? Math.min(60000, fb.retryMs * 2)
+                    : FRAME_BUDGET_RETRY_MS;
+                spanned = true;
+            } else if (spanned && sinceChange >= fb.retryMs && fb.speed >= 0.98) {
+                spanned = false;
             }
-            // At 60 Hz never go below the fixed budget: where presenting is expensive
-            // (the software renderer) callbacks overrun a refresh anyway, and a smaller
-            // budget only did less work per frame (Mario Kart 7 fell from 51% to 44%).
-            const floor = period >= 12 ? 14 : refreshes * period * 0.5;
-            budget = Math.min(30, Math.max(floor, budget));
         }
-        frameBudget.budgetMs = budget;
-        if (Math.abs(budget - frameBudget.appliedMs) >= 0.25) {
-            frameBudget.appliedMs = wasmModule._azahar_set_work_budget_ms(budget);
+        const refreshes = highRefresh && spanned ? spanRefreshes : 1;
+        if (refreshes !== fb.refreshes) {
+            if (fb.refreshes) fb.spanChangedAt = now;
+            fb.refreshes = refreshes;
+            fb.spanned = refreshes > 1;
+            fb.slowWindows = 0;
+            // Start the new span from what fits rather than the old span's budget.
+            fb.budgetMs = Math.max(2, refreshes * period - FRAME_BUDGET_MARGIN_MS - fb.overheadMs);
+        }
+        // Finish a little before the last refresh of the span.
+        const targetMs = refreshes * period - FRAME_BUDGET_MARGIN_MS;
+        let budget = fb.budgetMs;
+        if (totalMs > targetMs) {
+            budget -= Math.min(4, (totalMs - targetMs) * 0.5);
+        } else if (saturated) {
+            // Grow only while the core used its whole budget; finishing early means
+            // game speed, not the budget, limited it.
+            budget += Math.min(0.5, (targetMs - totalMs) * 0.25);
+        }
+        // At 60 Hz never go below the fixed budget: where presenting is expensive
+        // (the software renderer) callbacks overrun a refresh anyway, and a smaller
+        // budget only did less work per frame (Mario Kart 7 fell from 51% to 44%).
+        // Elsewhere never give the core less than half of the span.
+        const floor = highRefresh ? refreshes * period * 0.5 : 14;
+        budget = Math.min(30, Math.max(floor, budget));
+        fb.budgetMs = budget;
+        if (Math.abs(budget - fb.appliedMs) >= 0.25) {
+            fb.appliedMs = wasmModule._azahar_set_work_budget_ms(budget);
         }
     }
 
@@ -1674,6 +1751,7 @@ void main() { frag_color = vec4(1.0); }`);
                         }
                         if (displayFps > 0) {
                             const fpsText = gameFps.toFixed(0) + ' game FPS' +
+                                ' | ' + displayFps.toFixed(0) + ' display FPS' +
                                 (emulationSpeed > 0 ? ' | ' + emulationSpeed.toFixed(0) + '% speed' : '');
                             if (fpsEl.textContent !== fpsText) fpsEl.textContent = fpsText;
                         }
@@ -1896,7 +1974,8 @@ void main() { frag_color = vec4(1.0); }`);
         getCpuClock: () => ({ enabled: cpuClock.enabled, percent: cpuClock.percent,
             changes: cpuClock.changes, refFps: cpuClock.refFps }),
         getFrameBudget: () => ({ enabled: frameBudget.enabled, periodMs: frameBudget.periodMs,
-            budgetMs: frameBudget.appliedMs, refreshes: frameBudget.refreshes }),
+            budgetMs: frameBudget.appliedMs, refreshes: frameBudget.refreshes,
+            span: frameBudget.span, speed: frameBudget.speed }),
     };
 
     // ── Auto-init on page load ───────────────────────────────────

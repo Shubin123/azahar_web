@@ -766,6 +766,33 @@ Findings:
   ends before the next refresh (Fire Emblem's intro movie: 31.5% to 33.4%); it never
   goes below 14 ms, which made the software renderer slower.
 
+## High-refresh displays (2026-10-16)
+
+On 120 Hz screens the page used a fixed 14 ms budget per callback, longer than a
+refresh, so a busy scene presented at 60 FPS or less. Callbacks now fit one refresh
+(about 6.8 ms at 120 Hz) and the page presents at the display's rate. A scene that
+cannot keep full speed that way (measured from guest time) spans 1/60 s of refreshes
+per callback again, because each callback has fixed presentation costs, and the game
+never draws more than 60 frames/s; single refreshes are retried after 3 s, then
+6, 12... up to 60 s. Short probe callbacks every 600 callbacks find the true refresh
+period: under load the old estimate read a 120 Hz display as 40 Hz and a 60 Hz one
+as 30 Hz.
+
+Mario Kart 7 cold boot, `tests/perf_probe.cjs --vsync-hz 120`, CPU slowed with
+`--cpu-throttle` (the vsync shim now polls with posted messages; with animation
+frames it reached only every other 120 Hz refresh):
+
+| CPU slowdown | before: callbacks/s, game FPS | after |
+| --- | --- | --- |
+| none | 118.8, 54.3 | 119.6, 54.3 |
+| 5x | 94.5, 52.6 | 102.5, 52.2 |
+| 7x | 56.9, 49.6 | 59.8 (spans 2 refreshes), 48.6 |
+| 7x at 60 Hz | 31.4, 41.6 | 37.7, 38.8 |
+
+`?frameBudget=refresh` forces one refresh per callback (7x: 60 callbacks/s and 34
+game FPS, so not the default), `?frameBudget=60hz` always spans 1/60 s, and
+`?frameBudget=fixed` keeps 14 ms.
+
 ## Fire Emblem: Awakening and the adaptive CPU clock (2026-10-07)
 
 Scenes: avatar creation and the prologue map ran at 100% (60 FPS on the map). The

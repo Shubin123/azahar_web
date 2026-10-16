@@ -4,11 +4,13 @@
 //
 //   node tests/perf_probe.cjs --rom ROM --state STATE.cst [--seconds 20]
 //        [--warmup 5] [--query "hwShader=1"] [--uncapped | --vsync-hz 144] [--gpu]
-//        [--label NAME] [--output FILE.jsonl] [--speed 1-4]
+//        [--label NAME] [--output FILE.jsonl] [--speed 1-4] [--cpu-throttle N]
 //
 // --uncapped removes Chrome's vsync cap. --vsync-hz N instead starts every
 // callback on the next N Hz refresh, like a real high-refresh display: a
 // callback that overruns a refresh waits for the following one.
+// --cpu-throttle N slows the page's CPU N times once the game runs, to measure
+// CPU-bound play on a fast machine.
 const fs = require('node:fs');
 const path = require('node:path');
 const cfg = require('./config.cjs');
@@ -27,6 +29,7 @@ const vsyncHz = Number(cfg.argVal('--vsync-hz', '0'));
 // --speed N fast-forwards the measured window, so a scene that already reaches
 // 100% at 1x still shows how much headroom a change bought.
 const speed = Number(cfg.argVal('--speed', '1'));
+const cpuThrottle = Number(cfg.argVal('--cpu-throttle', '0'));
 const gpu = process.argv.includes('--gpu') || process.env.AZAHAR_FIXTURE_GPU === '1';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -55,6 +58,10 @@ async function main() {
             await restoreState(page, state);
             await sleep(warmup * 1000);
         }
+        if (cpuThrottle > 1) {
+            const cdp = await page.target().createCDPSession();
+            await cdp.send('Emulation.setCPUThrottlingRate', { rate: cpuThrottle });
+        }
         await page.evaluate(vsyncHz => {
             const probe = window.__perfProbe = { durations: [], speeds: [], fps: [], start: performance.now() };
             const request = AzaharScheduler.request.bind(AzaharScheduler);
@@ -66,17 +73,25 @@ async function main() {
             if (vsyncHz > 0) {
                 // Chrome runs uncapped here; skip animation frames until the next refresh
                 // boundary, so presentation still follows each callback as it would.
+                // Poll with posted messages: headless animation frames arrive at most
+                // ~110 times a second, so polling with them lands on every other
+                // 120 Hz refresh.
                 const period = 1000 / vsyncHz;
                 const origin = performance.now();
+                const channel = new MessageChannel();
+                let pending = null;
+                channel.port1.onmessage = () => pending?.();
                 AzaharScheduler.request = callback => {
                     const run = measured(callback);
                     const at = origin + (Math.floor((performance.now() - origin) / period) + 1) * period;
-                    const poll = () => {
+                    pending = () => {
                         const now = performance.now();
-                        if (now < at) return request(poll);
+                        if (now < at) return channel.port2.postMessage(0);
+                        pending = null;
                         run(origin + Math.floor((now - origin) / period) * period);
                     };
-                    return request(poll);
+                    channel.port2.postMessage(0);
+                    return 0;
                 };
             } else {
                 AzaharScheduler.request = callback => request(measured(callback));
@@ -154,7 +169,7 @@ async function main() {
             };
         });
         const round = value => typeof value === 'number' ? Number(value.toFixed(1)) : value;
-        const output = { label, query, speed, uncapped, vsyncHz, gpu, ...result,
+        const output = { label, query, speed, uncapped, vsyncHz, cpuThrottle, gpu, ...result,
             callbackMs: Object.fromEntries(Object.entries(result.callbackMs).map(([k, v]) => [k, round(v)])),
             callbacksPerSecond: round(result.callbacksPerSecond), speedPercent: round(result.speedPercent),
             gameFps: round(result.gameFps), errors };
