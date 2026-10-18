@@ -37,7 +37,8 @@ avoid the warning, pass a trusted certificate, e.g. from
 Save states are then shared between every browser that opens the page from
 this server. Each browser still keeps its own copy and syncs with the server
 on startup, after every save or delete, when the tab comes back into view, and
-every 20 seconds; the newest change to a slot wins, and deleting a slot deletes
+every 20 seconds. Use **Sync LAN saves** in the Saves panel to transfer changes
+immediately. The newest change to a slot wins, and deleting a slot deletes
 it everywhere. The server stores them in `saves/` (override with `SAVE_DIR`).
 Pages opened from a static host such as GitHub Pages keep saves in that
 browser only. Games' own in-game saves are not persisted yet; use save states.

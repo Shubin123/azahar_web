@@ -195,7 +195,8 @@ function createLanSaveStore(directory) {
             }
             await exclusive(key, async () => {
                 const current = await readRecord(files.record);
-                if (current && !current.deleted && current.savedAt > deletedAt) {
+                const currentTime = current && (current.deleted ? current.deletedAt : current.savedAt);
+                if (currentTime && currentTime > deletedAt) {
                     sendJson(response, 409, headers, {error: 'A newer save exists', current});
                     return;
                 }

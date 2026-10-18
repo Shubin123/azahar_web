@@ -183,6 +183,8 @@
     let saveStateBusy = false;
     let lanSaveSync = null;
     let lanSyncStatus = '';
+    let lanSyncBusy = false;
+    const btnSyncLanSaves = document.getElementById('btn-sync-lan-saves');
     let currentProgramId = '';
     const saveStateDirectory = '/home/web_user/.local/share/azahar-emu/states';
     const resolutionQuery = new URLSearchParams(location.search).get('resolution');
@@ -535,6 +537,7 @@
     }
 
     function updateSaveControls() {
+        if (btnSyncLanSaves) btnSyncLanSaves.disabled = saveStateBusy || lanSyncBusy;
         if (btnSaveState) btnSaveState.disabled = saveStateBusy || !romLoaded ||
             !currentProgramId || !saveStateStore;
         if (!saveStateList) return;
@@ -618,7 +621,9 @@
     async function syncLanSaves() {
         // Never swap records underneath a save or load in progress; the
         // operation itself triggers a sync when it finishes.
-        if (!lanSaveSync || saveStateBusy) return;
+        if (!lanSaveSync || saveStateBusy || lanSyncBusy) return;
+        lanSyncBusy = true;
+        updateSaveControls();
         try {
             const result = await lanSaveSync.sync();
             const time = new Date().toLocaleTimeString();
@@ -630,6 +635,9 @@
             if (changes.length) log(`Network save sync: ${changes.join(', ')}.`);
         } catch (error) {
             lanSyncStatus = `Network sync failed: ${error.message}.`;
+        } finally {
+            lanSyncBusy = false;
+            updateSaveControls();
         }
         await refreshSaveStateList();
     }
@@ -638,6 +646,7 @@
         if (!window.AzaharLanSaveSync) return;
         lanSaveSync = await window.AzaharLanSaveSync.connect(saveStateStore);
         if (!lanSaveSync) return;
+        if (btnSyncLanSaves) btnSyncLanSaves.hidden = false;
         const help = document.getElementById('save-state-help');
         if (help) {
             help.textContent = 'Saves are compressed by Azahar and shared with every browser that opens ' +
@@ -800,6 +809,7 @@
         void syncLanSaves();
     }
 
+    btnSyncLanSaves?.addEventListener('click', () => void syncLanSaves());
     btnSaveState?.addEventListener('click', () => void saveCurrentState());
     saveStateList?.addEventListener('click', event => {
         const button = event.target.closest('button[data-action]');

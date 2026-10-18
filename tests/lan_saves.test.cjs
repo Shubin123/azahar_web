@@ -103,6 +103,17 @@ function loadSyncClass(origin) {
         assert.deepEqual({...await b.sync()}, {uploaded: 0, downloaded: 0, deleted: 1});
         assert.equal(await storeB.get(`${PROGRAM_ID}:1`), undefined);
 
+        // An older deletion must not roll back the tombstone and allow an
+        // offline save predating the latest deletion to resurrect the slot.
+        const staleDelete = await fetch(`${origin}api/saves/${PROGRAM_ID}/1`, {
+            method: 'DELETE', headers: {'X-Deleted-At': '2500'},
+        });
+        assert.equal(staleDelete.status, 409);
+        const resurrect = await fetch(`${origin}api/saves/${PROGRAM_ID}/1`, {
+            method: 'PUT', headers: {'X-Saved-At': '2800'}, body: cst(PROGRAM_ID, 0x33),
+        });
+        assert.equal(resurrect.status, 409);
+
         // Saving the slot again after the deletion brings it back everywhere.
         await storeB.save(1, 0x44, 4000);
         await b.sync();
