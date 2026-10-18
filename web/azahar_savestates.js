@@ -123,21 +123,34 @@
      * saves stay in this browser only.
      */
     class LanSaveSync {
-        constructor(store, baseUrl) {
+        constructor(store, baseUrl, isConnected = () => true) {
             this.store = store;
             this.baseUrl = baseUrl;
             this.running = null;
+            this.isConnected = isConnected;
+            this.controller = new AbortController();
         }
 
-        static async connect(store, baseUrl = 'api/saves') {
+        static async connect(store, baseUrl = 'api/saves', isConnected = () => true) {
+            if (!isConnected()) return null;
             try {
                 const response = await fetch(baseUrl, {cache: 'no-store'});
                 if (!response.ok) return null;
                 const body = await response.json();
-                return Array.isArray(body?.saves) ? new LanSaveSync(store, baseUrl) : null;
+                return isConnected() && Array.isArray(body?.saves) ? new LanSaveSync(store, baseUrl, isConnected) : null;
             } catch (_) {
                 return null;
             }
+        }
+
+        disconnect() {
+            this.controller.abort();
+        }
+
+        request(url, options = {}) {
+            if (!this.isConnected()) this.disconnect();
+            this.controller.signal.throwIfAborted();
+            return fetch(url, {...options, signal: this.controller.signal});
         }
 
         slotUrl(programId, slot) {
@@ -154,7 +167,7 @@
         }
 
         async syncOnce() {
-            const response = await fetch(this.baseUrl, {cache: 'no-store'});
+            const response = await this.request(this.baseUrl, {cache: 'no-store'});
             if (!response.ok) throw new Error(`Save server answered ${response.status}`);
             const remote = new Map((await response.json()).saves.map(record => [record.key, record]));
             const local = new Map();
@@ -164,6 +177,8 @@
             const result = {uploaded: 0, downloaded: 0, deleted: 0};
             const changeTime = record => record.deletedAt ?? record.savedAt;
             for (const key of new Set([...local.keys(), ...remote.keys()])) {
+                if (!this.isConnected()) this.disconnect();
+                this.controller.signal.throwIfAborted();
                 const mine = local.get(key);
                 const theirs = remote.get(key);
                 const mineDeleted = Boolean(mine && !mine.data);
@@ -188,7 +203,7 @@
         }
 
         async upload(record) {
-            const response = await fetch(this.slotUrl(record.programId, record.slot), {
+            const response = await this.request(this.slotUrl(record.programId, record.slot), {
                 method: 'PUT',
                 headers: {
                     'Content-Type': 'application/octet-stream',
@@ -205,7 +220,7 @@
         }
 
         async remove(tombstone) {
-            const response = await fetch(this.slotUrl(tombstone.programId, tombstone.slot), {
+            const response = await this.request(this.slotUrl(tombstone.programId, tombstone.slot), {
                 method: 'DELETE',
                 headers: {'X-Deleted-At': String(tombstone.deletedAt)},
             });
@@ -215,11 +230,13 @@
         }
 
         async download(meta) {
-            const response = await fetch(this.slotUrl(meta.programId, meta.slot), {cache: 'no-store'});
+            const response = await this.request(this.slotUrl(meta.programId, meta.slot), {cache: 'no-store'});
             // Deleted or replaced since the listing; the next pass catches up.
             if (response.status === 404) return false;
             if (!response.ok) throw new Error(`Downloading slot ${meta.slot} failed (${response.status})`);
             const data = await response.blob();
+            if (!this.isConnected()) this.disconnect();
+            this.controller.signal.throwIfAborted();
             await this.store.put({
                 key: meta.key,
                 programId: meta.programId,

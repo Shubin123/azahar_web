@@ -34,9 +34,13 @@ avoid the warning, pass a trusted certificate, e.g. from
 [mkcert](https://github.com/FiloSottile/mkcert):
 `TLS_CERT=cert.pem TLS_KEY=key.pem npm run serve:lan`.
 
-Save states are then shared between every browser that opens the page from
-this server. Each browser still keeps its own copy and syncs with the server
-on startup, after every save or delete, when the tab comes back into view, and
+Save-state sharing is available only while connected to another player in a
+public or private Local Play lobby. Browsing lobbies, creating an unanswered
+invite, and linking same-browser tabs do not enable sharing. Leaving or losing
+the connection stops transfers and hides the LAN sync button.
+
+Connected browsers keep their own copies and sync with the page server when
+Local Play connects, after every save or delete, when the tab comes into view, and
 every 20 seconds. Use **Sync LAN saves** in the Saves panel to transfer changes
 immediately. The newest change to a slot wins, and deleting a slot deletes
 it everywhere. The server stores them in `saves/` (override with `SAVE_DIR`).

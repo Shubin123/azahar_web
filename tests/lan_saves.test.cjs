@@ -51,7 +51,7 @@ class MemoryStore {
 
 function loadSyncClass(origin) {
     const context = {
-        window: {}, Blob, URL,
+        window: {}, Blob, URL, AbortController,
         fetch: (url, init) => fetch(new URL(url, origin), init),
     };
     vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../web/azahar_savestates.js'), 'utf8'), context);
@@ -69,6 +69,14 @@ function loadSyncClass(origin) {
         const unshared = loadSyncClass(`http://127.0.0.1:${plain.address().port}/`);
         assert.equal(await unshared.connect(new MemoryStore()), null,
             'A server without a save folder must leave saves browser-only');
+
+        assert.equal(await LanSaveSync.connect(new MemoryStore(), 'api/saves', () => false), null,
+            'Disconnected Local Play must not enable sharing');
+        let connected = true;
+        const gated = await LanSaveSync.connect(new MemoryStore(), 'api/saves', () => connected);
+        connected = false;
+        await assert.rejects(gated.sync(), {name: 'AbortError'},
+            'Leaving Local Play must stop subsequent transfers');
 
         const storeA = new MemoryStore();
         const storeB = new MemoryStore();

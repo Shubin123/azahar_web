@@ -621,11 +621,13 @@
     async function syncLanSaves() {
         // Never swap records underneath a save or load in progress; the
         // operation itself triggers a sync when it finishes.
-        if (!lanSaveSync || saveStateBusy || lanSyncBusy) return;
+        if (!lanSaveSync || !localPlaySaveConnected() || saveStateBusy || lanSyncBusy) return;
+        const connection = lanSaveSync;
         lanSyncBusy = true;
         updateSaveControls();
         try {
-            const result = await lanSaveSync.sync();
+            const result = await connection.sync();
+            if (connection !== lanSaveSync) return;
             const time = new Date().toLocaleTimeString();
             lanSyncStatus = `Shared on the network, synced ${time}.`;
             const changes = [];
@@ -634,7 +636,7 @@
             if (result.deleted) changes.push(`${result.deleted} deleted`);
             if (changes.length) log(`Network save sync: ${changes.join(', ')}.`);
         } catch (error) {
-            lanSyncStatus = `Network sync failed: ${error.message}.`;
+            if (connection === lanSaveSync) lanSyncStatus = `Network sync failed: ${error.message}.`;
         } finally {
             lanSyncBusy = false;
             updateSaveControls();
@@ -642,17 +644,40 @@
         await refreshSaveStateList();
     }
 
-    async function initializeLanSaveSync() {
-        if (!window.AzaharLanSaveSync) return;
-        lanSaveSync = await window.AzaharLanSaveSync.connect(saveStateStore);
-        if (!lanSaveSync) return;
+    function localPlaySaveConnected() {
+        const link = window.AzaharNetplay;
+        return (link?.mode === 'direct-host' || link?.mode === 'direct-guest') &&
+            [...link.peers.values()].some(peer => peer.channel?.readyState === 'open');
+    }
+
+    async function updateLanSaveConnection() {
+        if (!localPlaySaveConnected()) {
+            lanSaveSync?.disconnect();
+            lanSaveSync = null;
+            lanSyncStatus = '';
+            if (btnSyncLanSaves) btnSyncLanSaves.hidden = true;
+            const help = document.getElementById('save-state-help');
+            if (help) help.textContent = 'Saves stay in this browser. Connect to a public or private Local Play lobby to enable LAN save sharing.';
+            await refreshSaveStateList();
+            return;
+        }
+        if (lanSaveSync || !saveStateStore || !window.AzaharLanSaveSync) return;
+        const connection = await window.AzaharLanSaveSync.connect(saveStateStore, 'api/saves', localPlaySaveConnected);
+        if (!connection || !localPlaySaveConnected()) return;
+        lanSaveSync = connection;
         if (btnSyncLanSaves) btnSyncLanSaves.hidden = false;
         const help = document.getElementById('save-state-help');
-        if (help) {
-            help.textContent = 'Saves are compressed by Azahar and shared with every browser that opens ' +
-                'this page from the same server. Load the matching ROM before restoring.';
-        }
+        if (help) help.textContent = 'LAN save sharing is enabled while connected to Local Play. Load the matching ROM before restoring.';
         await syncLanSaves();
+    }
+
+    async function initializeLanSaveSync() {
+        const bind = () => {
+            window.AzaharNetplay?.addEventListener('change', () => void updateLanSaveConnection());
+            void updateLanSaveConnection();
+        };
+        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bind, {once: true});
+        else bind();
         window.setInterval(() => void syncLanSaves(), 20000);
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'visible') void syncLanSaves();
