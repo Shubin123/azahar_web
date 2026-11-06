@@ -18,7 +18,7 @@
  * Usage:
  *   node tests/split_screen.test.cjs
  *   node tests/split_screen.test.cjs --rom PATH [--game mario-kart-7] [--renderer webgl2|software]
- *       [--no-race] [--gpu] [--timeout SECONDS] [--web DIR]
+ *       [--no-race] [--gpu] [--timeout SECONDS] [--web DIR] [--query cpuJit=0]
  */
 'use strict';
 
@@ -289,11 +289,13 @@ async function playGame(browser, rom) {
     const game = GAMES[key];
     assert.ok(game, `no game ${key} in multiplayer_games.json`);
     const renderer = cfg.argVal('--renderer', 'webgl2');
-    const page = await openSplit(browser, `renderer=${renderer}`, rom);
+    // --query passes page options to every console (split.html hands on the ones it knows).
+    const extra = cfg.argVal('--query', '');
+    const page = await openSplit(browser, `renderer=${renderer}${extra ? `&${extra}` : ''}`, rom);
     const [host, guest] = await seatFrames(page);
     for (const frame of [host, guest]) {
-        await frame.waitForFunction(() => window.AzaharUI?.isRunning() && window.AzaharNetplay.status().joined,
-            { timeout: 180000 });
+        await frame.waitForFunction(() => window.AzaharUI?.isRunning() && window.AzaharNetplay.status().joined &&
+            window.AzaharNetplay.status().peers.some(peer => peer.mac), { timeout: 180000 });
     }
     const [hostState, guestState] = await Promise.all([host, guest].map(frame =>
         frame.evaluate(() => window.AzaharNetplay.status())));
@@ -339,6 +341,21 @@ async function playGame(browser, rom) {
                     `${Math.round(share * 100)}% of samples (${details.join(' | ')})`);
             }
         }
+    } catch (error) {
+        // What a console that stopped drawing is waiting for: each guest thread's state.
+        for (const [index, frame] of [host, guest].entries()) {
+            const threads = await frame.evaluate(() => {
+                const log = () => window.AzaharUI.getLog();
+                const before = log().length;
+                window.AzaharUI.getModule()?._azahar_debug_threads?.();
+                return log().slice(before).split('\n').filter(line => /azahar_debug_threads/.test(line) &&
+                    !/WaitArb|WaitSleep|Dormant/.test(line)).map(line => line.replace(/.*azahar_debug_threads:\d+: /, '').slice(0, 160));
+            }).catch(() => []);
+            const fps = await frame.evaluate(() => document.getElementById('fps').textContent).catch(() => '?');
+            console.log(`  Player ${index + 1} (${fps}):`);
+            for (const line of threads) console.log(`    ${line}`);
+        }
+        throw error;
     } finally {
         clearInterval(monitor);
         await screenshot('split');
