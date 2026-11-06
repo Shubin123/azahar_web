@@ -174,7 +174,7 @@
         enabled: frameBudgetMode !== 'fixed',
         span: frameBudgetMode === 'refresh' || frameBudgetMode === '60hz' ? frameBudgetMode : 'auto',
         budgetMs: 14, appliedMs: 14, lastAt: 0, intervals: [], periodMs: 1000 / 60, refreshes: 0,
-        callbacks: 0, probeStage: 0, probeGapMs: Infinity,
+        callbacks: 0, probeStage: 0, probeGapMs: Infinity, share: 1,
         spanned: false, spanChangedAt: 0, retryMs: FRAME_BUDGET_RETRY_MS, overheadMs: 0,
         speedBuffer: 0, speedAt: 0, speedGuestUs: 0, speed: 1, slowWindows: 0,
     };
@@ -1654,6 +1654,13 @@ void main() { frag_color = vec4(1.0); }`);
     function tuneFrameBudget(now, stepMs, totalMs) {
         if (!frameBudget.enabled || !wasmModule._azahar_set_work_budget_ms) return;
         const fb = frameBudget;
+        // Consoles sharing one page (split.html) also share its main thread: each may
+        // fill only its share of a refresh, which that page keeps adjusting.
+        const share = window.AzaharSplitSeat?.budgetShare() ?? 1;
+        if (share !== fb.share) {
+            fb.budgetMs = Math.max(2, fb.budgetMs * share / fb.share);
+            fb.share = share;
+        }
         // Callbacks start on refreshes, so the shortest recent gap is the refresh period.
         if (fb.lastAt) {
             const gap = now - fb.lastAt;
@@ -1677,7 +1684,12 @@ void main() { frag_color = vec4(1.0); }`);
             fb.appliedMs = wasmModule._azahar_set_work_budget_ms(fb.budgetMs);
             return;
         }
-        if (fb.intervals.length < 30) return;
+        if (fb.intervals.length < 30) {
+            if (Math.abs(fb.budgetMs - fb.appliedMs) >= 0.25) {
+                fb.appliedMs = wasmModule._azahar_set_work_budget_ms(fb.budgetMs);
+            }
+            return;
+        }
         const period = fb.periodMs;
         const highRefresh = period < 12;
         const spanRefreshes = Math.max(1, Math.round((1000 / 60) / period));
@@ -1702,10 +1714,10 @@ void main() { frag_color = vec4(1.0); }`);
             fb.spanned = refreshes > 1;
             fb.slowWindows = 0;
             // Start the new span from what fits rather than the old span's budget.
-            fb.budgetMs = Math.max(2, refreshes * period - FRAME_BUDGET_MARGIN_MS - fb.overheadMs);
+            fb.budgetMs = Math.max(2, (refreshes * period - FRAME_BUDGET_MARGIN_MS) * share - fb.overheadMs);
         }
         // Finish a little before the last refresh of the span.
-        const targetMs = refreshes * period - FRAME_BUDGET_MARGIN_MS;
+        const targetMs = (refreshes * period - FRAME_BUDGET_MARGIN_MS) * share;
         let budget = fb.budgetMs;
         if (totalMs > targetMs) {
             budget -= Math.min(4, (totalMs - targetMs) * 0.5);
@@ -1718,7 +1730,7 @@ void main() { frag_color = vec4(1.0); }`);
         // (the software renderer) callbacks overrun a refresh anyway, and a smaller
         // budget only did less work per frame (Mario Kart 7 fell from 51% to 44%).
         // Elsewhere never give the core less than half of the span.
-        const floor = highRefresh ? refreshes * period * 0.5 : 14;
+        const floor = (highRefresh ? refreshes * period * 0.5 : 14) * share;
         budget = Math.min(30, Math.max(floor, budget));
         fb.budgetMs = budget;
         if (Math.abs(budget - fb.appliedMs) >= 0.25) {
@@ -1746,6 +1758,8 @@ void main() { frag_color = vec4(1.0); }`);
 
         function tick(now) {
             if (!running) return;
+            // Frames other consoles on this device sent during their own steps.
+            window.AzaharNetplay?.pump?.();
             // Local Play keeps linked consoles' game clocks together; a console that
             // has run ahead waits here for the others.
             if (window.AzaharNetplay?.shouldHold?.()) {
@@ -1796,6 +1810,7 @@ void main() { frag_color = vec4(1.0); }`);
                         stepWorkFrames = 0;
                     }
                     tuneFrameBudget(now, stepMs, performance.now() - callbackStartedAt);
+                    window.AzaharSplitSeat?.report(stepMs, frameBudget);
                     runAnimationFrame = AzaharScheduler.request(tick);
                 } else if (result === 1) {
                     log('Emulation ended.');
@@ -2006,6 +2021,9 @@ void main() { frag_color = vec4(1.0); }`);
         },
         getCanvas: () => canvas,
         getModule: () => (initialized ? wasmModule : null),
+        // The current game as another session can reopen it: a library URL or a picked file.
+        getPlayableSource: () => ({ url: romRecoveryUrl, file: romRecoveryFile, name: romName,
+            renderer: isWebGL2Artifact ? 'webgl2' : 'software' }),
         getCpuClock: () => ({ enabled: cpuClock.enabled, percent: cpuClock.percent,
             changes: cpuClock.changes, refFps: cpuClock.refFps }),
         getFrameBudget: () => ({ enabled: frameBudget.enabled, periodMs: frameBudget.periodMs,

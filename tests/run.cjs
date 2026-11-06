@@ -16,7 +16,7 @@
  *   node tests/run.cjs --library            # Library catalog, cache, and replay flows
  *   node tests/run.cjs --input              # Keymap menu and input bindings
  *   node tests/run.cjs --audio              # Game audio, Audio widget, pacing, resampling
- *   node tests/run.cjs --local-play         # Local Play links between tabs and browsers (no ROM)
+ *   node tests/run.cjs --local-play         # Local Play links between tabs, browsers and split.html (no ROM)
  *   node tests/run.cjs --multiplayer        # Games' local wireless between two browsers (lobby fixtures)
  *   node tests/run.cjs --pokemon            # Pokemon X opening: 3D stripe artifact, run errors (~5 min)
  *   node tests/run.cjs --parity             # WebGL2 vs software scene content on title screens (~25 min)
@@ -259,6 +259,7 @@ if (runLocalPlay || runMultiplayer) {
     if (runLocalPlay) {
       run('Local Play', path.join(TESTS_DIR, 'local_play.test.cjs'), [], { timeout: 300000 });
       run('Public lobbies', path.join(TESTS_DIR, 'public_lobbies.test.cjs'), [], { timeout: 600000 });
+      run('Local Play on one device', path.join(TESTS_DIR, 'split_screen.test.cjs'), [], { timeout: 600000 });
     }
     if (runMultiplayer) {
       // Links two consoles running a real title, then plays each game whose

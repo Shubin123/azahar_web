@@ -5,6 +5,23 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>Azahar Web — Nintendo 3DS Emulator</title>
+    <script>
+        // split.html runs each console in a frame of this page (?seat=N); only its screen shows.
+        if (new URLSearchParams(location.search).has('seat') && window.parent !== window) {
+            document.documentElement.classList.add('split-seat');
+            // The engine sizes its worker pools from the processor count. Give each of the
+            // page's ?seats=N consoles its share (one core stays with the shared main
+            // thread), so their spinning raster workers do not compete for every core.
+            // ?cores=N sets the count directly.
+            const query = new URLSearchParams(location.search);
+            const seats = Number(query.get('seats')) || 2;
+            const cores = Number(query.get('cores')) ||
+                Math.max(2, Math.floor(((navigator.hardwareConcurrency || 4) - 1) / seats));
+            try {
+                Object.defineProperty(navigator, 'hardwareConcurrency', {value: cores, configurable: true});
+            } catch (_) { /* keep the real count */ }
+        }
+    </script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
@@ -1114,6 +1131,26 @@
         @media (max-width: 460px) {
             .canvas-panel { min-width: 0; }
         }
+        /* One console of split.html: the screen fills the frame, everything else is hidden. */
+        html.split-seat body { padding: 0; min-height: 0; height: 100vh; overflow: hidden; display: block; background: #000; }
+        html.split-seat body::before,
+        html.split-seat header,
+        html.split-seat .layout-menu,
+        html.split-seat .layout-menu-backdrop,
+        html.split-seat .controls-panel,
+        html.split-seat .library-section,
+        html.split-seat .canvas-panel > p,
+        html.split-seat .stage-fullscreen-btn,
+        html.split-seat .touch-controls { display: none !important; }
+        html.split-seat .main-layout { display: block; max-width: none; }
+        html.split-seat .canvas-panel {
+            max-width: none; min-width: 0; width: 100%; height: 100vh;
+            display: flex; align-items: center; justify-content: center;
+        }
+        html.split-seat .screen-stage canvas {
+            width: min(100vw, calc(100vh * 400 / 480)); height: auto; max-height: none;
+            aspect-ratio: 400 / 480; border: 0; border-radius: 0; box-shadow: none;
+        }
     </style>
 </head>
 <body>
@@ -1323,6 +1360,9 @@
                 <textarea id="local-play-code-in" class="renderer-select"
                           placeholder="Paste an invite (to join) or a reply (as host)" aria-label="Code received"></textarea>
                 <button type="button" class="btn btn-success" id="btn-local-play-accept">Use pasted code</button>
+                <button type="button" class="btn btn-secondary" id="btn-local-play-device"
+                        title="Open a screen per player in this browser, linked through shared memory">
+                    👥 Play together on this device</button>
                 <div id="local-play-status" class="mode-help" aria-live="polite">Not linked.</div>
                 <ul id="local-play-peers"></ul>
                 <label class="mode-help audio-toggle">
@@ -1508,7 +1548,9 @@
     <script src="azahar_fullscreen.js"></script>
     <script src="azahar_touch_controls.js"></script>
     <script src="azahar_library.js"></script>
+    <script src="azahar_shared_link.js"></script>
     <script src="azahar_netplay.js"></script>
+    <script src="azahar_split_seat.js"></script>
     <script src="azahar_lobbies.js"></script>
     <script src="azahar_layout.js"></script>
     <script>

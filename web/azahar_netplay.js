@@ -2,8 +2,10 @@
 //
 // The engine's UDS service hands every 802.11 frame it transmits to
 // Module.azaharNetSend; frames from peers go back in via _azahar_net_receive.
-// This file only moves those bytes. Two transports carry them:
+// This file only moves those bytes. Three transports carry them:
 //   - "tabs":   BroadcastChannel between tabs of one browser profile. No setup.
+//   - "shared": rings in one SharedArrayBuffer between the consoles of
+//               split.html, which runs several consoles on one device.
 //   - "direct": WebRTC data channels. Peers swap invite/reply codes by any
 //               means (chat, email) instead of through a signalling server.
 // A direct-link host relays frames between its guests (star topology), so
@@ -122,7 +124,7 @@
             this.id = randomId();
             this.mac = null;           // the console's MAC address while joined
             this.name = 'Player';
-            this.mode = null;          // null, 'tabs', 'direct-host' or 'direct-guest'
+            this.mode = null;          // null, 'tabs', 'shared', 'direct-host' or 'direct-guest'
             this.joined = false;       // the engine is attached to the link
             this.crossVersion = true;
             this.useStun = true;
@@ -131,6 +133,9 @@
             // received counts frames off the wire; delivered counts frames handed to the engine.
             this.stats = {sent: 0, received: 0, delivered: 0, relayed: 0};
             this.channel = null;       // BroadcastChannel in tabs mode
+            this.shared = null;        // AzaharSharedLink endpoint in shared mode
+            this.deliverBuffer = 0;    // engine memory reused for delivered frames
+            this.deliverCapacity = 0;
             // Simulated network faults for testing: see setNetsim().
             this.netsim = parseNetsim(new URLSearchParams(location.search).get('netsim'));
             this.netsimStats = {dropped: 0, delayed: 0, retransmitted: 0};
@@ -153,11 +158,21 @@
             }
         }
 
+        // Queues a control message on the shared link, for one console or all.
+        sendShared(message, seat = -1) {
+            const bytes = new TextEncoder().encode(JSON.stringify(message));
+            this.transmit(() => this.shared?.send(window.AzaharSharedLink.KIND_CONTROL, bytes, seat));
+        }
+
         sendControl(message) {
             const text = JSON.stringify({...message, from: this.id});
             // Control messages share the link with frames, so simulated delays apply to both.
             if (this.mode === 'tabs') {
                 this.transmit(() => this.channel?.postMessage({...message, from: this.id}));
+                return;
+            }
+            if (this.mode === 'shared') {
+                this.sendShared({...message, from: this.id});
                 return;
             }
             for (const peer of this.peers.values()) {
@@ -173,6 +188,8 @@
             if (!peer) return;
             if (this.mode === 'tabs') {
                 this.transmit(() => this.channel?.postMessage({...message, from: this.id, to: peerKey}));
+            } else if (this.mode === 'shared') {
+                this.sendShared({...message, from: this.id, to: peerKey}, peer.seat ?? -1);
             } else {
                 const text = JSON.stringify({...message, from: this.id});
                 this.transmit(() => {
@@ -514,6 +531,10 @@
                 this.channel.postMessage(this.hello());
                 return;
             }
+            if (this.mode === 'shared') {
+                this.sendShared(this.hello());
+                return;
+            }
             const text = JSON.stringify(this.hello());
             for (const peer of this.peers.values()) {
                 if (peer.channel?.readyState === 'open') peer.channel.send(text);
@@ -542,20 +563,25 @@
             this.stats.received++;
             const module = this.module();
             if (!this.joined || !module) return;
-            const pointer = module._malloc(bytes.length);
-            try {
-                module.HEAPU8.set(bytes, pointer);
-                module._azahar_net_receive(pointer, bytes.length);
-                this.stats.delivered++;
-            } finally {
-                module._free(pointer);
+            // The engine copies the frame, so one buffer serves every delivery.
+            if (bytes.length > this.deliverCapacity) {
+                if (this.deliverBuffer) module._free(this.deliverBuffer);
+                this.deliverCapacity = Math.max(2048, bytes.length);
+                this.deliverBuffer = module._malloc(this.deliverCapacity);
             }
+            module.HEAPU8.set(bytes, this.deliverBuffer);
+            module._azahar_net_receive(this.deliverBuffer, bytes.length);
+            this.stats.delivered++;
         }
 
         sendFrame(bytes) {
             this.stats.sent++;
             if (this.mode === 'tabs') {
                 this.transmit(() => this.channel?.postMessage({kind: 'frame', from: this.id, bytes}));
+                return;
+            }
+            if (this.mode === 'shared') {
+                this.transmit(() => this.shared?.send(window.AzaharSharedLink.KIND_FRAME, bytes));
                 return;
             }
             for (const peer of this.peers.values()) {
@@ -565,35 +591,72 @@
             }
         }
 
+        // A message on a link every console hears (tabs, shared). `seat` is the
+        // sender's console on a shared link.
+        handleRoomMessage(data, seat) {
+            if (!data || data.from === this.id) return;
+            if (data.kind === 'frame') {
+                this.deliver(data.bytes);
+            } else if (data.kind === 'hello' || data.kind === 'hello-reply') {
+                const known = this.peers.has(data.from);
+                const existing = this.peers.get(data.from);
+                this.peers.set(data.from, {...existing, name: data.name, mac: data.mac, title: data.title,
+                    key: data.from, netId: data.from, seat});
+                if (data.kind === 'hello') {
+                    const reply = {...this.hello(), kind: 'hello-reply'};
+                    if (this.mode === 'shared') this.sendShared(reply, seat);
+                    else this.channel.postMessage(reply);
+                }
+                if (!known) this.emit('peer', {id: data.from, name: data.name});
+                else this.emit('change');
+            } else if (data.kind?.startsWith('clock')) {
+                if (data.to && data.to !== this.id) return;
+                this.handleClockControl(this.peers.get(data.from), data);
+            } else if (data.kind === 'bye') {
+                this.peers.delete(data.from);
+                this.emit('peer-left', {id: data.from});
+            }
+        }
+
         // ── Same-browser tabs ────────────────────────────────────────
         linkTabs(room = 'default') {
             this.leave();
             this.mode = 'tabs';
             this.room = room;
             this.channel = new BroadcastChannel('azahar-local-play:' + room);
-            this.channel.onmessage = ({data}) => {
-                if (!data || data.from === this.id) return;
-                if (data.kind === 'frame') {
-                    this.deliver(data.bytes);
-                } else if (data.kind === 'hello' || data.kind === 'hello-reply') {
-                    const known = this.peers.has(data.from);
-                    const existing = this.peers.get(data.from);
-                    this.peers.set(data.from, {...existing, name: data.name, mac: data.mac, title: data.title,
-                        key: data.from, netId: data.from});
-                    if (data.kind === 'hello') this.channel.postMessage({...this.hello(), kind: 'hello-reply'});
-                    if (!known) this.emit('peer', {id: data.from, name: data.name});
-                    else this.emit('change');
-                } else if (data.kind?.startsWith('clock')) {
-                    if (data.to && data.to !== this.id) return;
-                    this.handleClockControl(this.peers.get(data.from), data);
-                } else if (data.kind === 'bye') {
-                    this.peers.delete(data.from);
-                    this.emit('peer-left', {id: data.from});
-                }
-            };
+            this.channel.onmessage = ({data}) => this.handleRoomMessage(data);
             this.channel.postMessage(this.hello());
             this.attach();
             this.emit('change');
+        }
+
+        // ── Consoles on one device (split.html) ──────────────────────
+        // `buffer` comes from AzaharSharedLink.create on the page that hosts
+        // every console; `seat` is this console's place on it.
+        linkShared(buffer, seat) {
+            this.leave();
+            this.shared = window.AzaharSharedLink.open(buffer, seat);
+            this.mode = 'shared';
+            // The run loop pumps before each step; this covers a console that is not running.
+            this.pumpTimer = setInterval(() => this.pump(), 50);
+            this.sendShared(this.hello());
+            this.attach();
+            this.emit('change');
+        }
+
+        // Takes what other consoles on a shared link sent. The page's run loop calls
+        // this before every emulation step, so frames reach the engine as soon as the
+        // console that sent them has finished its own step.
+        pump() {
+            if (!this.shared) return 0;
+            return this.shared.receive((kind, bytes, seat) => {
+                if (kind === window.AzaharSharedLink.KIND_FRAME) {
+                    this.deliver(bytes);
+                } else if (kind === window.AzaharSharedLink.KIND_CONTROL) {
+                    // TextDecoder refuses views of shared memory.
+                    this.handleRoomMessage(JSON.parse(new TextDecoder().decode(bytes.slice())), seat);
+                }
+            });
         }
 
         // ── Direct WebRTC link ───────────────────────────────────────
@@ -705,6 +768,12 @@
                 this.channel.postMessage({kind: 'bye', from: this.id});
                 this.channel.close();
             }
+            if (this.shared) {
+                this.shared.send(window.AzaharSharedLink.KIND_CONTROL,
+                    new TextEncoder().encode(JSON.stringify({kind: 'bye', from: this.id})));
+                clearInterval(this.pumpTimer);
+                this.shared = null;
+            }
             for (const peer of this.peers.values()) peer.channel?.close();
             for (const connection of this.pending.values()) connection.close();
             this.channel = null;
@@ -778,6 +847,23 @@
                 say('Send this reply back to the host.', 'ok');
             }
         }));
+        // Several players on one device: split.html opens a console per player and
+        // takes this page's game along through browser storage.
+        $('btn-local-play-device')?.addEventListener('click', run(async () => {
+            const destination = new URL('split.html', location.href);
+            const source = window.AzaharUI?.getPlayableSource?.() || {};
+            if (source.renderer === 'software') destination.searchParams.set('renderer', 'software');
+            if (source.url) {
+                destination.searchParams.set('play', source.url);
+            } else if (source.file && window.AzaharLibrary?.cachePlayable) {
+                say('Preparing the game for this device…');
+                const key = `local-file:${source.name}:${source.file.size}:${source.file.lastModified || 0}`;
+                if (await window.AzaharLibrary.cachePlayable(key, source.file, source.name, source.name)) {
+                    destination.searchParams.set('play', key);
+                }
+            }
+            location.assign(destination.toString());
+        }));
         $('btn-local-play-copy').addEventListener('click', run(() => navigator.clipboard.writeText(codeOut.value)));
         $('btn-local-play-leave').addEventListener('click', run(() => netplay.leave()));
 
@@ -800,10 +886,11 @@
             } else {
                 const count = state.peers.length;
                 const consoles = `${count} other console${count === 1 ? '' : 's'}`;
+                const mode = state.mode === 'shared' ? 'this device' : state.mode.replace('direct-', 'direct, ');
                 say(state.joined ?
-                    `Linked (${state.mode.replace('direct-', 'direct, ')}) as ${state.mac} — ${consoles}. ` +
+                    `Linked (${mode}) as ${state.mac} — ${consoles}. ` +
                     'Open the game\'s local wireless menu.' :
-                    `Linked (${state.mode.replace('direct-', 'direct, ')}) — ${consoles}. Start a game to play.`, 'linked');
+                    `Linked (${mode}) — ${consoles}. Start a game to play.`, 'linked');
             }
         };
         netplay.addEventListener('change', render);

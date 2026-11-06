@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <link rel="icon" type="image/svg+xml" href="./app-icon.svg">
+    <title>Azahar Web — Local Play on this device</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body { height: 100%; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #1a1a2e;
+            color: #e0e0e0;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            padding: 10px max(10px, env(safe-area-inset-right)) 10px max(10px, env(safe-area-inset-left));
+        }
+        header {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px 12px;
+            background: #16213e;
+            border: 1px solid #0f3460;
+            border-radius: 8px;
+            padding: 10px 12px;
+        }
+        header h1 { font-size: 1.05rem; color: #ff6b6b; margin-right: auto; }
+        header a { color: #89b4fa; font-size: 0.8rem; }
+        .btn {
+            padding: 7px 14px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            font-weight: 600;
+            transition: opacity 0.2s;
+        }
+        .btn:hover { opacity: 0.85; }
+        .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .btn-primary { background: #e94560; color: #fff; }
+        .btn-secondary { background: #0f3460; color: #e0e0e0; }
+        input[type="file"] { display: none; }
+        select {
+            padding: 6px;
+            border: 1px solid #0f3460;
+            border-radius: 4px;
+            background: #0a0a1a;
+            color: #e0e0e0;
+            max-width: 18em;
+        }
+        .file-label {
+            padding: 6px 12px;
+            border: 2px dashed #0f3460;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            max-width: 22em;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .file-label:hover { border-color: #e94560; }
+        .help { flex-basis: 100%; font-size: 0.72rem; color: #888; line-height: 1.35; }
+        #status { flex-basis: 100%; font-size: 0.8rem; color: #aaa; }
+        #status[data-kind="error"] { color: #ff7a8a; }
+        #status[data-kind="ok"] { color: #8fd6a6; }
+        .seats {
+            flex: 1 1 auto;
+            min-height: 0;
+            display: grid;
+            grid-template-columns: repeat(var(--columns, 2), minmax(0, 1fr));
+            grid-auto-rows: minmax(0, 1fr);
+            gap: 10px;
+        }
+        .seats:empty { display: none; }
+        /* Portrait screens stack two consoles instead of shrinking them side by side. */
+        @media (max-aspect-ratio: 1/1) {
+            .seats.seats-2 { --columns: 1; }
+        }
+        .seat {
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            background: #16213e;
+            border: 2px solid #0f3460;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .seat.has-keyboard { border-color: #e94560; }
+        .seat-bar {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 4px 10px;
+            padding: 5px 8px;
+            font-size: 0.75rem;
+            cursor: pointer;
+        }
+        .seat-name { font-weight: 700; color: #e94560; }
+        .seat-keyboard { color: #888; }
+        .seat.has-keyboard .seat-keyboard { color: #e94560; }
+        .seat-state { flex: 1 1 10em; min-width: 0; color: #aaa; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .seat-state[data-kind="error"] { color: #ff7a8a; }
+        .seat-fps { color: #8fd6a6; font-variant-numeric: tabular-nums; }
+        .seat-bar select { padding: 2px 4px; font-size: 0.72rem; }
+        .seat-bar .btn { padding: 2px 8px; font-size: 0.75rem; }
+        .seat iframe { flex: 1 1 auto; min-height: 120px; width: 100%; border: 0; background: #000; }
+        footer { font-size: 0.7rem; color: #666; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>👥 Local Play on this device</h1>
+        <a href="index.html">← Back to the emulator</a>
+        <input type="file" id="rom-file" accept=".3ds,.3dsx,.cia,.elf,.cxi,.app,.cci">
+        <label for="rom-file" class="file-label" id="rom-label">Choose a 3DS ROM file…</label>
+        <select id="stored-games" aria-label="Games stored in this browser">
+            <option value="">Games in this browser…</option>
+        </select>
+        <select id="player-count" aria-label="Players">
+            <option value="2" selected>2 players</option>
+            <option value="3">3 players</option>
+            <option value="4">4 players</option>
+        </select>
+        <select id="renderer" aria-label="Renderer">
+            <option value="webgl2">Accelerated (WebGL2)</option>
+            <option value="software">Compatibility (software)</option>
+        </select>
+        <button type="button" class="btn btn-primary" id="btn-start" disabled>Start</button>
+        <button type="button" class="btn btn-secondary" id="btn-stop" disabled>Stop</button>
+        <div id="status" aria-live="polite">Choose a game. Each player gets a screen of their own.</div>
+        <div class="help">
+            Every screen is its own console with its own address, linked to the others through memory
+            shared on this device instead of a network, so use the game's local wireless
+            (Local Play / Download Play) menus as on real consoles. Click a screen, or press Ctrl+1–4,
+            to give it the keyboard; controllers go to the players in the order they connect. All
+            consoles share this device's processor, so a demanding game runs slower than on its own.
+        </div>
+    </header>
+    <main class="seats" id="seats" aria-label="Consoles"></main>
+    <footer id="link-stats"></footer>
+
+    <template id="seat-template">
+        <section class="seat">
+            <div class="seat-bar">
+                <span class="seat-name"></span>
+                <span class="seat-keyboard" title="This screen gets the keyboard">⌨</span>
+                <span class="seat-state">Starting…</span>
+                <span class="seat-fps"></span>
+                <select class="seat-pad" aria-label="Controller">
+                    <option value="auto">Controller: next free</option>
+                    <option value="none">Controller: none</option>
+                </select>
+                <button type="button" class="btn btn-secondary seat-mute"></button>
+            </div>
+            <iframe allow="autoplay; gamepad; fullscreen"></iframe>
+        </section>
+    </template>
+
+    <script src="azahar_romfs.js"></script>
+    <script src="azahar_shared_link.js"></script>
+    <script src="azahar_split.js"></script>
+</body>
+</html>

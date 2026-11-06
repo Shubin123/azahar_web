@@ -1110,6 +1110,8 @@
 
         // Load catalog, then resume a game handed over from a previous session.
         const pendingPlay = new URLSearchParams(window.location.search).get('play');
+        // A console of split.html gets its game from that page and shows no library.
+        if (document.documentElement.classList.contains('split-seat')) return;
         if (pendingPlay) void resumePendingPlay(pendingPlay);
         else void loadCatalog();
         void renderReadyList();

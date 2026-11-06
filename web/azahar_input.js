@@ -287,6 +287,9 @@
     }
 
     function init() {
+        // A console of split.html gets its controller from that page, which hands
+        // each console its own; reading every pad here would let any pad play.
+        if (document.documentElement.classList.contains('split-seat')) return;
         document.getElementById('btn-keymap')?.addEventListener('click', openKeymap);
         document.getElementById('btn-keymap')?.insertAdjacentElement('afterend', createPadStatus());
         window.addEventListener('gamepadconnected', startPolling);
@@ -305,6 +308,8 @@
         openKeymap,
         closeKeymap,
         setSourceCodes,
+        // Keys one pad holds under the standard mapping.
+        padCodes: pad => [...readPadCodes([pad])],
         hasGamepad: () => connectedPads().length > 0,
         getPressedCodes: () => [...pressedCodes]
     };

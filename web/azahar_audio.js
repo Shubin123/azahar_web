@@ -110,7 +110,12 @@
     let ringRate = 0;
     const listeners = new Set();
 
+    // The consoles of split.html each mute on their own; that must not change the
+    // setting the main page keeps.
+    const persistSettings = !document.documentElement.classList.contains('split-seat');
+
     function saveSettings() {
+        if (!persistSettings) return;
         try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (_) { /* blocked */ }
     }
 
