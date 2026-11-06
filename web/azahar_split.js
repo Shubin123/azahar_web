@@ -23,7 +23,7 @@
     const SHARE_HEADROOM = 1.25;
     // Query options handed through to every console.
     const PASS_THROUGH = ['logFilter', 'netsim', 'pacing', 'frameBudget', 'scheduler', 'cpuClock',
-        'adaptiveClock', 'hwShader', 'resolution', 'crossVersion', 'cores'];
+        'adaptiveClock', 'hwShader', 'resolution', 'crossVersion', 'cores', 'cpuJit'];
 
     const statusEl = $('status');
     const seatsEl = $('seats');

@@ -38,6 +38,8 @@ const expectedExports = [
     'azahar_save_state',
     'azahar_shutdown',
     'azahar_step_frame',
+    'azahar_set_cpu_jit',
+    'azahar_get_cpu_jit_stats',
 ];
 
 function read(file) {

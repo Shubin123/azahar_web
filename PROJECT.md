@@ -2,7 +2,7 @@
 
 ## Architecture
 Azahar WebAssembly port targeting modern web browsers via Emscripten.
-- **CPU Subsystem**: Portable `dyncom` ARM11 C++ interpreter (JIT `dynarmic` disabled via `ARCHITECTURE=GENERIC`).
+- **CPU Subsystem**: Portable `dyncom` ARM11 C++ interpreter (JIT `dynarmic` disabled via `ARCHITECTURE=GENERIC`), with hot code compiled to WebAssembly at run time and interpreter fallback per block (`src/core/arm/dyncom/arm_dyncom_jit.*` in the engine).
 - **Graphics Subsystem**: `SwRenderer::RendererSoftware` rasterizer operating on 32-bit RGBA8 framebuffers (OpenGL & Vulkan hardware renderers disabled).
 - **Frontend / Windowing**: Adapted `citra_sdl` / `EmuWindow_SDL2_SW` presenting software framebuffers to an HTML5 `<canvas id="canvas">`.
 - **Event Loop**: Main loop unrolled into Emscripten event loop / exported C per-frame step function (`azahar_step_frame`).
@@ -45,6 +45,7 @@ Azahar WebAssembly port targeting modern web browsers via Emscripten.
 - `azahar_shutdown()`: C++ export stopping emulation and releasing frontend resources.
 - `azahar_audio_ring()`: C++ export returning the address of the game-audio ring buffer in shared WASM memory (header of u32 frames written, u32 frames read, u32 capacity, u32 sample rate; interleaved stereo s16 samples from byte 16). `azahar_step_frame()` keeps it filled; `web/azahar_audio.js` drains it from an AudioWorklet.
 - `AzaharRomFS.mount(FS, path, blob)` (`web/azahar_romfs.js`): mounts a File/Blob as a read-only MEMFS file read on demand, so multi-GiB images never occupy browser memory. Downloads and played titles are stored in the Origin Private File System.
+- `azahar_set_cpu_jit(mode)` (0 interpreter, 1 compiled code, 2 verify) switches the ARM CPU at run time and returns the mode in effect; `azahar_get_cpu_jit_stats(double* out, 13)` fills mode, compiled blocks, failed blocks, modules, compile ms, instructions run compiled, compiled runs, invalidations, verified runs, mismatches, unverifiable runs, all instructions run, and guest accesses to unmapped memory; `azahar_debug_cpu_jit()` logs which instructions most often send compiled code back to the interpreter. The page's watchdog (`web/azahar_cpu_jit.js`) uses the frame rate, guest speed and the unmapped-access count.
 - `azahar_net_join(nickname, mac)`, `azahar_net_leave()`, `azahar_net_receive(data, size)`, `azahar_net_console_mac(out)`, `azahar_net_set_cross_version(enable)`: the serverless Local Play link (see below). After `azahar_net_join`, every local wireless frame the console transmits is passed to `Module.azaharNetSend(bytes)`; frames from peers go back in through `azahar_net_receive`. A null `mac` joins under the console's own address and needs a running title.
 
 ## Local Play (multiplayer)

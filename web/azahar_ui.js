@@ -358,6 +358,128 @@
         });
     }
 
+    // ── CPU: compiled code with interpreter fallback ──────────────
+    // The engine compiles busy ARM code to WebAssembly and falls back to its interpreter per
+    // block; ?cpuJit=0 interprets everything and ?cpuJit=verify checks compiled code against
+    // the interpreter. The page adds the watchdog in azahar_cpu_jit.js: a game that looks stuck
+    // with compiled code on switches to the interpreter, and a title that revives is
+    // remembered. Interpreter only can be chosen here, and applies at once.
+    const CPU_MODE_KEY = 'azahar-cpu-mode';
+    const cpuJitQuery = new URLSearchParams(location.search).get('cpuJit');
+    const cpuModeSelect = document.getElementById('cpu-mode');
+    const cpuModeHelp = document.getElementById('cpu-mode-help');
+    let selectedCpuMode = 'auto';
+    try {
+        if (localStorage.getItem(CPU_MODE_KEY) === 'interpreter') selectedCpuMode = 'interpreter';
+    } catch (_) {}
+    const cpuJit = {
+        watchdog: window.AzaharCpuJit ? new window.AzaharCpuJit.CpuJitWatchdog() : null,
+        buffer: 0,
+        stats: null,
+        // Why this title runs on the interpreter: remembered, or a watchdog switch this session.
+        titleReason: null,
+    };
+    const CPU_JIT_REASONS = {
+        stall: 'the game stopped drawing with compiled code on',
+        flood: 'the game ran into unmapped memory with compiled code on',
+        error: 'the game stopped with an error with compiled code on',
+    };
+
+    // Counters from the engine (see azahar_get_cpu_jit_stats), or null before it exists.
+    function readCpuJitStats() {
+        if (!wasmModule?._azahar_get_cpu_jit_stats) return null;
+        if (!cpuJit.buffer) cpuJit.buffer = wasmModule._malloc(13 * 8);
+        if (wasmModule._azahar_get_cpu_jit_stats(cpuJit.buffer, 13) !== 0) return null;
+        const values = new Float64Array(wasmModule.HEAPU8.buffer, cpuJit.buffer, 13);
+        return {mode: values[0], blocks: values[1], compiled: values[5], instructions: values[11],
+            verified: values[8], mismatches: values[9], unmapped: values[12]};
+    }
+
+    function setCpuJit(mode) {
+        if (!wasmModule?._azahar_set_cpu_jit) return -1;
+        return wasmModule._azahar_set_cpu_jit(mode);
+    }
+
+    // The mode before any title rules: the URL, then the choice made here.
+    function applyCpuMode() {
+        if (cpuJitQuery !== null || !initialized) return;
+        setCpuJit(selectedCpuMode === 'interpreter' ? 0 : 1);
+        updateCpuModeHelp();
+    }
+
+    // Titles that ran into trouble with compiled code start on the interpreter.
+    function applyTitleCpuMode() {
+        const remembered = window.AzaharCpuJit?.titles.get(currentProgramId);
+        if (!remembered || cpuJitQuery !== null || selectedCpuMode === 'interpreter') return;
+        cpuJit.titleReason = CPU_JIT_REASONS[remembered.reason] || remembered.reason;
+        setCpuJit(0);
+        log(`CPU: interpreter for this game (${cpuJit.titleReason} before).`);
+        updateCpuModeHelp();
+    }
+
+    function updateCpuModeHelp() {
+        if (!cpuModeHelp) return;
+        const stats = cpuJit.stats;
+        const mode = stats ? stats.mode : (cpuJitQuery === '0' || selectedCpuMode === 'interpreter' ? 0 : 1);
+        let text;
+        if (mode === 2) {
+            text = `Checking compiled code against the interpreter: ${stats?.verified || 0} runs, ` +
+                `${stats?.mismatches || 0} differences.`;
+        } else if (mode === 1) {
+            const share = stats?.instructions ? Math.min(100, 100 * stats.compiled / stats.instructions) : 0;
+            text = stats?.blocks ?
+                `Compiled: ${share.toFixed(0)}% of instructions, ${Math.round(stats.blocks).toLocaleString()} blocks. ` +
+                'If the game gets stuck, it switches to the interpreter by itself.' :
+                'Busy code is compiled to WebAssembly as the game runs; if the game gets stuck, ' +
+                'it switches to the interpreter by itself.';
+        } else if (cpuJit.titleReason) {
+            text = `Interpreter for this game: ${cpuJit.titleReason}.`;
+        } else {
+            text = 'Every instruction is interpreted (slower).';
+        }
+        if (cpuModeHelp.textContent !== text) cpuModeHelp.textContent = text;
+    }
+
+    // Every FPS sample: refresh the counters and let the watchdog judge the game.
+    function watchCpuJit(now, gameFps, speed) {
+        const stats = readCpuJitStats();
+        cpuJit.stats = stats;
+        if (stats && cpuJit.watchdog && cpuJitQuery === null) {
+            const decision = cpuJit.watchdog.observe({now, compiled: stats.mode === 1, gameFps,
+                speed, unmapped: stats.unmapped});
+            if (decision?.action === 'interpreter') {
+                cpuJit.titleReason = CPU_JIT_REASONS[decision.reason];
+                setCpuJit(0);
+                log(`CPU: switched to the interpreter: ${cpuJit.titleReason}.`);
+            } else if (decision?.action === 'remember') {
+                window.AzaharCpuJit.titles.remember(currentProgramId, decision.reason);
+                log('CPU: the interpreter revived the game; this game will start on it from now on.');
+            } else if (decision?.action === 'compiled') {
+                cpuJit.titleReason = null;
+                setCpuJit(1);
+                log('CPU: the interpreter did not help either; compiled code is back on.');
+            }
+        }
+        updateCpuModeHelp();
+    }
+
+    if (cpuModeSelect) {
+        cpuModeSelect.value = cpuJitQuery === '0' ? 'interpreter' : selectedCpuMode;
+        cpuModeSelect.disabled = cpuJitQuery !== null;
+        cpuModeSelect.addEventListener('change', () => {
+            selectedCpuMode = cpuModeSelect.value === 'interpreter' ? 'interpreter' : 'auto';
+            try { localStorage.setItem(CPU_MODE_KEY, selectedCpuMode); } catch (_) {}
+            // Choosing Auto again gives a title that was moved to the interpreter another try.
+            if (selectedCpuMode === 'auto' && cpuJit.titleReason) {
+                window.AzaharCpuJit?.titles.forget(currentProgramId);
+                cpuJit.titleReason = null;
+                cpuJit.watchdog = new window.AzaharCpuJit.CpuJitWatchdog();
+            }
+            applyCpuMode();
+        });
+        updateCpuModeHelp();
+    }
+
     if (fastForward) {
         fastForward.value = String(selectedFastForward);
         fastForwardValue.textContent = `${selectedFastForward}x`;
@@ -857,7 +979,7 @@
         // Preserve harness/user-flow controls across the fresh-document
         // renderer switch. In particular, losing autostart=0 would begin
         // execution while an uploaded save state is still being installed.
-        for (const name of ['autostart', 'resolution', 'speed', 'scheduler', 'play']) {
+        for (const name of ['autostart', 'resolution', 'speed', 'scheduler', 'play', 'cpuJit']) {
             if (currentUrl.searchParams.has(name)) {
                 destination.searchParams.set(name, currentUrl.searchParams.get(name));
             }
@@ -867,25 +989,29 @@
         // fresh-document fallback. This makes automated backend gates
         // diagnostic without weakening the user-facing recovery path.
         destination.searchParams.set('webgl2-fallback-reason', reason);
-        window.setTimeout(async () => {
-            if (romRecoveryUrl) {
-                destination.searchParams.set('play', romRecoveryUrl);
-            } else if (romRecoveryFile && window.AzaharLibrary?.cachePlayable) {
-                setStatus('Preparing ROM for compatibility renderer...', '');
-                const key = `local-file:${romName}:${romRecoveryFile.size}:${romRecoveryFile.lastModified || 0}`;
-                try {
-                    if (await window.AzaharLibrary.cachePlayable(key, romRecoveryFile, romName, romName)) {
-                        destination.searchParams.set('play', key);
-                    } else {
-                        log('ROM could not be stored for renderer recovery; choose the file again after restart.');
-                    }
-                } catch (error) {
-                    log(`ROM recovery storage failed: ${error.message}; choose the file again after restart.`);
+        window.setTimeout(() => void reopenRomAt(destination), 0);
+    }
+
+    // Opens `destination` as a fresh session that loads the current game: a library game by its
+    // URL, a picked file through browser storage. The fresh page is needed even when the game
+    // cannot be handed over (the player then chooses it again).
+    async function reopenRomAt(destination) {
+        if (romRecoveryUrl) {
+            destination.searchParams.set('play', romRecoveryUrl);
+        } else if (romRecoveryFile && window.AzaharLibrary?.cachePlayable) {
+            setStatus('Preparing the game for a fresh session...', '');
+            const key = `local-file:${romName}:${romRecoveryFile.size}:${romRecoveryFile.lastModified || 0}`;
+            try {
+                if (await window.AzaharLibrary.cachePlayable(key, romRecoveryFile, romName, romName)) {
+                    destination.searchParams.set('play', key);
+                } else {
+                    log('ROM could not be stored for the restart; choose the file again after it.');
                 }
+            } catch (error) {
+                log(`ROM storage failed: ${error.message}; choose the file again after the restart.`);
             }
-            // A fresh canvas is still required, even when storage is unavailable.
-            window.location.replace(destination.toString());
-        }, 0);
+        }
+        window.location.replace(destination.toString());
     }
 
     /**
@@ -1289,6 +1415,7 @@ void main() { frag_color = vec4(1.0); }`);
             applyResolutionScale();
             applySoftwarePixelScale();
             applyFastForward();
+            applyCpuMode();
             window.dispatchEvent(new Event('azahar-initialized'));
             log('Emulator initialized successfully.');
             hideProgress();
@@ -1379,6 +1506,7 @@ void main() { frag_color = vec4(1.0); }`);
                     log('WARNING: Could not determine the loaded title ID; browser saves are disabled.');
                     setSaveStateMessage('Could not identify this title for browser saves.', true);
                 }
+                applyTitleCpuMode();
                 updateSaveControls();
                 if (saveStateStore) void refreshSaveStateList();
                 log('ROM loaded successfully!');
@@ -1806,6 +1934,7 @@ void main() { frag_color = vec4(1.0); }`);
                         }
                         checkDisplayThroughput(now);
                         tuneCpuClock(now, gameFps, emulationSpeed);
+                        watchCpuJit(now, gameFps, emulationSpeed);
                         stepWorkMs = 0;
                         stepWorkFrames = 0;
                     }
@@ -1929,6 +2058,16 @@ void main() { frag_color = vec4(1.0); }`);
             restartInSoftware(`accelerated renderer failed at step ${step}: ${detail}`);
             return;
         }
+        // With compiled code on, start again on the interpreter (once) rather than stop.
+        if (cpuJitQuery === null && cpuJit.stats?.mode === 1) {
+            window.AzaharCpuJit?.titles.remember(currentProgramId, 'error');
+            stopRunning();
+            setStatus(`The game stopped (${detail}). Restarting it with the interpreter...`, 'error');
+            const destination = new URL(location.href);
+            destination.searchParams.set('cpuJit', '0');
+            void reopenRomAt(destination);
+            return;
+        }
         stopRunning(`Stopped at step ${step}: ${detail}`);
     }
 
@@ -2026,6 +2165,8 @@ void main() { frag_color = vec4(1.0); }`);
             renderer: isWebGL2Artifact ? 'webgl2' : 'software' }),
         getCpuClock: () => ({ enabled: cpuClock.enabled, percent: cpuClock.percent,
             changes: cpuClock.changes, refFps: cpuClock.refFps }),
+        getCpuJit: () => ({ ...readCpuJitStats(), titleReason: cpuJit.titleReason,
+            watchdog: cpuJit.watchdog?.state }),
         getFrameBudget: () => ({ enabled: frameBudget.enabled, periodMs: frameBudget.periodMs,
             budgetMs: frameBudget.appliedMs, refreshes: frameBudget.refreshes,
             span: frameBudget.span, speed: frameBudget.speed }),

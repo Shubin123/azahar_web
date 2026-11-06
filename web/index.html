@@ -1248,6 +1248,14 @@
                     <option value="1">Full — every pixel</option>
                     <option value="3">Fast — 3x3 blocks (blurry)</option>
                 </select>
+                <label for="cpu-mode" class="mode-help" style="display:block;margin-top:12px;margin-bottom:4px;">
+                    CPU
+                </label>
+                <select id="cpu-mode" class="renderer-select" aria-label="CPU">
+                    <option value="auto">Auto — compile busy code, interpreter fallback</option>
+                    <option value="interpreter">Interpreter only</option>
+                </select>
+                <div id="cpu-mode-help" class="mode-help"></div>
             </div>
             <div class="card" data-widget="rom">
                 <h2>📂 ROM File</h2>
@@ -1543,6 +1551,7 @@
     <script src="azahar_scheduler.js"></script>
     <script src="azahar_romfs.js"></script>
     <script src="azahar_audio.js"></script>
+    <script src="azahar_cpu_jit.js"></script>
     <script src="azahar_ui.js"></script>
     <script src="azahar_input.js"></script>
     <script src="azahar_fullscreen.js"></script>

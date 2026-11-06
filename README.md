@@ -96,6 +96,7 @@ web/                    # Ready-to-serve web application
   azahar_split.js       # split.html: screens, controllers, sharing the main thread
   azahar_split_seat.js  # One console inside split.html (index.html?seat=N)
   azahar_shared_link.js # Shared-memory rings that link consoles on one device
+  azahar_cpu_jit.js     # CPU watchdog: switches a stuck game from compiled code to the interpreter
   azahar_fullscreen.js  # Fullscreen view: screen layout within the user's size bounds
   coi-serviceworker.js  # COOP/COEP header injection for static hosts
   server.cjs            # Local dev server with isolation headers
@@ -188,6 +189,10 @@ AZAHAR_ROM_PATH=test_games/your_rom.3ds node tests/run.cjs --transition
 # Fullscreen layout, canvas sizing, touch on the scaled bottom screen, and exit
 node tests/fullscreen.test.cjs            # add --renderer=software for the CPU path
 
+# CPU: the compiled code's controls, and (with a ROM) compiled, verify and interpreter runs
+node tests/cpu_jit_watchdog.test.cjs
+node tests/cpu_jit.test.cjs --rom test_games/your_rom.3ds [--state STATE.cst] [--bench]
+
 # Save, restore, reload, and delete an IndexedDB-backed save through the UI
 node tests/run.cjs --save-states --artifact webgl2
 
@@ -201,7 +206,7 @@ node tests/webkit_mobile.test.cjs --rom test_games/your_rom.3ds
 
 ## Architecture
 
-- **CPU**: Pretranslated, direct-threaded `dyncom` ARM11 execution optimized by the browser's WebAssembly JIT; the incomplete per-block JavaScript JIT remains disabled
+- **CPU**: Pretranslated, direct-threaded `dyncom` ARM11 interpreter, with busy code compiled to WebAssembly as the game runs. The two switch per block: compiled code hands any instruction it does not implement back to the interpreter, and the page switches a game that gets stuck with compiled code on to the interpreter by itself (and remembers that title). *Renderer → CPU* offers *Interpreter only*; `?cpuJit=0` forces it and `?cpuJit=verify` checks every compiled run against the interpreter (slow; for testing). See `tests/PERFORMANCE.md` for what it gains.
 - **Graphics**: Accelerated OpenGL-on-WebGL2 by default, with an explicit software fallback (`?renderer=software`). Auto uses hardware vertices on Vulkan/native-GL ANGLE and the reliable CPU-vertex WebGL2 path on D3D11; `?hwShader=1` forces hardware vertices for diagnostics.
 - **Frontend**: SDL2 → HTML5 Canvas with `requestAnimationFrame` pacing
 - **Threading**: SharedArrayBuffer-based pthreads (requires COOP/COEP isolation)

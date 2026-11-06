@@ -819,3 +819,102 @@ at once; fast-forward and Local Play pacing disable it. Movies: 97-98% speed at 
 FPS within the suite's warmup; after a movie the clock returns to 100% within ~4 s.
 `?cpuClock=N` pins the clock, `?adaptiveClock=0` disables adapting.
 `tests/gameplay_perf.cjs` also flags a 7% drop in frames per emulated second.
+
+## ARM CPU: compiled code with interpreter fallback (2026-11-06)
+
+Engine: `src/core/arm/dyncom/arm_dyncom_jit.*` on `azahar_emscripten`. Page:
+`web/azahar_cpu_jit.js`. Apple M4, Chrome headless with Metal, WebGL2, Emscripten 6.0.13.
+
+**How it works.** Every block the interpreter translates starts with an entry cream that
+counts runs. After 48 runs the block is compiled, together with the translated blocks it
+reaches in its 4 KiB page (branch targets and the code calls return to, up to 32 blocks),
+into one WebAssembly function: a loop with a `br_table` over the blocks, guest registers in
+locals inside a block and in `ARMul_State` between blocks, computed branches looked up among
+the region's blocks by a hash. Regions are batched 32 to a module, compiled synchronously
+(a few ms) and installed in the function table; the interpreter calls them through
+`call_indirect`. Compiled code covers data processing, multiplies, all single and multiple
+loads and stores, VFP loads/stores/moves (VFP arithmetic calls the interpreter's own
+`vfp_*_cpdo`), SMULxy, LDREX/STREX, extends, REV, CLZ, the TLS `MRC`, and every branch, in
+ARM and Thumb code.
+
+The tiers switch per block and cannot halt a game: a block runs interpreted until its code
+is ready; compiled code stops at the first instruction it does not implement and the
+interpreter carries on from exactly there (translation ends blocks so the next compilable
+run starts a block of its own); a block that does not compile stays interpreted; compiled
+code runs only whole blocks that fit the instruction budget, so timing matches the
+interpreter; and generated code cannot trap (guest memory goes through the page table or the
+interpreter's memory functions, and an unexpected block index leaves the region). Clearing
+the translation cache drops all compiled code with it.
+
+On the page, a watchdog switches a game that looks stuck with compiled code on (no frames
+for 10 s while emulated time runs at 50% or more, or a flood of unmapped memory accesses) to
+the interpreter on the spot. A title the interpreter revives is remembered and starts on the
+interpreter from then on; if it does not help, compiled code comes back. A run that fails
+with compiled code on restarts once on the interpreter with the same game.
+
+**Correctness.** `?cpuJit=verify` runs each compiled run, across all the blocks it covers,
+on a copy of the CPU state with guest memory behind a log (reads with side effects make a
+run unverifiable), then compares registers, flags, VFP registers, FPSCR, the Thumb state and
+every memory write once the interpreter has executed the same instructions. No differences
+in any run:
+
+| Code | Compiled runs checked |
+|---|---:|
+| Pokemon X, Vaniville save state (30 s, plus 21.4 million in `cpu_jit.test.cjs`) | 26.9 million |
+| Mario Kart 7, cold boot to the title and attract mode | 6 million |
+| Craftus Reloaded (homebrew), menus and world | 4.4 million |
+
+Verifying found two bugs on the way. A computed branch in the last word of a page is marked
+`END_OF_PAGE` by translation, so a region without another computed branch omitted its lookup
+and ran the wrong block (a guest thread then ran garbage after ~25 s); blocks now classify
+their own ending and the lookup's default leaves the region. And checking single blocks only
+had missed that, so verify mode now checks whole multi-block runs.
+
+**Performance.** Pokemon X, Vaniville save state, 4x fast-forward (the scene tops out near
+305% either way; main-thread time shows what the CPU costs), 15 s profiles:
+
+| CPU | Speed | Main thread idle | ARM emulation (compiled + interpreter) |
+|---|---:|---:|---:|
+| Interpreter | 307% | 21.3% | 54.4% |
+| Compiled code (shipped) | 308% | 29.7% | 41.7% (35.3 + 6.4) |
+| Interpreter, `--js-flags=--no-liftoff` | 307% | 21.8% | 49.7% |
+| Compiled code, `--no-liftoff` | 305% | 32.1% | 40.1% |
+
+ARM emulation costs about 23% less, and 99.5-99.7% of instructions run compiled (about
+24,000 blocks, ~130 ms of compiling in the first 15 s). The page cannot ask V8 to optimize
+generated code; Liftoff (V8's baseline compiler) runs much of it, and with every module
+optimized up front the gain would be larger. With Chrome's CPU throttled 5x (1x speed,
+`adaptiveClock=0`): interpreter 74% speed, ARM 60.7%; compiled 73%, ARM 55.1%. Game code is
+wide and shallow (the hottest of 1,764 compiled functions took 1.2% of compiled time), so
+what each region entry and exit costs dominates, and the gain is CPU headroom more than
+speed in these scenes.
+
+Mario Kart 7 on one device (`split_screen.test.cjs`, WebGL2): Player 1 hosts and Player 2
+joins at 100% speed on both screens with compiled code on or off. The race phase of that test
+is unreliable regardless of the CPU: one console can stop drawing while its emulated time
+runs on, with compiled code on, with `cpuJit=0`, and with the same engine sources built
+without this change (one run froze Player 1, the other never reached a synced race); the
+build shipped before this work passed one of two runs. So it is not compiled code's doing,
+and the watchdog cannot fix it.
+
+Alternatives measured in the same scene and dropped:
+
+| Region shape | Idle | ARM emulation |
+|---|---:|---:|
+| Single blocks | 14.9% | 56.9% |
+| Single blocks, chained with tail calls (`return_call_indirect`) | 12.3% | 59.1% |
+| Page regions of 8 / 24 / 64 blocks | 26.7% / 27.8% / 27.9% | 44.3% / 43.7% / 43.5% |
+| Page regions, chained with tail calls | 26.3% | 45.0% |
+| Regions following calls across pages (40 blocks), chained | 25.0% | 45.7% |
+| Regions following calls across pages, not chained | 25.8% | 46.0% |
+
+Chaining regions with tail calls (finding the next block in the interpreter's fast cache from
+generated code) cost more than returning to the interpreter's dispatcher, and larger regions
+made every entry and exit dearer without making them rarer.
+
+```bash
+node tests/cpu_jit_watchdog.test.cjs
+node tests/cpu_jit.test.cjs --rom ROM --state STATE.cst --seconds 20 --bench
+# Split screen with every console verifying:
+node tests/split_screen.test.cjs --rom ROM --query cpuJit=verify
+```
