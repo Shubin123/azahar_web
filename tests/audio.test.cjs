@@ -11,7 +11,10 @@
  *   7. settings persist across a reload, and the resampling path used by
  *      browsers that reject the native rate also plays sound.
  *
- * Usage: node tests/audio.test.cjs [--rom PATH]
+ * --state STATE.cst starts each session from a save state (one where the game plays sound,
+ * for titles that stay silent through boot).
+ *
+ * Usage: node tests/audio.test.cjs [--rom PATH] [--state STATE]
  */
 'use strict';
 
@@ -20,6 +23,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 const { listen } = require('../web/server.cjs');
+const { restoreState } = require('./fixture_state.cjs');
 const cfg = require('./config.cjs');
 
 // Prefer a title known to play music during boot; some (2in1 Horses 3D)
@@ -34,6 +38,7 @@ function defaultRom() {
 }
 
 const romPath = cfg.argVal('--rom', process.env.AZAHAR_ROM_PATH || defaultRom());
+const statePath = cfg.argVal('--state', null) && path.resolve(cfg.argVal('--state', null));
 const NATIVE_RATE = 32728;
 const PORT = 8793;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -50,6 +55,7 @@ async function startTitle(page, query) {
         || !document.getElementById('btn-run').disabled, { timeout: 120000 });
     if (!(await page.evaluate(() => window.AzaharUI.isRunning()))) await page.click('#btn-run');
     await page.waitForFunction(() => window.AzaharAudio.getState().running, { timeout: 30000 });
+    if (statePath) await restoreState(page, statePath);
 }
 
 // Worklet consumption rate and loudest ring sample over `ms`.
@@ -116,7 +122,12 @@ async function runTests() {
 
         console.log('Test 1: audio attaches and drains the ring at the native rate...');
         await startTitle(page, '');
-        await sleep(20000); // let the title reach music
+        // Let the title reach music. Slow titles on the software renderer take well over the
+        // 20 s a fast one needs, so wait for sound (up to two minutes) rather than a fixed time.
+        await sleep(20000);
+        for (const started = Date.now(); Date.now() - started < 120000;) {
+            if ((await measureRing(page, 1000)).peak > 64) break;
+        }
         const ring = await measureRing(page);
         assert.strictEqual(ring.sampleRate, NATIVE_RATE, 'ring should advertise the native DSP rate');
         assert.ok(Math.abs(ring.rate - NATIVE_RATE) < NATIVE_RATE * 0.1,

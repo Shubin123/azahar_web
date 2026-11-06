@@ -14,6 +14,7 @@
 
 const puppeteer = require('puppeteer-core');
 const assert = require('node:assert');
+const fs = require('node:fs');
 const path = require('node:path');
 const { listen } = require('../web/server.cjs');
 const { startTracker } = require('./lobby_tracker.cjs');
@@ -36,6 +37,10 @@ async function openPage(browser, tracker, query = '') {
 
 async function main() {
     assert.ok(cfg.chromePath, 'Chrome not found; set CHROME_PATH');
+    if (!fs.existsSync(romPath)) {
+        console.log(`SKIP: no test ROM at ${path.relative(cfg.ROOT, romPath)} (pass --rom PATH)`);
+        return;
+    }
     const tracker = await startTracker();
     const server = await listen(PORT, '127.0.0.1');
     const browsers = [];

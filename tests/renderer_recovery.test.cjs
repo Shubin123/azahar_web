@@ -34,13 +34,15 @@ async function main() {
             await navigation;
             await ready();
             await running();
-            const state = await page.evaluate(() => ({
+            // The page mounts the game under its extension (/rom.3ds, /rom.cci, ...).
+            const mountPath = `/rom${path.extname(rom).toLowerCase() || '.bin'}`;
+            const state = await page.evaluate(mountPath => ({
                 renderer: AzaharWebConfig.renderer,
                 file: document.getElementById('file-label').textContent,
-                mounted: Module.FS.stat('/rom.3ds').size,
+                mounted: Module.FS.stat(mountPath).size,
                 reason: new URLSearchParams(location.search).get('webgl2-fallback-reason'),
                 pending: new URLSearchParams(location.search).get('play'),
-            }));
+            }), mountPath);
             assert.equal(state.renderer, 'software');
             assert.equal(state.reason, 'WebGL2 context lost');
             assert.equal(state.mounted, fs.statSync(rom).size);
