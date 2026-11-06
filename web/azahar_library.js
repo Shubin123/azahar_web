@@ -229,6 +229,14 @@
             playBtn.dataset.url = entry.url;
             playBtn.textContent = '▶ Play';
             playBtn.disabled = Boolean(activeDownload);
+            // Multiplayer games (Mario Party, Mario Kart 7) on one device: a screen per player.
+            const togetherBtn = document.createElement('button');
+            togetherBtn.type = 'button';
+            togetherBtn.className = 'btn btn-secondary btn-sm';
+            togetherBtn.dataset.action = 'play-together';
+            togetherBtn.dataset.url = entry.url;
+            togetherBtn.textContent = '👥 Together';
+            togetherBtn.title = 'Play on this device with a screen per player (Local Play)';
             const removeBtn = document.createElement('button');
             removeBtn.type = 'button';
             removeBtn.className = 'btn btn-secondary btn-sm';
@@ -236,7 +244,7 @@
             removeBtn.dataset.url = entry.url;
             removeBtn.textContent = '✕';
             removeBtn.title = 'Remove from local cache';
-            li.append(info, playBtn, removeBtn);
+            li.append(info, playBtn, togetherBtn, removeBtn);
             fragment.appendChild(li);
         }
         readyListEl.replaceChildren(fragment);
@@ -1100,6 +1108,13 @@
                 const url = btn.dataset.url;
                 if (btn.dataset.action === 'remove-ready') {
                     void forgetPlayable(url);
+                    return;
+                }
+                if (btn.dataset.action === 'play-together') {
+                    const destination = new URL('split.html', window.location.href);
+                    destination.searchParams.set('play', url);
+                    if (window.AzaharWebConfig?.renderer === 'software') destination.searchParams.set('renderer', 'software');
+                    window.location.assign(destination.toString());
                     return;
                 }
                 const game = allGames.find(g => g.downloadUrl === url) ||

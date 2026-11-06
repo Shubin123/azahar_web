@@ -19,6 +19,7 @@
  *   node tests/split_screen.test.cjs
  *   node tests/split_screen.test.cjs --rom PATH [--game mario-kart-7] [--renderer webgl2|software]
  *       [--no-race] [--gpu] [--timeout SECONDS] [--web DIR] [--query cpuJit=0]
+ *   add --base URL to test a deployed site (https://shubin123.github.io/azahar_web) instead of web/
  */
 'use strict';
 
@@ -33,7 +34,7 @@ const { guestSleep } = require('./guest_time.cjs');
 const { installFrameTrace, saveFrameTrace } = require('./frame_trace.cjs');
 
 const PORT = 8799;
-const BASE = `http://127.0.0.1:${PORT}`;
+const BASE = (cfg.argVal('--base', '') || `http://127.0.0.1:${PORT}`).replace(/\/+$/, '');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const GAMES = JSON.parse(fs.readFileSync(path.join(__dirname, 'multiplayer_games.json'), 'utf8'));
 const OUTPUT = path.join(cfg.ROOT, 'tmp_test', 'split_screen');
@@ -95,7 +96,13 @@ async function ringChecks(page) {
     console.log(`PASS shared rings: order across the ring end, broadcast, ${result.dropped} drops counted when full`);
 }
 
+// Each console's frame, once its page has loaded (a deployed site's frames load slowly, and
+// waits started on a frame still at about:blank never saw it).
 const seatFrames = async page => {
+    await page.waitForFunction(() => {
+        const frames = [...document.querySelectorAll('#seats iframe')];
+        return frames.length > 0 && frames.every(frame => frame.contentWindow?.AzaharNetplay);
+    }, { timeout: 120000 });
     const handles = await page.$$('#seats iframe');
     return Promise.all(handles.map(handle => handle.contentFrame()));
 };
@@ -202,6 +209,58 @@ async function linkChecks(browser) {
     assert.strictEqual(handed[1], 'software', 'and with the renderer the main page used');
     console.log('PASS the Local Play card opens split.html with the current game');
     await main.close();
+    await libraryHandOff(browser);
+}
+
+// A game played from the library cache goes to split.html the same way. A stand-in is stored
+// under a catalog entry's URL (Mario Party - The Top 100); requests to the archive are blocked,
+// so nothing is downloaded.
+async function libraryHandOff(browser) {
+    const catalog = JSON.parse(fs.readFileSync(path.join(cfg.ROOT, 'web', 'games_library.json'), 'utf8'));
+    const game = catalog.games.find(entry => entry.fullName === 'Mario Party - The Top 100 (USA)');
+    assert.ok(game, 'the catalog lists Mario Party - The Top 100 (USA)');
+    const page = await browser.newPage();
+    await page.setRequestInterception(true);
+    page.on('request', request => (new URL(request.url()).hostname.endsWith('archive.org') ?
+        request.abort() : request.continue()));
+    const ready = () => page.waitForFunction(() => document.getElementById('status')?.textContent.includes('Emulator ready'),
+        { timeout: 120000 });
+    await page.goto(`${BASE}/index.html?autostart=0&renderer=software`, { waitUntil: 'domcontentloaded' });
+    await ready();
+    const stored = await page.evaluate(({ url, name, title }) => window.AzaharLibrary.cachePlayable(url,
+        new File([new Uint8Array(4096)], name), name, title), { url: game.downloadUrl, name: game.romName, title: game.title });
+    assert.ok(stored, 'the stand-in is in browser storage');
+    const opensSplit = async () => {
+        assert.strictEqual(new URL(page.url()).pathname.split('/').pop(), 'split.html');
+        assert.strictEqual(new URL(page.url()).searchParams.get('play'), game.downloadUrl, 'the library URL travels');
+        await page.waitForFunction(() => document.querySelectorAll('#seats iframe').length === 2, { timeout: 30000 });
+        const label = await page.$eval('#rom-label', element => element.textContent);
+        assert.ok(label.includes(game.romName), `split.html starts with the cached game (${label})`);
+    };
+
+    // From the list of games in this browser, in one click.
+    await page.goto(`${BASE}/index.html?autostart=0&renderer=software`, { waitUntil: 'domcontentloaded' });
+    const together = `button[data-action="play-together"][data-url="${game.downloadUrl}"]`;
+    await page.waitForSelector(together, { visible: true, timeout: 30000 });
+    await Promise.all([page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }), page.click(together)]);
+    await opensSplit();
+    const listed = await page.$$eval('#stored-games option', options => options.map(option => option.textContent));
+    assert.ok(listed.some(text => text.includes(game.title)), 'split.html lists it among the games in this browser');
+    console.log(`PASS a cached library game (${game.title}) opens on split.html from the games in this browser`);
+
+    // While it plays, from the Local Play card.
+    await page.goto(`${BASE}/index.html?autostart=0&renderer=software&play=${encodeURIComponent(game.downloadUrl)}`,
+        { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(url => window.AzaharUI?.getPlayableSource?.().url === url, { timeout: 120000 },
+        game.downloadUrl).catch(async error => {
+        const status = await page.evaluate(() => document.getElementById('status')?.textContent);
+        throw new Error(`the cached game did not open (status: ${status}): ${error.message}`);
+    });
+    await Promise.all([page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }),
+        page.click('#btn-local-play-device')]);
+    await opensSplit();
+    console.log(`PASS a cached library game (${game.title}) opens on split.html from the Local Play card`);
+    await page.close();
 }
 
 const fmt = shares => shares.map(share => share.toFixed(2)).join('/');
@@ -381,7 +440,8 @@ async function playGame(browser, rom) {
 async function main() {
     assert.ok(cfg.chromePath, 'Chrome not found; set CHROME_PATH');
     const root = cfg.argVal('--web', null);
-    const server = await listen(PORT, '127.0.0.1', root ? { root: path.resolve(root) } : {});
+    const server = cfg.argVal('--base', null) ? null :
+        await listen(PORT, '127.0.0.1', root ? { root: path.resolve(root) } : {});
     const browser = await launch();
     try {
         await linkChecks(browser);
@@ -390,7 +450,7 @@ async function main() {
         else console.log('SKIP game session (pass --rom PATH to play a title between two consoles)');
     } finally {
         await browser.close().catch(() => {});
-        server.close();
+        server?.close();
     }
 }
 

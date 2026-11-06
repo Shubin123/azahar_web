@@ -29,6 +29,8 @@ network. Use the game's own local wireless menus as on real consoles, for
 example Mario Kart 7's *Local Multiplayer* or Mario Party's local play. The
 current game comes along (it is copied into browser storage if it was picked
 from disk); otherwise choose a file, or a game played before, on that page.
+Every game in the library's *Downloaded & ready to play* list also has a
+**👥 Together** button that opens it this way in one click.
 
 Click a screen, or press Ctrl+1–4, to give it the keyboard. Controllers go to
 the players in the order they connect, or pick one per screen. Only Player 1

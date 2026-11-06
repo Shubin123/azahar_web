@@ -565,13 +565,14 @@
         .ready-list { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow-y: auto; }
         .ready-game {
             display: flex;
+            flex-wrap: wrap;
             align-items: center;
             gap: 8px;
             padding: 6px 0;
             border-top: 1px solid rgba(107,255,107,.12);
         }
         .ready-game:first-child { border-top: none; }
-        .ready-game-info { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+        .ready-game-info { flex: 1 1 160px; min-width: 0; overflow-wrap: anywhere; }
 
         /* Toolbar */
         .library-toolbar {

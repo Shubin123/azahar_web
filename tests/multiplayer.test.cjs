@@ -24,6 +24,7 @@
  *   add --via lobby to link through a public lobby (local tracker) instead of codes
  *   add --netsim drop=0.05,delay=60,jitter=40,burst=800/15000 to impair the link
  *   add --web DIR to serve another copy of web/ (for example an older engine build)
+ *   add --base URL to test a deployed site (https://shubin123.github.io/azahar_web) instead
  */
 'use strict';
 
@@ -39,6 +40,7 @@ const { guestSleep } = require('./guest_time.cjs');
 const cfg = require('./config.cjs');
 
 const PORT = 8797;
+const BASE = (cfg.argVal('--base', '') || `http://127.0.0.1:${PORT}`).replace(/\/+$/, '');
 const GAMES = JSON.parse(fs.readFileSync(path.join(__dirname, 'multiplayer_games.json'), 'utf8'));
 const OUTPUT = path.join(cfg.ROOT, 'tmp_test', 'multiplayer');
 const renderer = cfg.argVal('--renderer', 'software');
@@ -97,7 +99,7 @@ async function boot(browser, rom, nick, statePath) {
     const trackers = (tracker ? `&trackers=${encodeURIComponent(tracker.url)}` : '') +
         (cfg.argVal('--netsim', '') ? `&netsim=${encodeURIComponent(cfg.argVal('--netsim', ''))}` : '') +
         (cfg.argVal('--query', '') ? `&${cfg.argVal('--query', '')}` : '');
-    await page.goto(`http://127.0.0.1:${PORT}/index.html?renderer=${renderer}&nick=${nick}${trackers}`,
+    await page.goto(`${BASE}/index.html?renderer=${renderer}&nick=${nick}${trackers}`,
         { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => document.getElementById('status')?.textContent.includes('Emulator ready'),
         { timeout: 120000 });
@@ -396,7 +398,8 @@ async function linkSmoke() {
 async function main() {
     assert.ok(cfg.chromePath, 'Chrome not found; set CHROME_PATH');
     const root = cfg.argVal('--web', null);
-    const server = await listen(PORT, '127.0.0.1', root ? { root: path.resolve(root) } : {});
+    const server = cfg.argVal('--base', null) ? null :
+        await listen(PORT, '127.0.0.1', root ? { root: path.resolve(root) } : {});
     if (viaLobby) tracker = await startTracker();
     const results = [];
     try {
@@ -414,7 +417,7 @@ async function main() {
             }
         }
     } finally {
-        server.close();
+        server?.close();
         await tracker?.close();
     }
     const count = kind => results.filter(result => result === kind).length;
