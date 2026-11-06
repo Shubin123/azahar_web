@@ -8,6 +8,8 @@
 //
 // Two symptoms count as stuck:
 //   - no game frames for STALL_MS while emulated time keeps going (a thread spinning forever);
+//     not while linked to other consoles over Local Play, where a game draws nothing while
+//     it waits for a peer, and switching CPUs would only add a hitch to a timing-sensitive link;
 //   - a flood of accesses to unmapped memory (a thread running garbage).
 (function (root) {
     'use strict';
@@ -29,7 +31,7 @@
         }
 
         // `sample`: {now (ms), compiled (compiled code is on), gameFps, speed (%), unmapped
-        // (accesses so far)}. Returns what to do, if anything:
+        // (accesses so far), linked (Local Play peers)}. Returns what to do, if anything:
         //   {action: 'interpreter', reason}   switch the CPU to the interpreter now
         //   {action: 'remember', reason}      it revived the game: keep this title on it
         //   {action: 'compiled'}              it did not help: switch compiled code back on
@@ -49,7 +51,7 @@
                     return this.startTrial('flood', sample.now);
                 }
                 const stalledFor = sample.now - this.lastFrameAt;
-                if (stalledFor >= STALL_MS && sample.speed >= MIN_STALL_SPEED) {
+                if (stalledFor >= STALL_MS && sample.speed >= MIN_STALL_SPEED && !sample.linked) {
                     return this.startTrial('stall', sample.now);
                 }
                 return null;

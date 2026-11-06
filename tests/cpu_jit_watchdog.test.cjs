@@ -18,12 +18,13 @@ globalThis.localStorage = {
 const { CpuJitWatchdog, titles, STALL_MS, REVIVE_MS } = require('../web/azahar_cpu_jit.js');
 
 // Feeds samples every 500 ms; `fps` and `unmapped` are per-sample functions of time.
-function run(watchdog, { from = 0, to, fps, speed = 100, unmappedPerSecond = () => 0, compiled = () => true }) {
+function run(watchdog, { from = 0, to, fps, speed = 100, unmappedPerSecond = () => 0, compiled = () => true,
+    linked = false }) {
     const decisions = [];
     let unmapped = run.unmapped || 0;
     for (let now = from; now <= to; now += 500) {
         unmapped += unmappedPerSecond(now) / 2;
-        const decision = watchdog.observe({ now, compiled: compiled(now), gameFps: fps(now), speed, unmapped });
+        const decision = watchdog.observe({ now, compiled: compiled(now), gameFps: fps(now), speed, unmapped, linked });
         if (decision) decisions.push({ at: now, ...decision });
     }
     run.unmapped = unmapped;
@@ -41,6 +42,18 @@ function run(watchdog, { from = 0, to, fps, speed = 100, unmappedPerSecond = () 
 {
     const watchdog = new CpuJitWatchdog();
     assert.deepStrictEqual(run(watchdog, { to: 40000, fps: () => 0, speed: 20 }), [], 'a slow game is not stuck');
+}
+
+// A Local Play console waiting for its peer draws nothing: not a stall.
+{
+    const watchdog = new CpuJitWatchdog();
+    assert.deepStrictEqual(run(watchdog, { to: 40000, fps: now => (now < 2000 ? 30 : 0), linked: true }), [],
+        'waiting for a Local Play peer is not a stall');
+    // A flood still counts while linked.
+    run.unmapped = 0;
+    const flood = run(new CpuJitWatchdog(), { to: 10000, fps: () => 30, linked: true,
+        unmappedPerSecond: now => (now > 4000 ? 10000 : 0) });
+    assert.deepStrictEqual(flood.map(d => `${d.action}:${d.reason}`), ['interpreter:flood']);
 }
 
 // Nothing happens while the interpreter already runs everything.

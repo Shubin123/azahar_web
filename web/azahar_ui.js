@@ -445,8 +445,9 @@
         const stats = readCpuJitStats();
         cpuJit.stats = stats;
         if (stats && cpuJit.watchdog && cpuJitQuery === null) {
+            const netplay = window.AzaharNetplay;
             const decision = cpuJit.watchdog.observe({now, compiled: stats.mode === 1, gameFps,
-                speed, unmapped: stats.unmapped});
+                speed, unmapped: stats.unmapped, linked: Boolean(netplay?.joined && netplay.peers.size)});
             if (decision?.action === 'interpreter') {
                 cpuJit.titleReason = CPU_JIT_REASONS[decision.reason];
                 setCpuJit(0);
