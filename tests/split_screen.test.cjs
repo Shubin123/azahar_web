@@ -29,6 +29,8 @@ const path = require('node:path');
 const { listen } = require('../web/server.cjs');
 const cfg = require('./config.cjs');
 const { checkSync } = require('./sync_check.cjs');
+const { guestSleep } = require('./guest_time.cjs');
+const { installFrameTrace, saveFrameTrace } = require('./frame_trace.cjs');
 
 const PORT = 8799;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -204,18 +206,6 @@ async function linkChecks(browser) {
 
 const fmt = shares => shares.map(share => share.toFixed(2)).join('/');
 
-// Consoles sharing one device can run below full speed, so the steps' waits and
-// holds count emulated time: a wait of N ms lasts until the console has run N ms.
-async function guestSleep(frame, ms) {
-    const target = await frame.evaluate(() => window.AzaharNetplay.guestTimeUs()) + ms * 1000;
-    const started = Date.now();
-    while (Date.now() - started < Math.max(ms * 30, 30000)) {
-        await sleep(Math.min(250, ms));
-        if (await frame.evaluate(() => window.AzaharNetplay.guestTimeUs()) >= target) return;
-    }
-    throw new Error(`the console did not advance ${ms} ms of game time`);
-}
-
 // Keys go to one console through its own input path (as controllers do), so both
 // consoles' steps can run at once; the shared mouse is taken one touch at a time.
 let mouseLock = Promise.resolve();
@@ -301,13 +291,18 @@ async function playGame(browser, rom) {
         frame.evaluate(() => window.AzaharNetplay.status())));
     assert.notStrictEqual(hostState.mac, guestState.mac, 'each console has its own address');
     assert.strictEqual(hostState.peers[0]?.mac, guestState.mac, 'the host sees the guest');
+    for (const frame of [host, guest]) await installFrameTrace(frame);
     const started = Date.now();
+    const directory = path.join(OUTPUT, key);
+    // --film keeps a screenshot of both consoles every 15 s, to see where a run went astray.
+    const film = cfg.argFlag('--film');
     const monitor = setInterval(async () => {
         const read = frame => frame.evaluate(() => document.getElementById('fps').textContent).catch(() => '?');
         const shares = await page.evaluate(() => window.AzaharSplit.shares().map(s => s.toFixed(2)).join('/')).catch(() => '?');
-        console.log(`  t+${Math.round((Date.now() - started) / 1000)}s P1 ${await read(host)} | P2 ${await read(guest)} | shares ${shares}`);
+        const seconds = Math.round((Date.now() - started) / 1000);
+        console.log(`  t+${seconds}s P1 ${await read(host)} | P2 ${await read(guest)} | shares ${shares}`);
+        if (film) await page.screenshot({ path: path.join(directory, `film-${String(seconds).padStart(4, '0')}.png`) }).catch(() => {});
     }, 15000);
-    const directory = path.join(OUTPUT, key);
     const screenshot = name => page.screenshot({ path: path.join(directory, `${name}.png`) });
     fs.mkdirSync(directory, { recursive: true });
     try {
@@ -354,11 +349,30 @@ async function playGame(browser, rom) {
             const fps = await frame.evaluate(() => document.getElementById('fps').textContent).catch(() => '?');
             console.log(`  Player ${index + 1} (${fps}):`);
             for (const line of threads) console.log(`    ${line}`);
+            const log = await frame.evaluate(() => window.AzaharUI.getLog()).catch(() => '');
+            fs.writeFileSync(path.join(directory, `player-${index + 1}.log`), log);
+            const stats = await frame.evaluate(() => window.AzaharNetplay.status().stats).catch(() => null);
+            console.log(`    frames: ${JSON.stringify(stats)}; last seconds of game time:`);
+            const trace = await saveFrameTrace(frame, path.join(directory, `frames-${index + 1}.txt`));
+            for (const line of trace) console.log(`    ${line.slice(0, 200)}`);
         }
+        console.log(`  logs in ${path.relative(cfg.ROOT, directory)}`);
         throw error;
     } finally {
         clearInterval(monitor);
         await screenshot('split');
+        for (const [index, frame] of [host, guest].entries()) {
+            await saveFrameTrace(frame, path.join(directory, `frames-${index + 1}.txt`)).catch(() => {});
+            // Each bound data channel's queue: packets waiting now and the most ever waiting.
+            const uds = await frame.evaluate(() => {
+                const log = () => window.AzaharUI.getLog();
+                const before = log().length;
+                window.AzaharUI.getModule()?._azahar_debug_uds?.();
+                return log().slice(before).split('\n').filter(line => /azahar_debug_uds/.test(line))
+                    .map(line => line.replace(/.*azahar_debug_uds:\d+: /, ''));
+            }).catch(() => []);
+            for (const line of uds) console.log(`  Player ${index + 1} ${line}`);
+        }
     }
     assert.deepStrictEqual(page.errors, [], 'no page errors');
     console.log(`  screenshots in ${path.relative(cfg.ROOT, directory)}`);

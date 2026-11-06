@@ -37,7 +37,9 @@ this device's processor: the page splits each display refresh between them,
 and a console that is waiting for its next frame passes the rest of its time
 to the others. With the accelerated renderer an Apple M4 runs a two-player
 Mario Kart 7 race at full speed on both screens; the compatibility renderer is
-much slower there.
+much slower there. Mario Kart 7 still breaks off with a communication error in
+some sessions after the room closes, on one device and between devices alike
+(see `tests/PERFORMANCE.md`).
 
 ### Play on Other Devices and Share Saves (LAN)
 

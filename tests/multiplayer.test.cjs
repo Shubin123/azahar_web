@@ -23,6 +23,7 @@
  *   node tests/multiplayer.test.cjs --link-smoke [--rom PATH]
  *   add --via lobby to link through a public lobby (local tracker) instead of codes
  *   add --netsim drop=0.05,delay=60,jitter=40,burst=800/15000 to impair the link
+ *   add --web DIR to serve another copy of web/ (for example an older engine build)
  */
 'use strict';
 
@@ -34,6 +35,7 @@ const { listen } = require('../web/server.cjs');
 const { restoreState } = require('./fixture_state.cjs');
 const { startTracker } = require('./lobby_tracker.cjs');
 const { checkSync } = require('./sync_check.cjs');
+const { guestSleep } = require('./guest_time.cjs');
 const cfg = require('./config.cjs');
 
 const PORT = 8797;
@@ -149,20 +151,23 @@ async function linkViaLobby(host, guest) {
     return Promise.all([host, guest].map(page => page.evaluate(() => window.AzaharNetplay.status())));
 }
 
+// Waits and holds count the console's own game time (see guest_time.cjs): two browsers
+// on one machine run below full speed, and steps timed on the wall clock ran out before
+// the game reached the menus they were written for.
 async function runSteps(page, steps) {
     for (const step of steps) {
         const [action, ...args] = step.split(/\s+/);
         if (action === 'wait') {
-            await sleep(Number(args[0]));
+            await guestSleep(page, Number(args[0]));
         } else if (action === 'key') {
             await page.keyboard.down(args[0]);
-            await sleep(Number(args[1] || 250));
+            await guestSleep(page, Number(args[1] || 250));
             await page.keyboard.up(args[0]);
         } else if (action === 'touch') {
             const box = await (await page.$('#canvas')).boundingBox();
             await page.mouse.move(box.x + box.width * Number(args[0]), box.y + box.height * Number(args[1]));
             await page.mouse.down();
-            await sleep(Number(args[2] || 250));
+            await guestSleep(page, Number(args[2] || 250));
             await page.mouse.up();
         } else {
             throw new Error(`Unknown step: ${step}`);
@@ -279,7 +284,7 @@ async function playPairing(key, game, hostBuild, guestBuild) {
         if (game.host.afterJoin || game.guest.afterJoin) {
             const joinsBefore = (await logText(host)).match(/Node \d+ joined the hosted network/g).length;
             await Promise.all([runSteps(host, game.host.afterJoin || []), runSteps(guest, game.guest.afterJoin || [])]);
-            await sleep(Number(game.afterJoinWaitMs || 30000));
+            await guestSleep(host, Number(game.afterJoinWaitMs || 30000));
             await screenshot(host, directory, 'host-after');
             await screenshot(guest, directory, 'guest-after');
             const hostLog = await logText(host);
@@ -343,7 +348,10 @@ async function playPairing(key, game, hostBuild, guestBuild) {
                     .map(line => line.replace(/.*azahar_debug_threads:\d+: /, '').slice(0, 160));
             }).catch(() => []);
             for (const line of threads || []) console.log(`    thread: ${line}`);
+            const log = page && await page.evaluate(() => window.AzaharUI.getLog?.() ?? '').catch(() => '');
+            if (log) fs.writeFileSync(path.join(directory, `${index ? 'guest' : 'host'}.log`), log);
         }
+        console.log(`  logs in ${path.relative(cfg.ROOT, directory)}`);
         return 'fail';
     } finally {
         clearInterval(browsers.monitor);
@@ -387,7 +395,8 @@ async function linkSmoke() {
 
 async function main() {
     assert.ok(cfg.chromePath, 'Chrome not found; set CHROME_PATH');
-    const server = await listen(PORT, '127.0.0.1');
+    const root = cfg.argVal('--web', null);
+    const server = await listen(PORT, '127.0.0.1', root ? { root: path.resolve(root) } : {});
     if (viaLobby) tracker = await startTracker();
     const results = [];
     try {

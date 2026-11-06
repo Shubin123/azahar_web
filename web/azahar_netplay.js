@@ -479,7 +479,8 @@
                 mac: this.mac ? macText(this.mac) : null, title: this.titleId(), crossVersion: this.crossVersion,
                 peers: Array.from(this.peers, ([id, peer]) => ({id, name: peer.name, mac: peer.mac,
                     title: peer.title, open: peer.channel ? peer.channel.readyState === 'open' : true})),
-                stats: {...this.stats},
+                // dropped: frames a full shared-link ring could not take (shared mode).
+                stats: this.shared ? {...this.stats, dropped: this.shared.dropped()} : {...this.stats},
                 netsim: this.netsim && {...this.netsim, ...this.netsimStats},
                 pacing: this.pacing ? {...this.pacingStats, heldMs: Math.round(this.pacingStats.heldMs),
                     throttledMs: Math.round(this.pacingStats.throttledMs), speed: this.speedPermille / 1000} : null,

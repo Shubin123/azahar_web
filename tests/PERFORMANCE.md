@@ -890,12 +890,43 @@ what each region entry and exit costs dominates, and the gain is CPU headroom mo
 speed in these scenes.
 
 Mario Kart 7 on one device (`split_screen.test.cjs`, WebGL2): Player 1 hosts and Player 2
-joins at 100% speed on both screens with compiled code on or off. The race phase of that test
-is unreliable regardless of the CPU: one console can stop drawing while its emulated time
-runs on, with compiled code on, with `cpuJit=0`, and with the same engine sources built
-without this change (one run froze Player 1, the other never reached a synced race); the
-build shipped before this work passed one of two runs. So it is not compiled code's doing,
-and the watchdog cannot fix it.
+joins at 100% speed on both screens with compiled code on or off. Past the room, see the next
+section: the race phase fails intermittently with every build, so it is not compiled code's
+doing. While a console is linked to Local Play peers the watchdog ignores missing frames (a
+game waiting for its peer draws nothing) and only reacts to a flood of unmapped accesses.
+
+## Local Play: Mario Kart 7 communication errors (2026-11-06)
+
+After Player 1 closes the room, Mario Kart 7 sometimes breaks off with 通信エラーが
+発生しました ("a communication error occurred") at mode select, while loading a course
+or mid-race; the other console then waits forever. It happens on two screens of one device
+and between two browsers, with the page and engine on `main` before this work (2 of 2
+network runs), with the engine built without compiled code, and with this work: 15 of 21
+split-screen runs today (the variants below included) failed to reach or keep a synced race.
+
+What a failure looks like, from `tests/frame_trace.cjs` (every wireless frame each console
+sends and receives, per second of game time) and `_azahar_debug_uds` (each bound data
+channel's queue):
+
+- One console's game stops sending. Its peer keeps broadcasting state (607 bytes at 60 per
+  game second in the menus, 839 in the race) and its 2-second keep-alive (61-byte ping,
+  73-byte reply), retries a 408/30-byte message every 2 s, and gives up with the error.
+- Nothing is lost on the way: the shared rings drop nothing, every frame sent is delivered
+  in order, and the game pulls its packets promptly (at most 3-4 waiting).
+- The silent console has stopped by itself: its main thread waits in a sleep loop or on an
+  address arbiter, one worker waits on an arbiter, and no wireless call failed.
+
+Ruled out, four runs each against the same baseline: the adaptive CPU clock (2 of 4 failed
+with `adaptiveClock=0`), the size of the clock lead (pacing within two frames instead of
+150 ms: 3 of 4 failed), a bounded receive buffer as on the console (3 of 4), and the
+relative clock rate (passing runs swing as much). Without pacing every race desynchronizes
+(4 of 4 disagree), so pacing is required. Finding what the game times out on needs its own
+investigation.
+
+```bash
+# Film both screens every 15 s, keep each console's log, frame trace and channel queues:
+node tests/split_screen.test.cjs --rom ROM --film --query "logFilter=Service.NWM:Debug"
+```
 
 Alternatives measured in the same scene and dropped:
 
