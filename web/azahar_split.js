@@ -439,6 +439,13 @@
             `${linked} linked · ${frames} frames sent · main-thread shares ${shares}`;
         if (session.together >= 0) {
             say(`All ${session.seats.length} players are in one game room, hosted by Player ${session.together + 1}.`, 'ok');
+        } else if (session.hosts?.length > 1) {
+            // Every console here has the whole game, so each can host; then nobody joins anyone.
+            const names = session.hosts.map(index => index + 1);
+            say(`Players ${names.slice(0, -1).join(', ')} and ${names[names.length - 1]} are each hosting a room, so ` +
+                'nobody can join. Back out on all but one screen and join that room from the game\'s ' +
+                'multiplayer menu for players who each have the game (Local Play). Download Play rooms ' +
+                'are joined from the 3DS HOME Menu, which this emulator does not have.', 'error');
         } else if (running === session.seats.length) {
             say(`Playing ${session.rom.name} on ${running} consoles. Host a room on one screen and ` +
                 'join it from the others in the game\'s local wireless menu.', 'ok');
@@ -471,6 +478,7 @@
         const together = hosts.length === 1 && rooms.every((room, index) => index === hosts[0] ||
             (room?.status === 'client' && hostOf(room) === hosts[0] && members.has(room.node)));
         session.together = together ? hosts[0] : -1;
+        session.hosts = hosts;
     }
 
     function frame(now) {

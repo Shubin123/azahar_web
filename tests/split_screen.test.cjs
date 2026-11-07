@@ -165,6 +165,21 @@ async function linkChecks(browser) {
     console.log('PASS split.html links three consoles through shared memory and carries frames between all of them');
     await keyboardChecks(page, frames);
 
+    // Every console has the whole game, so two can host at once (both pick Download Play, say);
+    // then nobody can join, and the page says so and how to fix it.
+    await Promise.all(frames.map((frame, index) => frame.evaluate(index => {
+        window.AzaharNetplay.gameRoom = () => (index < 2 ? { status: 'host', host: `02:00:00:00:00:0${index}`,
+            node: 1, nodes: [{ id: 1, name: 'AZAHAR' }] } : null);
+    }, index)));
+    await page.waitForFunction(() => /Players 1 and 2 are each hosting a room/.test(document.getElementById('status').textContent),
+        { timeout: 5000 }).catch(() => { throw new Error('two consoles hosting at once were not reported'); });
+    const hint = await page.$eval('#status', element => element.textContent);
+    assert.match(hint, /Local Play/, 'the hint says which menu to join from');
+    const hostBadges = await page.$$eval('#seats .seat-room', elements => elements.map(element => element.textContent));
+    assert.deepStrictEqual(hostBadges, ['🏠 Hosting a room · 1 player', '🏠 Hosting a room · 1 player', '']);
+    await Promise.all(frames.map(frame => frame.evaluate(() => { delete window.AzaharNetplay.gameRoom; })));
+    console.log('PASS consoles hosting at once are named, with how to join one room instead');
+
     // Sharing the main thread, driven through the slots the consoles publish.
     const shares = await page.evaluate(async () => {
         const SLOT = window.AzaharSharedLink.SLOT;
