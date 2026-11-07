@@ -105,6 +105,9 @@
         .seat-state { flex: 1 1 10em; min-width: 0; color: #aaa; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .seat-state[data-kind="error"] { color: #ff7a8a; }
         .seat-fps { color: #8fd6a6; font-variant-numeric: tabular-nums; }
+        .seat-room { color: #ffd479; white-space: nowrap; }
+        .seat-room:empty { display: none; }
+        .seat-legend { padding: 0 8px 5px; font-size: 0.68rem; color: #9aa4c4; }
         .seat-bar select { padding: 2px 4px; font-size: 0.72rem; }
         .seat-bar .btn { padding: 2px 8px; font-size: 0.75rem; }
         .seat iframe { flex: 1 1 auto; min-height: 120px; width: 100%; border: 0; background: #000; }
@@ -124,6 +127,10 @@
             <option value="2" selected>2 players</option>
             <option value="3">3 players</option>
             <option value="4">4 players</option>
+            <option value="5">5 players</option>
+            <option value="6">6 players</option>
+            <option value="7">7 players</option>
+            <option value="8">8 players</option>
         </select>
         <select id="renderer" aria-label="Renderer">
             <option value="webgl2">Accelerated (WebGL2)</option>
@@ -135,9 +142,12 @@
         <div class="help">
             Every screen is its own console with its own address, linked to the others through memory
             shared on this device instead of a network, so use the game's local wireless
-            (Local Play / Download Play) menus as on real consoles. Click a screen, or press Ctrl+1–4,
-            to give it the keyboard; controllers go to the players in the order they connect. All
-            consoles share this device's processor, so a demanding game runs slower than on its own.
+            (Local Play / Download Play) menus as on real consoles: host a room on one screen and join
+            it from the others. Players 1 and 2 share the keyboard, each with their own keys (listed
+            under each screen, or pick other keys there); Ctrl+1–9 gives one player the whole
+            keyboard and Ctrl+0 shares it again. Controllers go to the players in the order they
+            connect, or pick one per screen; click a screen to touch it with the mouse. All consoles
+            share this device's processor, so a demanding game runs slower than on its own.
         </div>
     </header>
     <main class="seats" id="seats" aria-label="Consoles"></main>
@@ -147,15 +157,18 @@
         <section class="seat">
             <div class="seat-bar">
                 <span class="seat-name"></span>
-                <span class="seat-keyboard" title="This screen gets the keyboard">⌨</span>
+                <span class="seat-keyboard" title="This player has keys on the keyboard">⌨</span>
                 <span class="seat-state">Starting…</span>
+                <span class="seat-room"></span>
                 <span class="seat-fps"></span>
+                <select class="seat-keys" aria-label="Keyboard keys"></select>
                 <select class="seat-pad" aria-label="Controller">
                     <option value="auto">Controller: next free</option>
                     <option value="none">Controller: none</option>
                 </select>
                 <button type="button" class="btn btn-secondary seat-mute"></button>
             </div>
+            <div class="seat-legend"></div>
             <iframe allow="autoplay; gamepad; fullscreen"></iframe>
         </section>
     </template>

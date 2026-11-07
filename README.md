@@ -22,26 +22,35 @@ Open `http://localhost:8765` in Chrome, then load a **decrypted** `.3ds` ROM fil
 ### Play Together on One Device
 
 **Local Play → 👥 Play together on this device** (or open `split.html`) gives
-each player a screen of their own in one browser tab: every screen is a
-separate console with its own address and console ID, running the same game,
-and the consoles talk through memory shared inside the tab instead of a
-network. Use the game's own local wireless menus as on real consoles, for
+each player a screen of their own in one browser tab, 2 to 8 players
+(`?players=N` up to 16): every screen is a separate console with its own
+address and console ID, running the same game, and the consoles talk through
+one pool of memory shared inside the tab (a ring per console that every other
+console reads) instead of a network. Use the game's own local wireless menus as on real consoles, for
 example Mario Kart 7's *Local Multiplayer* or Mario Party's local play. The
 current game comes along (it is copied into browser storage if it was picked
 from disk); otherwise choose a file, or a game played before, on that page.
 Every game in the library's *Downloaded & ready to play* list also has a
 **👥 Together** button that opens it this way in one click.
 
-Click a screen, or press Ctrl+1–4, to give it the keyboard. Controllers go to
-the players in the order they connect, or pick one per screen. Only Player 1
+Players 1 and 2 share the keyboard, each with keys of their own: Player 1 the
+left side (WASD moves; G, F, T, R are A, B, X, Y; Q/E are L/R; Z X C V the
+D-pad; 1 Start; 2 Select) and Player 2 the right side (arrows move; L, K, O, I
+are A, B, X, Y; U/P are L/R; M , . / the D-pad; Enter Start; Right Shift
+Select). Each screen lists its keys and can pick other ones; Ctrl+1–9 gives one
+player the whole keyboard (the emulator's usual keymap) and Ctrl+0 shares it
+again. Controllers go to the players in the order they connect, or pick one per
+screen. Each screen also shows the game room its console hosts or joined, and
+the page says when every player is in one room. Only Player 1
 is heard at first; each screen has its own mute button. All consoles share
 this device's processor: the page splits each display refresh between them,
 and a console that is waiting for its next frame passes the rest of its time
 to the others. With the accelerated renderer an Apple M4 runs a two-player
 Mario Kart 7 race at full speed on both screens; the compatibility renderer is
 much slower there. Mario Kart 7 still breaks off with a communication error in
-some sessions after the room closes, on one device and between devices alike
-(see `tests/PERFORMANCE.md`).
+some sessions after the room closes, on one device and between devices alike,
+and its rooms take two players on one device for now: a third console finds
+the room but the game does not list it (see `tests/PERFORMANCE.md`).
 
 ### Play on Other Devices and Share Saves (LAN)
 

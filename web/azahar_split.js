@@ -21,6 +21,38 @@
     const MIN_SHARE = 0.15;
     // Headroom given to a console on top of what it used while finishing early.
     const SHARE_HEADROOM = 1.25;
+    // Keyboard layouts that let two players share one keyboard. Each maps a physical key
+    // (KeyboardEvent.code) to the key of the console's own default layout that drives that
+    // control (see KEYMAP in azahar_input.js): A KeyA, B KeyS, X KeyZ, Y KeyX, L KeyQ,
+    // R KeyW, ZL Digit1, ZR Digit2, Start KeyM, Select KeyN, D-pad T/G/F/H, Circle Pad arrows.
+    const KEY_LAYOUTS = {
+        left: {
+            label: 'Keys: left side',
+            legend: 'WASD move · G A · F B · T X · R Y · Q/E L/R · Z X C V ◀▼▲▶ · 1 Start · 2 Select',
+            keys: {
+                KeyW: 'ArrowUp', KeyA: 'ArrowLeft', KeyS: 'ArrowDown', KeyD: 'ArrowRight',
+                KeyG: 'KeyA', KeyF: 'KeyS', KeyT: 'KeyZ', KeyR: 'KeyX', KeyQ: 'KeyQ', KeyE: 'KeyW',
+                KeyZ: 'KeyF', KeyX: 'KeyG', KeyC: 'KeyT', KeyV: 'KeyH',
+                Digit1: 'KeyM', Digit2: 'KeyN', Digit3: 'Digit1', Digit4: 'Digit2',
+            },
+        },
+        right: {
+            label: 'Keys: right side',
+            legend: 'Arrows move · L A · K B · O X · I Y · U/P L/R · M , . / ◀▼▲▶ · Enter Start · Right Shift Select',
+            keys: {
+                ArrowUp: 'ArrowUp', ArrowLeft: 'ArrowLeft', ArrowDown: 'ArrowDown', ArrowRight: 'ArrowRight',
+                KeyL: 'KeyA', KeyK: 'KeyS', KeyO: 'KeyZ', KeyI: 'KeyX', KeyU: 'KeyQ', KeyP: 'KeyW',
+                KeyM: 'KeyF', Comma: 'KeyG', Period: 'KeyT', Slash: 'KeyH',
+                Enter: 'KeyM', ShiftRight: 'KeyN', Digit9: 'Digit1', Digit0: 'Digit2',
+            },
+        },
+        // The console's own layout (the emulator page's keymap), for one player at a time.
+        all: {label: 'Keys: whole keyboard', legend: 'The emulator\'s keymap: A S Z X, arrows, T F G H, Q W, M N', keys: null},
+        none: {label: 'Keys: none', legend: '', keys: {}},
+    };
+    // Players 1 and 2 split the keyboard; more players use controllers.
+    const DEFAULT_KEYS = ['left', 'right', 'none', 'none'];
+
     // Query options handed through to every console.
     const PASS_THROUGH = ['logFilter', 'netsim', 'pacing', 'frameBudget', 'scheduler', 'cpuClock',
         'adaptiveClock', 'hwShader', 'resolution', 'crossVersion', 'cores', 'cpuJit'];
@@ -133,6 +165,9 @@
             state: element.querySelector('.seat-state'),
             fps: element.querySelector('.seat-fps'),
             pad: element.querySelector('.seat-pad'),
+            keys: element.querySelector('.seat-keys'),
+            legend: element.querySelector('.seat-legend'),
+            room: element.querySelector('.seat-room'),
             mute: element.querySelector('.seat-mute'),
             // Only the first console is heard at first; two copies of one soundtrack clash.
             muted: index > 0,
@@ -153,6 +188,18 @@
             seat.frame.contentWindow?.AzaharAudio?.setMuted(seat.muted);
         });
         seat.pad.addEventListener('click', event => event.stopPropagation());
+        for (const [value, layout] of Object.entries(KEY_LAYOUTS)) {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = layout.label;
+            seat.keys.append(option);
+        }
+        seat.keys.value = DEFAULT_KEYS[index] || 'none';
+        seat.keys.addEventListener('click', event => event.stopPropagation());
+        seat.keys.addEventListener('change', () => {
+            releaseKeys();
+            renderKeys();
+        });
         element.querySelector('.seat-bar').addEventListener('click', () => focusSeat(seat));
         seat.frame.src = seatUrl(index, count);
         return seat;
@@ -163,6 +210,88 @@
         seat.frame.contentWindow?.focus();
     }
 
+    // ── Keyboard ─────────────────────────────────────────────────
+    // The page owns the keyboard (consoles' frames pass their keys here) and hands every
+    // console the keys of its player's layout, so players share one keyboard at once.
+    const heldKeys = new Set();
+
+    // Physical key -> {seat, code}. A key two layouts share goes to the earlier player.
+    function keyOwners() {
+        const owners = new Map();
+        for (const seat of session.seats) {
+            const layout = KEY_LAYOUTS[seat.keys.value] || KEY_LAYOUTS.none;
+            const keys = layout.keys || Object.fromEntries((seat.frame.contentWindow?.AzaharInput?.KEYMAP || [])
+                .filter(entry => entry.code).map(entry => [entry.code, entry.code]));
+            for (const [physical, code] of Object.entries(keys)) {
+                if (!owners.has(physical)) owners.set(physical, {seat, code});
+            }
+        }
+        return owners;
+    }
+
+    function syncKeys() {
+        const owners = keyOwners();
+        for (const seat of session.seats) {
+            const codes = [...heldKeys].map(key => owners.get(key)).filter(owner => owner?.seat === seat)
+                .map(owner => owner.code);
+            const signature = codes.join();
+            if (signature === seat.keyCodes) continue;
+            const input = seat.frame.contentWindow?.AzaharInput;
+            if (!input) continue;
+            seat.keyCodes = signature;
+            input.setSourceCodes('keyboard', codes);
+        }
+    }
+
+    function releaseKeys() {
+        heldKeys.clear();
+        if (session) syncKeys();
+    }
+
+    function renderKeys() {
+        for (const seat of session.seats) {
+            const layout = KEY_LAYOUTS[seat.keys.value] || KEY_LAYOUTS.none;
+            seat.legend.textContent = layout.legend;
+            seat.legend.hidden = !layout.legend;
+            seat.element.classList.toggle('has-keyboard', seat.keys.value !== 'none');
+        }
+    }
+
+    // Ctrl+1..9 gives that player the whole keyboard; Ctrl+0 gives everyone their own keys again.
+    function assignKeys(index) {
+        session.seats.forEach((seat, i) => {
+            seat.keys.value = index < 0 ? (DEFAULT_KEYS[i] || 'none') : i === index ? 'all' : 'none';
+        });
+        releaseKeys();
+        renderKeys();
+    }
+
+    // Called for every real key press on this page or a console's frame. Returns whether the
+    // key belongs to a player (and the browser should not act on it).
+    function routeKey(type, event) {
+        if (!session) return false;
+        if (event.ctrlKey && /^Digit[0-9]$/.test(event.code)) {
+            const index = Number(event.code.slice(5)) - 1;
+            if (type === 'keydown' && index < session.seats.length) assignKeys(index);
+            return true;
+        }
+        if (event.ctrlKey || event.metaKey || event.altKey || !keyOwners().has(event.code)) return false;
+        if (type === 'keydown') heldKeys.add(event.code);
+        else heldKeys.delete(event.code);
+        syncKeys();
+        return true;
+    }
+
+    for (const type of ['keydown', 'keyup']) {
+        window.addEventListener(type, event => {
+            if (routeKey(type, event)) event.preventDefault();
+        });
+    }
+    // Leaving the page releases every key (moving focus into a console's frame does not).
+    window.addEventListener('blur', () => setTimeout(() => {
+        if (!document.hasFocus()) releaseKeys();
+    }));
+
     function start() {
         if (!rom || session) return;
         const count = Number($('player-count').value) || 2;
@@ -170,7 +299,11 @@
         const seats = Array.from({length: count}, (_, index) => createSeat(index, count));
         session = {buffer, slots: window.AzaharSharedLink.slots(buffer), seats, rom, lastRebalance: 0, lastStatus: 0};
         seatsEl.className = `seats seats-${count}`;
+        // Two columns up to four players (one on portrait screens for two), then a square-ish grid.
+        if (count > 4) seatsEl.style.setProperty('--columns', String(Math.ceil(Math.sqrt(count))));
+        else seatsEl.style.removeProperty('--columns');
         seatsEl.replaceChildren(...seats.map(seat => seat.element));
+        renderKeys();
         startButton.disabled = true;
         stopButton.disabled = false;
         $('player-count').disabled = true;
@@ -182,6 +315,7 @@
     function stop() {
         if (!session) return;
         cancelAnimationFrame(session.frameHandle);
+        heldKeys.clear();
         // Removing the frames ends their emulators and frees their memory.
         seatsEl.replaceChildren();
         session = null;
@@ -211,8 +345,6 @@
             }, location.origin);
         } else if (message.event === 'error') {
             seat.error = message.message;
-        } else if (message.event === 'focus' && session.seats[message.target]) {
-            focusSeat(session.seats[message.target]);
         }
     });
 
@@ -296,16 +428,49 @@
             seat.state.textContent = text;
             seat.state.dataset.kind = seat.error || /error|failed|stopped/i.test(text) ? 'error' : '';
             seat.fps.textContent = doc?.getElementById('fps')?.textContent || '';
-            seat.element.classList.toggle('has-keyboard', document.activeElement === seat.frame);
             if (seat.frame.contentWindow?.AzaharUI?.isRunning()) running++;
         }
         const netplay = session.seats.map(seat => seat.frame.contentWindow?.AzaharNetplay?.status?.());
+        renderRooms(netplay);
         const linked = netplay.filter(state => state?.joined).length;
         const shares = session.slots.map(slot => `${Math.round(slot[SLOT.share] * 100)}%`).join(' / ');
         const frames = netplay.reduce((sum, state) => sum + (state?.stats.sent || 0), 0);
         $('link-stats').textContent = `${running} of ${session.seats.length} consoles running, ` +
             `${linked} linked · ${frames} frames sent · main-thread shares ${shares}`;
-        if (running === session.seats.length) say(`Playing ${session.rom.name} on ${running} consoles.`, 'ok');
+        if (session.together >= 0) {
+            say(`All ${session.seats.length} players are in one game room, hosted by Player ${session.together + 1}.`, 'ok');
+        } else if (running === session.seats.length) {
+            say(`Playing ${session.rom.name} on ${running} consoles. Host a room on one screen and ` +
+                'join it from the others in the game\'s local wireless menu.', 'ok');
+        }
+    }
+
+    // Which game room (local wireless network) each console is in, by the player hosting it.
+    function renderRooms(netplay) {
+        const hostOf = room => session.seats.findIndex((seat, i) => netplay[i]?.mac === room.host);
+        const rooms = netplay.map(state => state?.gameRoom);
+        for (const [index, seat] of session.seats.entries()) {
+            const room = rooms[index];
+            let text = '';
+            if (room?.status === 'host') {
+                text = `🏠 Hosting a room · ${room.nodes.length} player${room.nodes.length === 1 ? '' : 's'}`;
+            } else if (room?.status === 'client') {
+                const host = hostOf(room);
+                text = `🚪 In ${host >= 0 ? `Player ${host + 1}'s` : 'another console\'s'} room`;
+            } else if (room?.status === 'connecting') {
+                text = 'Joining a room…';
+            }
+            // A spectator only looks at a room (games list rooms that way while scanning).
+            if (seat.room.textContent !== text) seat.room.textContent = text;
+        }
+        // Everyone in one room: one console hosts, every other one is a client of that console,
+        // and the host's room lists it. (A guest that joined through Download Play does not
+        // know the network's ids, so the host's address and the node list decide.)
+        const hosts = rooms.map((room, index) => room?.status === 'host' ? index : -1).filter(index => index >= 0);
+        const members = hosts.length === 1 ? new Set(rooms[hosts[0]].nodes.map(node => node.id)) : null;
+        const together = hosts.length === 1 && rooms.every((room, index) => index === hosts[0] ||
+            (room?.status === 'client' && hostOf(room) === hosts[0] && members.has(room.node)));
+        session.together = together ? hosts[0] : -1;
     }
 
     function frame(now) {
@@ -316,19 +481,19 @@
         session.frameHandle = requestAnimationFrame(frame);
     }
 
-    // Ctrl+1..4 gives that console the keyboard (its frame forwards the keys once it has focus).
-    window.addEventListener('keydown', event => {
-        const index = /^Digit[1-4]$/.test(event.code) ? Number(event.code.slice(5)) - 1 : -1;
-        if (!event.ctrlKey || !session || !(index >= 0 && index < session.seats.length)) return;
-        event.preventDefault();
-        focusSeat(session.seats[index]);
-    });
 
     // ── Start-up ─────────────────────────────────────────────────
     (async () => {
         if (!(await ensureIsolation())) return;
         if (query.get('renderer') === 'software') $('renderer').value = 'software';
-        if (query.get('players')) $('player-count').value = query.get('players');
+        // ?players=N takes up to the link's limit; the menu offers what most games allow (8).
+        const players = Number(query.get('players'));
+        if (players >= 2 && players <= window.AzaharSharedLink.MAX_SEATS) {
+            if (![...$('player-count').options].some(option => Number(option.value) === players)) {
+                $('player-count').append(new Option(`${players} players`, String(players)));
+            }
+            $('player-count').value = String(players);
+        }
         await listStored();
         // index.html hands over the game it was playing.
         const play = query.get('play');
@@ -347,6 +512,20 @@
         start,
         stop,
         chooseRom,
+        routeKey,
+        // Index of the player hosting a room every console is in, or -1.
+        together: () => session?.together ?? -1,
+        keyLayouts: () => session?.seats.map(seat => seat.keys.value) || [],
+        // The physical key that presses `code` (a key of the console's own keymap) on that
+        // player's console, or null.
+        keyFor(index, code) {
+            const seat = session?.seats[index];
+            if (!seat) return null;
+            for (const [physical, owner] of keyOwners()) {
+                if (owner.seat === seat && owner.code === code) return physical;
+            }
+            return null;
+        },
         seats: () => session?.seats.map(seat => seat.frame) || [],
         shares: () => session?.slots.map(slot => slot[window.AzaharSharedLink.SLOT.share]) || [],
     };

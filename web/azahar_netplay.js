@@ -158,6 +158,27 @@
             }
         }
 
+        // The game's local wireless room as the engine sees it (see azahar_get_uds_status;
+        // `room` is the name of a tabs link):
+        // {status: 'none' | 'host' | 'client' | 'spectator' | 'connecting', host (MAC),
+        // wlanCommId, networkId, node, maxNodes, nodes: [{id, name}]}, or null.
+        gameRoom() {
+            const module = this.module();
+            if (!module?._azahar_get_uds_status) return null;
+            const size = 2048;
+            const pointer = module._malloc(size);
+            try {
+                const length = module._azahar_get_uds_status(pointer, size);
+                if (length < 0) return null;
+                // TextDecoder refuses views of shared memory.
+                return JSON.parse(new TextDecoder().decode(module.HEAPU8.slice(pointer, pointer + length)));
+            } catch (_) {
+                return null;
+            } finally {
+                module._free(pointer);
+            }
+        }
+
         // Queues a control message on the shared link, for one console or all.
         sendShared(message, seat = -1) {
             const bytes = new TextEncoder().encode(JSON.stringify(message));
@@ -481,6 +502,7 @@
                     title: peer.title, open: peer.channel ? peer.channel.readyState === 'open' : true})),
                 // dropped: frames a full shared-link ring could not take (shared mode).
                 stats: this.shared ? {...this.stats, dropped: this.shared.dropped()} : {...this.stats},
+                gameRoom: this.gameRoom(),
                 netsim: this.netsim && {...this.netsim, ...this.netsimStats},
                 pacing: this.pacing ? {...this.pacingStats, heldMs: Math.round(this.pacingStats.heldMs),
                     throttledMs: Math.round(this.pacingStats.throttledMs), speed: this.speedPermille / 1000} : null,

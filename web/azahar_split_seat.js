@@ -42,14 +42,16 @@
         if (message.action === 'start') void start(message);
     });
 
-    // Ctrl+1..4 hands the keyboard to that player's screen. Once a screen has focus the
-    // keys arrive here, and the game must not see them (Digit2 is ZR).
-    window.addEventListener('keydown', event => {
-        if (!event.ctrlKey || !/^Digit[1-4]$/.test(event.code)) return;
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        post({event: 'focus', target: Number(event.code.slice(5)) - 1});
-    }, true);
+    // The page owns the keyboard: every player has keys of their own on it (see
+    // azahar_split.js). Keys typed while this screen has focus go to the page, which hands
+    // each console its player's keys; those arrive here untrusted and reach the game.
+    for (const type of ['keydown', 'keyup']) {
+        window.addEventListener(type, event => {
+            if (!event.isTrusted) return;
+            event.stopImmediatePropagation();
+            if (window.parent.AzaharSplit?.routeKey(type, event)) event.preventDefault();
+        }, true);
+    }
 
     function announceReady() {
         if (window.AzaharUI?.isInitialized()) post({event: 'ready'});

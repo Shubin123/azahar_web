@@ -18,7 +18,9 @@
  * Usage:
  *   node tests/split_screen.test.cjs
  *   node tests/split_screen.test.cjs --rom PATH [--game mario-kart-7] [--renderer webgl2|software]
- *       [--no-race] [--gpu] [--timeout SECONDS] [--web DIR] [--query cpuJit=0]
+ *       [--no-race] [--gpu] [--timeout SECONDS] [--web DIR] [--query cpuJit=0] [--players N]
+ *   --players N (2-8) puts N consoles in the game's room: players 1 and 2 on their keyboard
+ *   keys, the others on a controller each; the race check needs two players.
  *   add --base URL to test a deployed site (https://shubin123.github.io/azahar_web) instead of web/
  */
 'use strict';
@@ -77,23 +79,39 @@ async function ringChecks(page) {
         const queued = c.send(link.KIND_FRAME, new Uint8Array([9, 9]));
         collect(a); collect(b); collect(c);
         const broadcast = queued === 2 && got.length === 2 && got.every(([, from]) => from === 2);
-        // A reader that stops: the ring fills, further messages are dropped and counted,
-        // and nothing already queued is lost or corrupted.
+        // A reader that stops does not hold its sender up: the sender keeps writing, the
+        // stopped console loses the oldest messages (counted), and what it reads when it
+        // comes back is the newest, intact and in order.
         let accepted = 0;
         for (let i = 0; i < 20; i++) accepted += a.send(link.KIND_FRAME, new Uint8Array(60).fill(i), 2);
         got.length = 0;
         collect(c);
-        const intact = got.every(([, , bytes], i) => bytes.length === 60 && bytes.every(value => value === i));
-        return {orderKept, broadcast, accepted, received: got.length, dropped: a.dropped(), intact};
+        const newest = got.every(([, , bytes], i) => bytes.length === 60 &&
+            bytes.every(value => value === 20 - got.length + i));
+        // One pool for many consoles: eight, each hearing the seven others once.
+        const eight = link.create(8, 1024);
+        const ends = Array.from({length: 8}, (_, seat) => link.open(eight, seat));
+        for (const end of ends) end.send(link.KIND_FRAME, new Uint8Array([end.seat]));
+        const heard = ends.map(end => {
+            const from = [];
+            end.receive((kind, bytes, seat) => from.push(seat === bytes[0] ? seat : -1));
+            return from.sort().join();
+        });
+        const everyone = heard.every((list, seat) => list === [0, 1, 2, 3, 4, 5, 6, 7].filter(s => s !== seat).join());
+        return {orderKept, broadcast, accepted, received: got.length, dropped: a.dropped(), newest, everyone,
+            poolBytes: [link.bytes(2), link.bytes(8)]};
     });
     assert.ok(!result.error, result.error);
     assert.ok(result.orderKept, 'messages arrive in order and intact across the ring end');
     assert.ok(result.broadcast, 'a broadcast reaches each other console once');
-    assert.strictEqual(result.accepted, result.received, 'every accepted message arrives');
-    assert.ok(result.accepted > 0 && result.accepted < 20, 'a full ring refuses more');
-    assert.strictEqual(result.dropped, 20 - result.accepted, 'refused messages are counted');
-    assert.ok(result.intact, 'queued messages survive a full ring');
-    console.log(`PASS shared rings: order across the ring end, broadcast, ${result.dropped} drops counted when full`);
+    assert.strictEqual(result.accepted, 20, 'a stopped reader does not refuse messages');
+    assert.ok(result.received > 0 && result.received < 20, 'it keeps what fits');
+    assert.strictEqual(result.dropped, 20 - result.received, 'and the ones it lost are counted');
+    assert.ok(result.newest, 'what it reads is the newest, intact and in order');
+    assert.ok(result.everyone, 'eight consoles share one pool, each hearing every other once');
+    assert.ok(result.poolBytes[1] < result.poolBytes[0] * 5, `the pool grows with consoles, not pairs (${result.poolBytes})`);
+    console.log(`PASS shared pool: order across the ring end, broadcast, a stopped reader loses ${result.dropped} ` +
+        `old messages without holding others up; 8 consoles in ${(result.poolBytes[1] / 1048576).toFixed(1)} MiB`);
 }
 
 // Each console's frame, once its page has loaded (a deployed site's frames load slowly, and
@@ -146,7 +164,6 @@ async function linkChecks(browser) {
     assert.match(card, /Linked \(this device\)/, 'the console reports the link');
     console.log('PASS split.html links three consoles through shared memory and carries frames between all of them');
     await keyboardChecks(page, frames);
-    console.log('PASS the keyboard reaches only the console whose screen has focus');
 
     // Sharing the main thread, driven through the slots the consoles publish.
     const shares = await page.evaluate(async () => {
@@ -210,6 +227,27 @@ async function linkChecks(browser) {
     console.log('PASS the Local Play card opens split.html with the current game');
     await main.close();
     await libraryHandOff(browser);
+    await manyConsoles(browser, dummy);
+}
+
+// As many consoles as a local wireless network takes: eight on one page, each linked to the
+// seven others through the one shared pool, laid out in a grid.
+async function manyConsoles(browser, dummy) {
+    const page = await openSplit(browser, 'players=8&renderer=software', dummy);
+    const frames = await seatFrames(page);
+    assert.strictEqual(frames.length, 8, 'eight consoles');
+    for (const frame of frames) {
+        await frame.waitForFunction(() => window.AzaharNetplay?.status().peers.length === 7, { timeout: 120000 });
+    }
+    const columns = await page.$eval('#seats', element => getComputedStyle(element).gridTemplateColumns.split(' ').length);
+    assert.strictEqual(columns, 3, 'eight screens in three columns');
+    await frames[7].evaluate(bytes => window.AzaharNetplay.sendFrame(Uint8Array.from(bytes)), TEST_FRAME(8));
+    for (const frame of frames.slice(0, 7)) {
+        await frame.waitForFunction(() => window.AzaharNetplay.stats.received >= 1, { timeout: 10000 })
+            .catch(() => { throw new Error('a frame from the eighth console did not reach every other one'); });
+    }
+    console.log('PASS split.html runs eight consoles, each linked to the seven others through one shared pool');
+    await page.close();
 }
 
 // A game played from the library cache goes to split.html the same way. A stand-in is stored
@@ -265,14 +303,19 @@ async function libraryHandOff(browser) {
 
 const fmt = shares => shares.map(share => share.toFixed(2)).join('/');
 
-// Keys go to one console through its own input path (as controllers do), so both
-// consoles' steps can run at once; the shared mouse is taken one touch at a time.
+// Each player presses their own keys on the shared keyboard (split.html hands every console
+// its player's keys), so both consoles' steps can run at once; the shared mouse is taken one
+// touch at a time.
 let mouseLock = Promise.resolve();
 
-const holdKey = (frame, code, down) =>
-    frame.evaluate((code, down) => window.AzaharInput.setSourceCodes('test', down ? [code] : []), code, down);
+// Holds `code` (a key of the console's own keymap) with player `index`'s physical key.
+async function holdPlayerKey(page, index, code, down) {
+    const key = await page.evaluate((index, code) => window.AzaharSplit.keyFor(index, code), index, code);
+    assert.ok(key, `player ${index + 1} has a key for ${code}`);
+    await (down ? page.keyboard.down(key) : page.keyboard.up(key));
+}
 
-async function runSteps(page, frame, steps) {
+async function runSteps(page, frame, steps, holdKey) {
     const canvas = await frame.$('#canvas');
     for (const step of steps) {
         const [action, ...args] = step.split(/\s+/);
@@ -299,27 +342,74 @@ async function runSteps(page, frame, steps) {
 }
 
 // The real keyboard reaches only the console whose screen has focus (Ctrl+N picks it).
+// Players share one keyboard: each console gets only its player's keys, translated to the
+// console's own keymap (A is KeyA there), whichever screen has focus. Ctrl+N gives one player
+// the whole keyboard and Ctrl+0 shares it again. Controllers go to the players one each.
 async function keyboardChecks(page, frames) {
-    for (const frame of frames) {
-        await frame.evaluate(() => {
-            window.keysSeen = 0;
-            window.addEventListener('keydown', event => { if (event.code === 'KeyX') window.keysSeen++; });
-        });
-    }
-    for (const [index, frame] of frames.entries()) {
+    const held = () => Promise.all(frames.map(frame => frame.evaluate(() => window.AzaharInput.getPressedCodes().sort())));
+    const expectHeld = async (expected, label) => {
+        for (let attempt = 0; attempt < 40; attempt++) {
+            if (JSON.stringify(await held()) === JSON.stringify(expected)) return;
+            await sleep(50);
+        }
+        assert.deepStrictEqual(await held(), expected, label);
+    };
+    const none = frames.map(() => []);
+    assert.deepStrictEqual(await page.evaluate(() => window.AzaharSplit.keyLayouts()), ['left', 'right', 'none'],
+        'players 1 and 2 split the keyboard; player 3 uses a controller');
+    const legends = await page.$$eval('#seats .seat-legend', elements => elements.map(element => element.textContent));
+    assert.match(legends[0], /WASD/, 'player 1 sees their keys');
+    assert.match(legends[1], /Arrows/, 'player 2 sees theirs');
+    await page.evaluate(() => document.activeElement?.blur());
+
+    await page.keyboard.down('KeyG');
+    await expectHeld([['KeyA'], [], []], "player 1's G is A on player 1's console only");
+    await page.keyboard.down('KeyL');
+    await expectHeld([['KeyA'], ['KeyA'], []], "player 2's L is A on player 2's console, at the same time");
+    await page.keyboard.down('KeyW');
+    await page.keyboard.down('ArrowLeft');
+    await expectHeld([['ArrowUp', 'KeyA'], ['ArrowLeft', 'KeyA'], []], 'each moves their own Circle Pad');
+    for (const key of ['KeyG', 'KeyL', 'KeyW', 'ArrowLeft']) await page.keyboard.up(key);
+    await expectHeld(none, 'releasing the keys releases them on the consoles');
+
+    // A screen with focus (clicked to touch it) passes its keys on to the same routing.
+    await page.evaluate(() => document.querySelectorAll('#seats iframe')[1].focus());
+    await page.keyboard.down('KeyG');
+    await expectHeld([['KeyA'], [], []], "inside player 2's screen, G still belongs to player 1");
+    await page.keyboard.up('KeyG');
+    await expectHeld(none, 'and is released');
+
+    const ctrl = async digit => {
         await page.keyboard.down('Control');
-        await page.keyboard.press(String(index + 1));
+        await page.keyboard.press(digit);
         await page.keyboard.up('Control');
-        await page.waitForFunction(index => document.activeElement === document.querySelectorAll('#seats iframe')[index],
-            { timeout: 5000 }, index).catch(() => { throw new Error(`Ctrl+${index + 1} did not focus Player ${index + 1}`); });
-        await page.keyboard.press('KeyX');
-        const seen = await Promise.all(frames.map(other => other.evaluate(() => window.keysSeen)));
-        assert.deepStrictEqual(seen.map(count => count > 0), frames.map((_, i) => i <= index),
-            `Ctrl+${index + 1} gives Player ${index + 1} the keyboard (keys seen: ${seen})`);
-        await sleep(600);
-    }
+    };
+    await ctrl('Digit2');
+    await page.waitForFunction(() => window.AzaharSplit.keyLayouts().join() === 'none,all,none', { timeout: 5000 })
+        .catch(() => { throw new Error('Ctrl+2 did not give player 2 the whole keyboard'); });
+    await page.keyboard.down('KeyA');
+    await expectHeld([[], ['KeyA'], []], "Ctrl+2: the emulator's keymap drives player 2 alone");
+    await page.keyboard.up('KeyA');
     const marked = await page.$$eval('#seats .seat', seats => seats.map(seat => seat.classList.contains('has-keyboard')));
-    assert.deepStrictEqual(marked, frames.map((_, i) => i === frames.length - 1), 'the focused screen is marked');
+    assert.deepStrictEqual(marked, [false, true, false], 'the screen with keys is marked');
+    await ctrl('Digit0');
+    await page.waitForFunction(() => window.AzaharSplit.keyLayouts().join() === 'left,right,none', { timeout: 5000 })
+        .catch(() => { throw new Error('Ctrl+0 did not share the keyboard again'); });
+    console.log('PASS players 1 and 2 play on one keyboard with keys of their own; Ctrl+N and Ctrl+0 switch');
+
+    // Two controllers: the first goes to player 1 and the second to player 2.
+    await page.evaluate(() => {
+        const pad = index => ({ index, id: `Test pad ${index + 1}`, connected: true, mapping: 'standard',
+            buttons: Array.from({ length: 17 }, () => ({ pressed: false, value: 0 })), axes: [0, 0, 0, 0] });
+        window.testPads = [pad(0), pad(1)];
+        navigator.getGamepads = () => window.testPads;
+        window.testPads[0].buttons[1] = { pressed: true, value: 1 };
+        window.testPads[1].axes[0] = -1;
+    });
+    await expectHeld([['KeyA'], ['ArrowLeft'], []], "each controller drives its own player's console");
+    await page.evaluate(() => { window.testPads = []; });
+    await expectHeld(none, 'and unplugging them lets go');
+    console.log('PASS each controller drives its own player\'s console');
 }
 
 const logText = frame => frame.evaluate(() => window.AzaharUI.getLog());
@@ -333,6 +423,19 @@ async function waitForLog(frame, pattern, label) {
     throw new Error(`${label}: no "${pattern.source}" in the log after ${timeoutMs / 1000}s`);
 }
 
+// Holds `code` (a key of the console's own keymap) on test controller `pad`, through the
+// standard mapping the page reads (button for a button, stick axis for a direction).
+async function holdPadKey(page, pad, code, down) {
+    await page.evaluate((pad, code, down) => {
+        const keymap = window.AzaharSplit.seats()[0].contentWindow.AzaharInput.KEYMAP;
+        const binding = keymap.find(entry => entry.code === code)?.pad;
+        const state = window.testPads[pad];
+        if (binding?.button !== undefined) state.buttons[binding.button] = { pressed: down, value: down ? 1 : 0 };
+        else if (binding?.axis !== undefined) state.axes[binding.axis] = down ? binding.direction : 0;
+        else throw new Error(`no controller binding for ${code}`);
+    }, pad, code, down);
+}
+
 async function playGame(browser, rom) {
     const key = cfg.argVal('--game', 'mario-kart-7');
     const game = GAMES[key];
@@ -340,17 +443,41 @@ async function playGame(browser, rom) {
     const renderer = cfg.argVal('--renderer', 'webgl2');
     // --query passes page options to every console (split.html hands on the ones it knows).
     const extra = cfg.argVal('--query', '');
-    const page = await openSplit(browser, `renderer=${renderer}${extra ? `&${extra}` : ''}`, rom);
-    const [host, guest] = await seatFrames(page);
-    for (const frame of [host, guest]) {
-        await frame.waitForFunction(() => window.AzaharUI?.isRunning() && window.AzaharNetplay.status().joined &&
-            window.AzaharNetplay.status().peers.some(peer => peer.mac), { timeout: 180000 });
+    const players = Number(cfg.argVal('--players', 2));
+    assert.ok(players >= 2 && players <= 8, '--players takes 2 to 8');
+    const page = await openSplit(browser, `players=${players}&renderer=${renderer}${extra ? `&${extra}` : ''}`, rom);
+    const frames = await seatFrames(page);
+    const [host, guest] = frames;
+    const guests = frames.slice(1);
+    // Players 3 and up play on a controller of their own.
+    if (players > 2) {
+        await page.evaluate(count => {
+            const pad = index => ({ index, id: `Test pad ${index + 1}`, connected: true, mapping: 'standard',
+                buttons: Array.from({ length: 17 }, () => ({ pressed: false, value: 0 })), axes: [0, 0, 0, 0] });
+            window.testPads = Array.from({ length: count }, (_, index) => pad(index));
+            navigator.getGamepads = () => window.testPads;
+        }, players - 2);
+        for (let index = 2; index < players; index++) {
+            const select = `#seats .seat:nth-child(${index + 1}) .seat-pad`;
+            await page.waitForFunction(select => [...document.querySelector(select).options].length > 2,
+                { timeout: 10000 }, select);
+            await page.select(select, String(index - 2));
+        }
     }
-    const [hostState, guestState] = await Promise.all([host, guest].map(frame =>
-        frame.evaluate(() => window.AzaharNetplay.status())));
-    assert.notStrictEqual(hostState.mac, guestState.mac, 'each console has its own address');
-    assert.strictEqual(hostState.peers[0]?.mac, guestState.mac, 'the host sees the guest');
-    for (const frame of [host, guest]) await installFrameTrace(frame);
+    const holdKey = (frame, code, down) => {
+        const index = frames.indexOf(frame);
+        return index < 2 ? holdPlayerKey(page, index, code, down) : holdPadKey(page, index - 2, code, down);
+    };
+    for (const frame of frames) {
+        await frame.waitForFunction(count => window.AzaharUI?.isRunning() && window.AzaharNetplay.status().joined &&
+            window.AzaharNetplay.status().peers.filter(peer => peer.mac).length === count - 1, { timeout: 180000 }, players);
+    }
+    const states = await Promise.all(frames.map(frame => frame.evaluate(() => window.AzaharNetplay.status())));
+    const hostState = states[0];
+    assert.strictEqual(new Set(states.map(state => state.mac)).size, players, 'each console has its own address');
+    assert.deepStrictEqual(hostState.peers.map(peer => peer.mac).sort(), states.slice(1).map(state => state.mac).sort(),
+        'the host sees every other console');
+    for (const frame of frames) await installFrameTrace(frame);
     const started = Date.now();
     const directory = path.join(OUTPUT, key);
     // --film keeps a screenshot of both consoles every 15 s, to see where a run went astray.
@@ -365,18 +492,41 @@ async function playGame(browser, rom) {
     const screenshot = name => page.screenshot({ path: path.join(directory, `${name}.png`) });
     fs.mkdirSync(directory, { recursive: true });
     try {
-        await runSteps(page, host, game.host.steps);
-        await runSteps(page, guest, game.guest.steps);
-        await waitForLog(host, /Node \d+ joined the hosted network/, 'host');
-        await waitForLog(guest, /Joined a network as node \d+/, 'guest');
+        await runSteps(page, host, game.host.steps, holdKey);
+        for (const [index, frame] of guests.entries()) {
+            await runSteps(page, frame, game.guest.steps, holdKey);
+            await waitForLog(host, new RegExp(`Node ${index + 2} joined the hosted network`), 'host');
+            await waitForLog(frame, /Joined a network as node \d+/, `player ${index + 2}`);
+        }
+        // Everyone in one room, as the consoles see it: the host's network lists every player
+        // and each guest is a client of the host's console.
+        await page.waitForFunction(() => window.AzaharSplit.together() === 0, { timeout: 30000 }).catch(async () => {
+            const rooms = await Promise.all(frames.map(frame => frame.evaluate(() => window.AzaharNetplay.gameRoom())));
+            throw new Error(`the players are not in one room: ${JSON.stringify(rooms)}`);
+        });
+        const rooms = await Promise.all(frames.map(frame => frame.evaluate(() => window.AzaharNetplay.gameRoom())));
+        const hostRoom = rooms[0];
+        assert.strictEqual(hostRoom.status, 'host');
+        assert.deepStrictEqual(hostRoom.nodes.map(node => node.id), frames.map((_, index) => index + 1),
+            'the host\'s room has every player');
+        for (const room of rooms.slice(1)) {
+            assert.strictEqual(room.status, 'client');
+            assert.strictEqual(room.host, hostState.mac, 'each guest is in the host\'s room');
+            assert.ok(hostRoom.nodes.some(node => node.id === room.node), 'which lists it');
+        }
+        const badges = await page.$$eval('#seats .seat-room', elements => elements.map(element => element.textContent));
+        assert.match(badges[0], new RegExp(`Hosting a room · ${players} players`));
+        for (const badge of badges.slice(1)) assert.match(badge, /In Player 1's room/);
         await screenshot('joined');
         const stats = await guest.evaluate(() => window.AzaharNetplay.status().stats);
-        console.log(`PASS ${game.title}: Player 1 hosted and Player 2 joined on one device ` +
-            `(${stats.sent} frames sent, ${stats.delivered} delivered by Player 2)`);
+        console.log(`PASS ${game.title}: all ${players} players are in one room, players 1 and 2 on one keyboard` +
+            `${players > 2 ? ` and ${players - 2} on controllers` : ''} (Player 1 hosts network ` +
+            `0x${(hostRoom.wlanCommId >>> 0).toString(16)} with nodes ${hostRoom.nodes.map(node => node.id).join(', ')}; ` +
+            `${stats.delivered} frames delivered to Player 2)`);
         // The next phase, such as the host starting a race, and whether both consoles agree on it.
-        if (!cfg.argFlag('--no-race') && (game.host.afterJoin || game.guest.afterJoin)) {
-            await Promise.all([runSteps(page, host, game.host.afterJoin || []),
-                runSteps(page, guest, game.guest.afterJoin || [])]);
+        if (players === 2 && !cfg.argFlag('--no-race') && (game.host.afterJoin || game.guest.afterJoin)) {
+            await Promise.all([runSteps(page, host, game.host.afterJoin || [], holdKey),
+                runSteps(page, guest, game.guest.afterJoin || [], holdKey)]);
             await guestSleep(host, Number(game.afterJoinWaitMs || 30000));
             await screenshot('after-join');
             if (game.syncCheck) {
@@ -397,7 +547,7 @@ async function playGame(browser, rom) {
         }
     } catch (error) {
         // What a console that stopped drawing is waiting for: each guest thread's state.
-        for (const [index, frame] of [host, guest].entries()) {
+        for (const [index, frame] of frames.entries()) {
             const threads = await frame.evaluate(() => {
                 const log = () => window.AzaharUI.getLog();
                 const before = log().length;
@@ -420,7 +570,7 @@ async function playGame(browser, rom) {
     } finally {
         clearInterval(monitor);
         await screenshot('split');
-        for (const [index, frame] of [host, guest].entries()) {
+        for (const [index, frame] of frames.entries()) {
             await saveFrameTrace(frame, path.join(directory, `frames-${index + 1}.txt`)).catch(() => {});
             // Each bound data channel's queue: packets waiting now and the most ever waiting.
             const uds = await frame.evaluate(() => {

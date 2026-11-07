@@ -949,3 +949,35 @@ node tests/cpu_jit.test.cjs --rom ROM --state STATE.cst --seconds 20 --bench
 # Split screen with every console verifying:
 node tests/split_screen.test.cjs --rom ROM --query cpuJit=verify
 ```
+
+## Local Play: players, keys and rooms on one device (2026-11-06)
+
+`split.html` now links its consoles through one shared pool (a ring per console that every
+other console reads), so the memory grows with the number of consoles: 8 consoles take
+2 MiB, and eight linked consoles each hear the seven others within a second. Players 1 and
+2 share the keyboard with keys of their own and every other player gets a controller; the
+page routes every key and controller, so screens no longer compete for focus.
+
+`azahar_get_uds_status` reports the room (local wireless network) each console hosts or
+joined; the page shows it per screen and says when every player is in one. With Mario Kart 7
+both players reach one room from one keyboard (Player 1 hosts network 0x2810, Player 2 is
+node 2 of 2) and race (92% agreement in the last run).
+
+A third player does not get in yet. Its Download Play scan finds the room, connects as a
+spectator, receives the title, and Mario Kart 7 then deletes the scan result
+(`DeleteScanInfo`) at once, every 1.5 s, while the first guest saw the same room listed. The
+server info it reads was the same as the first guest's in the last experiment (1 of 8
+joined, the host's node only), so the game decides from something else; reporting the
+room's real node list and bitmask, counting clients without the host, and giving every
+console its own friend code seed did not change it. Two real bugs came out of it:
+`CFG::GetLocalFriendCodeSeed` answered success with seed 0 on every console without a
+LocalFriendCodeSeed_B dump (an error reply followed by a success one), so all consoles
+announced one seed; each console now derives its seed from its MAC address, as the
+`SPOOF_FRIEND_CODE_SEED` hack does for Luigi's Mansion. And the Download Play client's beacon
+tag scan never stopped at the end of the frame.
+
+```bash
+node tests/split_screen.test.cjs --rom ROM                  # two players, one keyboard, one room, race
+node tests/split_screen.test.cjs --rom ROM --players 3 --no-race \
+    --query "logFilter=Service.FRD:Error%20Service.DLP:Debug"  # player 3 on a controller
+```
