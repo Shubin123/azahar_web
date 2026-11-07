@@ -21,6 +21,23 @@
     const MIN_SHARE = 0.15;
     // Headroom given to a console on top of what it used while finishing early.
     const SHARE_HEADROOM = 1.25;
+    // Checkpoints (see scheduleCheckpoint): the first once everyone has been in one room this
+    // long, and never two closer than CHECKPOINT_GAP_MS on the page, since each pauses every
+    // console for a moment (about 0.6 s for Mario Party on an Apple M4).
+    const FIRST_CHECKPOINT_MS = 10000;
+    const CHECKPOINT_GAP_MS = 5000;
+    // A console that keeps stopping is left stopped after this many restarts in a row.
+    const MAX_AUTO_RESTARTS = 3;
+    // How long a console reloading into the checkpoint may take (booting, the Download Play
+    // child, loading) before the others play on without it.
+    const RESTORE_TIMEOUT_MS = 120000;
+    // A console saves only between the game's operations (AzaharUI.stateReady); a checkpoint
+    // starts when every console can save at its next frame, so the link is held for one refresh,
+    // and is tried again a moment later otherwise (in a Mario Kart 7 race some operation is
+    // always under way, so none is taken). The hold never lasts longer than CAPTURE_HOLD_MS.
+    const CAPTURE_HOLD_MS = 1500;
+    const CHECKPOINT_NOT_READY_MS = 1000;
+    const CHECKPOINT_RETRY_MS = 20000;
     // Keyboard layouts that let two players share one keyboard. Each maps a physical key
     // (KeyboardEvent.code) to the key of the console's own default layout that drives that
     // control (see KEYMAP in azahar_input.js): A KeyA, B KeyS, X KeyZ, Y KeyX, L KeyQ,
@@ -144,7 +161,8 @@
     });
 
     // ── Consoles ─────────────────────────────────────────────────
-    function seatUrl(index, count) {
+    // `interpreter`: the console restarts with compiled ARM code off, after it stopped with it on.
+    function seatUrl(index, count, interpreter = false) {
         const url = new URL('index.html', location.href);
         url.searchParams.set('seat', String(index));
         url.searchParams.set('seats', String(count));
@@ -154,6 +172,7 @@
         for (const name of PASS_THROUGH) {
             if (query.has(name)) url.searchParams.set(name, query.get(name));
         }
+        if (interpreter) url.searchParams.set('cpuJit', '0');
         return url.toString();
     }
 
@@ -169,6 +188,16 @@
             legend: element.querySelector('.seat-legend'),
             room: element.querySelector('.seat-room'),
             mute: element.querySelector('.seat-mute'),
+            dlp: element.querySelector('.seat-dlp'),
+            reset: element.querySelector('.seat-reset'),
+            mac: null,           // the console's address, kept for after it restarts
+            checkpoint: null,    // {programId, bytes, at}: its part of the last checkpoint
+            restore: null,       // the checkpoint it is restarting into
+            holdFrames: null,    // the link's frames are held while it restarts (restoreGroup)
+            whenRunning: null,   // resolves once it runs again after a restart
+            interpreter: false,  // restarted with compiled code off
+            failures: 0,         // restarts in a row after it stopped on its own
+            events: [],          // what happened to it: {kind: 'stopped' | 'restarted' | 'restored', ...}
             // Only the first console is heard at first; two copies of one soundtrack clash.
             muted: index > 0,
             started: false,
@@ -188,6 +217,14 @@
             seat.frame.contentWindow?.AzaharAudio?.setMuted(seat.muted);
         });
         seat.pad.addEventListener('click', event => event.stopPropagation());
+        seat.reset.addEventListener('click', event => {
+            event.stopPropagation();
+            void restartSeat(seat, {reason: 'restarted'});
+        });
+        seat.dlp.addEventListener('click', event => {
+            event.stopPropagation();
+            joinDownloadPlay(seat);
+        });
         for (const [value, layout] of Object.entries(KEY_LAYOUTS)) {
             const option = document.createElement('option');
             option.value = value;
@@ -203,6 +240,201 @@
         element.querySelector('.seat-bar').addEventListener('click', () => focusSeat(seat));
         seat.frame.src = seatUrl(index, count);
         return seat;
+    }
+
+    // Restarts one console, the others playing on: its frame reloads and gets the game and the
+    // link again, as at the start. Booting afresh, it leaves the game: every other console drops
+    // it from the room it hosts, so it can join again under the same address (⤺ still brings
+    // everyone, it too, back to the last checkpoint). With `restore` (see restoreGroup) it comes
+    // back to its checkpoint instead. Resolves once it runs again: true, or false if it failed.
+    function restartSeat(seat, {interpreter = false, reason = '', restore = null, holdFrames = null} = {}) {
+        if (!restore) {
+            for (const other of session.seats) {
+                if (other !== seat) other.frame.contentWindow?.AzaharNetplay?.forgetConsole(seat.mac);
+            }
+            say(`Player ${seat.index + 1} ${reason}; restarting it${interpreter || seat.interpreter ?
+                ' with compiled code off' : ''}. The others play on.`);
+        }
+        seat.started = false;
+        seat.error = null;
+        seat.restore = restore;
+        seat.holdFrames = holdFrames;
+        seat.interpreter ||= interpreter;
+        seat.keyCodes = undefined;
+        seat.padCodes = '';
+        seat.state.textContent = restore ? 'Restarting from the checkpoint…' : 'Restarting…';
+        seat.events.push({kind: 'restarted', detail: reason, checkpoint: Boolean(restore),
+            interpreter: seat.interpreter});
+        seat.frame.src = seatUrl(seat.index, session.seats.length, seat.interpreter);
+        return new Promise(resolve => { seat.whenRunning = resolve; });
+    }
+
+    // Whether every console has a checkpoint from the same moment to go back to.
+    function canRestore() {
+        const at = session.checkpointAt;
+        return Boolean(at) && !session.restoring && session.seats.every(seat => seat.checkpoint?.at === at);
+    }
+
+    // Every console back to the last checkpoint, which they all took at one moment (see
+    // captureGroup), so their games and the link between them agree again: one console going
+    // back alone (the host, say) leaves the others' games ahead of it, and they report a
+    // communication error. `failed`: a console that stopped, which reloads, on the interpreter
+    // when `interpreter`; so does one running another title than its checkpoint (restarted
+    // afresh, it runs the game, not the Download Play child it had joined with). The others
+    // load their checkpoint in place, still running (a console loads between the game's
+    // operations). Frames sent meanwhile come from the abandoned timeline and are dropped; then
+    // each console measures its clock against the others again. Resolves to whether every
+    // console is back.
+    async function restoreGroup(reason, failed = null, interpreter = false) {
+        if (!canRestore()) return false;
+        session.restoring = true;
+        const ago = Math.round((performance.now() - session.checkpointAt) / 1000);
+        say(`${reason}: every console goes back to the checkpoint of ${ago} s ago…`, 'ok');
+        const reloads = seat => seat === failed ||
+            seat.frame.contentWindow?.AzaharUI?.getProgramId?.() !== seat.checkpoint.programId;
+        let restored = true;
+        try {
+            const inPlace = session.seats.filter(seat => !reloads(seat));
+            for (const seat of inPlace) seat.frame.contentWindow.AzaharNetplay.holdFrames = 'drop';
+            const loads = [
+                ...inPlace.map(seat => seat.frame.contentWindow.AzaharUI.restoreState(seat.checkpoint.bytes)
+                    .then(() => { seat.events.push({kind: 'restored'}); return true; })),
+                ...session.seats.filter(reloads).map(seat => restartSeat(seat, {
+                    interpreter: seat === failed && interpreter, reason, restore: seat.checkpoint,
+                    holdFrames: 'drop'})),
+            ];
+            // A console that never comes back must not hold the others.
+            const timeout = new Promise(resolve => setTimeout(() => resolve(false), RESTORE_TIMEOUT_MS));
+            restored = (await Promise.all(loads.map(load => Promise.race([load, timeout])))).every(Boolean);
+        } catch (error) {
+            restored = false;
+            console.warn('Going back to the checkpoint failed:', error);
+        } finally {
+            for (const seat of session.seats) {
+                const netplay = seat.frame.contentWindow?.AzaharNetplay;
+                if (!netplay) continue;
+                netplay.pump();
+                netplay.holdFrames = null;
+                netplay.rebaseClocks();
+            }
+            session.restoring = false;
+        }
+        say(restored ? `Every console is back at the checkpoint of ${ago} s ago.` :
+            'Going back to the checkpoint failed.', restored ? 'ok' : 'error');
+        session.restores.push({reason, restored});
+        return restored;
+    }
+
+    // A console stopped on its own (see AzaharSplitSeat.failed): every console goes back to the
+    // last checkpoint, this one reloading; without a checkpoint it restarts afresh. Either way on
+    // the interpreter when compiled code was on.
+    function seatFailed(seat, detail, compiled) {
+        seat.failures++;
+        seat.events.push({kind: 'stopped', detail, compiled});
+        if (seat.failures > MAX_AUTO_RESTARTS) {
+            seat.error = `Stopped: ${detail}. It stopped ${seat.failures} times in a row; press ↺ to try again.`;
+            return;
+        }
+        if (!canRestore()) {
+            void restartSeat(seat, {interpreter: compiled, reason: `stopped (${detail})`});
+            return;
+        }
+        void restoreGroup(`Player ${seat.index + 1} stopped (${detail})`, seat, compiled).then(restored => {
+            if (!restored) {
+                void restartSeat(seat, {interpreter: compiled, reason: 'could not go back to the checkpoint'});
+            }
+        });
+    }
+
+    function joinDownloadPlay(seat) {
+        const host = session.seats[session.downloadPlayHost];
+        if (!host) return;
+        const error = seat.frame.contentWindow?.AzaharNetplay?.joinDownloadPlay(host.mac);
+        if (error) say(`Player ${seat.index + 1} cannot join Download Play: ${error}.`, 'error');
+    }
+
+    // While everyone is in one room, all consoles take a checkpoint together now and then. Not
+    // while a console is in a Download Play room: that service's state is not saved, so such a
+    // checkpoint would not restore; the game's own room after it starts is fine.
+    function scheduleCheckpoint(now, netplay) {
+        const interval = Number($('checkpoints').value) * 1000;
+        // The room everyone is in; a new one (a Download Play lobby giving way to the game's own
+        // room, say) starts the wait for the first checkpoint again.
+        const room = session.together >= 0 ? netplay[session.together]?.gameRoom : null;
+        const roomKey = room ? `${room.host}/${room.wlanCommId}/${room.networkId}` : null;
+        if (roomKey !== session.togetherRoom) {
+            // Checkpoints belong to the room they were taken in. Losing it for a while (a console
+            // restarting) keeps them; everyone in another room drops them.
+            if (roomKey && session.lastRoom && roomKey !== session.lastRoom) {
+                for (const seat of session.seats) seat.checkpoint = null;
+                session.checkpointAt = null;
+            }
+            session.togetherRoom = roomKey;
+            session.togetherSince = roomKey ? now : null;
+            if (roomKey) session.lastRoom = roomKey;
+        }
+        if (!interval || session.capturing || session.restoring || !roomKey) return;
+        if (now < Math.max(session.togetherSince + FIRST_CHECKPOINT_MS, (session.checkpointAt || 0) + interval,
+            session.checkpointRetryAt || 0)) return;
+        const ready = session.seats.every((seat, index) => {
+            const state = netplay[index];
+            const seatWindow = seat.frame.contentWindow;
+            return seat.started && !seat.restore && seatWindow?.AzaharUI?.isRunning() && state?.joined &&
+                !seatWindow.AzaharNetplay.isDownloadPlayRoom(state.gameRoom) &&
+                (!state.downloadPlay || state.downloadPlay.stage === 'idle');
+        });
+        if (ready) void captureGroup();
+    }
+
+    // A checkpoint of every console at one moment, the consoles playing on: once each can save at
+    // its next frame, each takes in what is still on its way to it, then the link holds frames
+    // while every console saves, so no frame is between the consoles in their checkpoints (one a
+    // console sends after its save waits until all have saved). A Mario Party console's
+    // checkpoint is about 10 MB and takes about 0.6 s on an Apple M4, a pause on every screen
+    // since they share one thread.
+    async function captureGroup() {
+        const seatWindows = session.seats.map(seat => seat.frame.contentWindow);
+        if (!seatWindows.every(seatWindow => seatWindow.AzaharUI.stateReady())) {
+            session.checkpointStats.notReady++;
+            session.checkpointRetryAt = performance.now() + CHECKPOINT_NOT_READY_MS;
+            return;
+        }
+        session.checkpointStats.tried++;
+        session.capturing = true;
+        let saves = [];
+        try {
+            for (const seatWindow of seatWindows) seatWindow.AzaharNetplay.pump();
+            for (const seatWindow of seatWindows) seatWindow.AzaharNetplay.holdFrames = 'keep';
+            saves = seatWindows.map(seatWindow => seatWindow.AzaharUI.captureState());
+            const timeout = new Promise(resolve => setTimeout(() => resolve(null), CAPTURE_HOLD_MS));
+            const states = await Promise.race([Promise.all(saves), timeout]);
+            for (const seatWindow of seatWindows) seatWindow.AzaharNetplay.holdFrames = null;
+            if (!states) {
+                session.checkpointStats.failed++;
+                session.checkpointRetryAt = performance.now() + CHECKPOINT_RETRY_MS;
+                return;
+            }
+            const at = performance.now();
+            session.seats.forEach((seat, index) => {
+                // Copied into this page, which outlives the consoles' frames.
+                seat.checkpoint = {programId: states[index].programId, bytes: new Uint8Array(states[index].bytes), at};
+                // Running long enough to take a checkpoint resets the count of restarts in a row.
+                seat.failures = 0;
+            });
+            session.checkpointAt = at;
+            session.checkpointStats.taken++;
+        } catch (error) {
+            session.checkpointStats.failed++;
+            console.warn('The checkpoint failed:', error);
+            session.checkpointRetryAt = performance.now() + CHECKPOINT_RETRY_MS;
+        } finally {
+            for (const seatWindow of seatWindows) {
+                if (seatWindow?.AzaharNetplay) seatWindow.AzaharNetplay.holdFrames = null;
+            }
+            // Saves still under way finish before the next request.
+            await Promise.allSettled(saves);
+            session.capturing = false;
+        }
     }
 
     function focusSeat(seat) {
@@ -297,7 +529,8 @@
         const count = Number($('player-count').value) || 2;
         const buffer = window.AzaharSharedLink.create(count);
         const seats = Array.from({length: count}, (_, index) => createSeat(index, count));
-        session = {buffer, slots: window.AzaharSharedLink.slots(buffer), seats, rom, lastRebalance: 0, lastStatus: 0};
+        session = {buffer, slots: window.AzaharSharedLink.slots(buffer), seats, rom, lastRebalance: 0, lastStatus: 0,
+            restores: [], checkpointStats: {notReady: 0, tried: 0, taken: 0, failed: 0}};
         seatsEl.className = `seats seats-${count}`;
         // Two columns up to four players (one on portrait screens for two), then a square-ish grid.
         if (count > 4) seatsEl.style.setProperty('--columns', String(Math.ceil(Math.sqrt(count))));
@@ -328,6 +561,18 @@
     }
 
     startButton.addEventListener('click', start);
+    // The ? button: how players join a game room. A click outside the dialog closes it.
+    const helpDialog = $('help-dialog');
+    $('btn-help').addEventListener('click', () => helpDialog.showModal());
+    helpDialog.addEventListener('click', event => {
+        const box = helpDialog.getBoundingClientRect();
+        const outside = event.clientX < box.left || event.clientX > box.right ||
+            event.clientY < box.top || event.clientY > box.bottom;
+        if (event.target === helpDialog && outside) helpDialog.close();
+    });
+    $('btn-checkpoint-restore').addEventListener('click', () => {
+        if (session) void restoreGroup('Back to the checkpoint');
+    });
     stopButton.addEventListener('click', stop);
 
     window.addEventListener('message', event => {
@@ -342,9 +587,20 @@
                 file: session.rom.file, name: session.rom.name,
                 buffer: session.buffer, seat: seat.index,
                 nick: `Player ${seat.index + 1}`, muted: seat.muted,
+                restore: seat.restore, holdFrames: seat.holdFrames,
             }, location.origin);
+        } else if (message.event === 'running') {
+            if (seat.restore) seat.events.push({kind: 'restored'});
+            seat.restore = null;
+            seat.whenRunning?.(true);
+            seat.whenRunning = null;
+        } else if (message.event === 'failed') {
+            seatFailed(seat, message.detail, message.compiled);
         } else if (message.event === 'error') {
             seat.error = message.message;
+            seat.restore = null;
+            seat.whenRunning?.(false);
+            seat.whenRunning = null;
         }
     });
 
@@ -431,21 +687,32 @@
             if (seat.frame.contentWindow?.AzaharUI?.isRunning()) running++;
         }
         const netplay = session.seats.map(seat => seat.frame.contentWindow?.AzaharNetplay?.status?.());
+        session.seats.forEach((seat, index) => {
+            if (netplay[index]?.mac) seat.mac = netplay[index].mac;
+        });
         renderRooms(netplay);
+        renderSeatButtons(now, netplay);
+        scheduleCheckpoint(now, netplay);
         const linked = netplay.filter(state => state?.joined).length;
         const shares = session.slots.map(slot => `${Math.round(slot[SLOT.share] * 100)}%`).join(' / ');
         const frames = netplay.reduce((sum, state) => sum + (state?.stats.sent || 0), 0);
         $('link-stats').textContent = `${running} of ${session.seats.length} consoles running, ` +
             `${linked} linked · ${frames} frames sent · main-thread shares ${shares}`;
-        if (session.together >= 0) {
+        const dlpHost = session.downloadPlayHost;
+        if (session.restoring || session.capturing || session.seats.some(seat => seat.restore || !seat.started)) {
+            // restartSeat, restoreGroup or captureGroup said what is happening.
+        } else if (session.together >= 0) {
             say(`All ${session.seats.length} players are in one game room, hosted by Player ${session.together + 1}.`, 'ok');
         } else if (session.hosts?.length > 1) {
             // Every console here has the whole game, so each can host; then nobody joins anyone.
             const names = session.hosts.map(index => index + 1);
             say(`Players ${names.slice(0, -1).join(', ')} and ${names[names.length - 1]} are each hosting a room, so ` +
-                'nobody can join. Back out on all but one screen and join that room from the game\'s ' +
-                'multiplayer menu for players who each have the game (Local Play). Download Play rooms ' +
-                'are joined from the 3DS HOME Menu, which this emulator does not have.', 'error');
+                'nobody can join. Back out on all but one screen; the others join that room from the ' +
+                'game\'s multiplayer menu (Local Play), or with 📥 when it is a Download Play room.', 'error');
+        } else if (dlpHost >= 0) {
+            say(`Player ${dlpHost + 1}'s room takes Download Play players: press 📥 on the other screens (each ` +
+                'uses the Download Play part of its own copy of the game), or join from the game\'s own ' +
+                `multiplayer menu where it has one. When everyone is listed, Player ${dlpHost + 1} starts the game.`, 'ok');
         } else if (running === session.seats.length) {
             say(`Playing ${session.rom.name} on ${running} consoles. Host a room on one screen and ` +
                 'join it from the others in the game\'s local wireless menu.', 'ok');
@@ -454,16 +721,26 @@
 
     // Which game room (local wireless network) each console is in, by the player hosting it.
     function renderRooms(netplay) {
-        const hostOf = room => session.seats.findIndex((seat, i) => netplay[i]?.mac === room.host);
+        const hostOf = room => session.seats.findIndex((seat, i) =>
+            netplay[i]?.mac && netplay[i].mac.toLowerCase() === String(room.host).toLowerCase());
         const rooms = netplay.map(state => state?.gameRoom);
+        const isDownloadPlay = room => room?.wlanCommId === 0x2810;
+        // A console gathering Download Play players (only one at a time is offered to the others).
+        session.downloadPlayHost = rooms.findIndex(room => room?.status === 'host' && isDownloadPlay(room));
         for (const [index, seat] of session.seats.entries()) {
             const room = rooms[index];
+            const join = netplay[index]?.downloadPlay;
             let text = '';
+            // The badges stay short: a bar that wraps shrinks the console's screen mid-game.
             if (room?.status === 'host') {
                 text = `🏠 Hosting a room · ${room.nodes.length} player${room.nodes.length === 1 ? '' : 's'}`;
             } else if (room?.status === 'client') {
                 const host = hostOf(room);
                 text = `🚪 In ${host >= 0 ? `Player ${host + 1}'s` : 'another console\'s'} room`;
+            } else if (join?.stage === 'starting') {
+                text = '📥 Starting…';
+            } else if (join && join.stage !== 'idle') {
+                text = '📥 Joining…';
             } else if (room?.status === 'connecting') {
                 text = 'Joining a room…';
             }
@@ -481,6 +758,25 @@
         session.hosts = hosts;
     }
 
+    // Each console's 📥 (join the Download Play room another console gathers players in), and ⤺
+    // (everyone back to the last checkpoint).
+    function renderSeatButtons(now, netplay) {
+        const back = $('btn-checkpoint-restore');
+        back.disabled = !canRestore();
+        back.title = session.checkpointAt ? 'Every console back to the checkpoint of ' +
+            `${Math.round((now - session.checkpointAt) / 1000)} s ago` : 'No checkpoint yet (see Checkpoints)';
+        const host = session.downloadPlayHost;
+        for (const [index, seat] of session.seats.entries()) {
+            const state = netplay[index];
+            const offered = host >= 0 && host !== index && state?.joined &&
+                (!state.gameRoom || state.gameRoom.status === 'none') &&
+                (!state.downloadPlay || state.downloadPlay.stage === 'idle') &&
+                !/^00040001/.test(seat.frame.contentWindow?.AzaharUI?.getProgramId?.() || '');
+            seat.dlp.hidden = !offered;
+            if (offered) seat.dlp.textContent = `📥 Join Player ${host + 1}'s Download Play`;
+        }
+    }
+
     function frame(now) {
         if (!session) return;
         const pads = pollPads();
@@ -494,6 +790,10 @@
     (async () => {
         if (!(await ensureIsolation())) return;
         if (query.get('renderer') === 'software') $('renderer').value = 'software';
+        // ?checkpoints=0|120|300 picks the checkpoint interval in seconds (0: none).
+        if ([...$('checkpoints').options].some(option => option.value === query.get('checkpoints'))) {
+            $('checkpoints').value = query.get('checkpoints');
+        }
         // ?players=N takes up to the link's limit; the menu offers what most games allow (8).
         const players = Number(query.get('players'));
         if (players >= 2 && players <= window.AzaharSharedLink.MAX_SEATS) {
@@ -535,6 +835,18 @@
             return null;
         },
         seats: () => session?.seats.map(seat => seat.frame) || [],
+        restartSeat: (index, options) => restartSeat(session.seats[index], options),
+        restoreGroup: reason => restoreGroup(reason || 'Back to the checkpoint'),
+        // Checkpoints: tries put off (a console was busy), tried, taken, failed.
+        checkpointStats: () => ({...session?.checkpointStats}),
+        // Each time every console went back to the checkpoint: {reason, restored}.
+        restores: () => session?.restores.slice() || [],
+        // What happened to each console: stopped, restarted, restored (from a checkpoint).
+        events: () => session?.seats.map(seat => seat.events.slice()) || [],
+        // When each console's part of the last checkpoint was taken (performance.now()), or null.
+        checkpoints: () => session?.seats.map(seat => seat.checkpoint?.at ?? null) || [],
+        // Index of the player gathering Download Play players, or -1.
+        downloadPlayHost: () => session?.downloadPlayHost ?? -1,
         shares: () => session?.slots.map(slot => slot[window.AzaharSharedLink.SLOT.share]) || [],
     };
 })();

@@ -27,7 +27,13 @@ each player a screen of their own in one browser tab, 2 to 8 players
 address and console ID, running the same game, and the consoles talk through
 one pool of memory shared inside the tab (a ring per console that every other
 console reads) instead of a network. Use the game's own local wireless menus as on real consoles, for
-example Mario Kart 7's *Local Multiplayer* or Mario Party's local play. The
+example Mario Kart 7's *Local Multiplayer*. Games that add players through
+**Download Play**, such as Mario Party: Island Tour, open a lobby on the host's
+screen that a 3DS joins from its HOME Menu; here each other screen shows
+**📥 Join Player N's Download Play** instead, and joins with the Download Play
+part of its own copy of the game (nothing is downloaded, and the dump may leave
+that part encrypted). When everyone is listed, the host starts the game and the
+other screens restart into it. The
 current game comes along (it is copied into browser storage if it was picked
 from disk); otherwise choose a file, or a game played before, on that page.
 Every game in the library's *Downloaded & ready to play* list also has a
@@ -47,7 +53,25 @@ this device's processor: the page splits each display refresh between them,
 and a console that is waiting for its next frame passes the rest of its time
 to the others. With the accelerated renderer an Apple M4 runs a two-player
 Mario Kart 7 race at full speed on both screens; the compatibility renderer is
-much slower there. Mario Kart 7 still breaks off with a communication error in
+much slower there.
+
+**↺** on a screen restarts that console afresh, the others playing on (a host
+drops it from its room, so it can join again). While everyone is in one room,
+all consoles save a checkpoint together every couple of minutes: once each can
+save at its next frame, they take in whatever is still on its way between them
+and save while the link holds new frames, so nothing is in flight between their
+checkpoints (about half a second per console, a pause on every screen; the
+header's *Checkpoints* menu or `?checkpoints=0|120|300` changes or stops
+this; a game that is always mid-operation, such as a Mario Kart 7 race, gets
+none). **⤺ Back to checkpoint** brings every console back to it at
+once, so their games still agree: one console going back alone (the host, say)
+leaves the others' games ahead of it, and Mario Party reports a communication
+error. A console that stops on its own is restarted automatically, on the
+interpreter if compiled ARM code was on, and everyone goes back to the
+checkpoint when there is one. On the accelerated renderer, shadow-mapped scenes
+(such as Mario Party's attract intro) draw without their shadows: WebGL2 has no
+image load/store, which 3DS shadow maps need; such a scene used to stop the
+console with `RuntimeError: null function`. Mario Kart 7 still breaks off with a communication error in
 some sessions after the room closes, on one device and between devices alike,
 and its rooms take two players on one device for now: a third console finds
 the room but the game does not list it (see `tests/PERFORMANCE.md`).

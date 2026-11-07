@@ -417,6 +417,24 @@
         updateCpuModeHelp();
     }
 
+    // A Download Play guest restarts into the game's Download Play child (see
+    // AzaharNetplay.joinDownloadPlay), so the title can change under a running session; saves,
+    // checkpoints and per-title CPU rules go by the title that runs. Looked at only once a join
+    // has started (titleMayChange), otherwise the engine is not asked.
+    let titleMayChange = false;
+    function checkTitleChange() {
+        if (!titleMayChange && !window.AzaharNetplay?.joiningDownloadPlay) return;
+        titleMayChange = true;
+        const programId = readCurrentProgramId();
+        if (!programId || programId === currentProgramId) return;
+        log(`Now running title ${programId}${/^00040001/.test(programId) ? ' (Download Play)' : ''}.`);
+        currentProgramId = programId;
+        titleMayChange = false;
+        applyTitleCpuMode();
+        updateSaveControls();
+        if (saveStateStore) void refreshSaveStateList();
+    }
+
     function updateCpuModeHelp() {
         if (!cpuModeHelp) return;
         const stats = cpuJit.stats;
@@ -1936,6 +1954,7 @@ void main() { frag_color = vec4(1.0); }`);
                         checkDisplayThroughput(now);
                         tuneCpuClock(now, gameFps, emulationSpeed);
                         watchCpuJit(now, gameFps, emulationSpeed);
+                        checkTitleChange();
                         stepWorkMs = 0;
                         stepWorkFrames = 0;
                     }
@@ -2059,6 +2078,14 @@ void main() { frag_color = vec4(1.0); }`);
             restartInSoftware(`accelerated renderer failed at step ${step}: ${detail}`);
             return;
         }
+        // A console of split.html: that page restarts it, keeping its game and link, on the
+        // interpreter when compiled code was on, and from its last checkpoint if it has one.
+        if (window.AzaharSplitSeat) {
+            const compiled = cpuJitQuery === null && cpuJit.stats?.mode === 1;
+            stopRunning(`Stopped at step ${step}: ${detail}`);
+            window.AzaharSplitSeat.failed(detail, compiled);
+            return;
+        }
         // With compiled code on, start again on the interpreter (once) rather than stop.
         if (cpuJitQuery === null && cpuJit.stats?.mode === 1) {
             window.AzaharCpuJit?.titles.remember(currentProgramId, 'error');
@@ -2130,6 +2157,68 @@ void main() { frag_color = vec4(1.0); }`);
         return romLoaded;
     }
 
+    // ── Checkpoints (split.html) ─────────────────────────────────
+    // A save state of the running title in slot 0 (players' slots are 1-10), handed over as
+    // bytes so it outlives this console: split.html restores it into a restarted console. Both
+    // work while emulation is paused (they step the frames the engine needs themselves), which
+    // is how split.html checkpoints and restores all its consoles at one moment.
+    const CHECKPOINT_SLOT = 0;
+
+    async function captureState() {
+        if (!romLoaded) throw new Error('No game is running');
+        const programId = readCurrentProgramId();
+        const path = nativeStatePath(programId, CHECKPOINT_SLOT);
+        wasmModule.FS.mkdirTree(saveStateDirectory);
+        try { wasmModule.FS.unlink(path); } catch (_) {}
+        const request = wasmModule._azahar_save_state(CHECKPOINT_SLOT);
+        if (request !== 0) throw new Error(`Save request rejected (${request})`);
+        await waitForNativeStateOperation('sav', path);
+        const bytes = wasmModule.FS.readFile(path);
+        try { wasmModule.FS.unlink(path); } catch (_) {}
+        return {programId, bytes};
+    }
+
+    async function restoreState(source) {
+        // A copy in this page: the checkpoint may come from another frame, even from this
+        // console's frame before it reloaded, whose arrays are not this page's Uint8Array.
+        const bytes = new Uint8Array(source);
+        const header = inspectCst(bytes);
+        const programId = readCurrentProgramId();
+        if (header.programId !== programId) {
+            throw new Error(`The checkpoint is for title ${header.programId}, not ${programId}`);
+        }
+        const path = nativeStatePath(programId, CHECKPOINT_SLOT);
+        wasmModule.FS.mkdirTree(saveStateDirectory);
+        wasmModule.FS.writeFile(path, bytes);
+        const request = wasmModule._azahar_load_state(CHECKPOINT_SLOT);
+        if (request !== 0) throw new Error(`Load request rejected (${request})`);
+        await waitForNativeStateOperation('load');
+        try { wasmModule.FS.unlink(path); } catch (_) {}
+        log(`Restored a checkpoint of ${programId}.`);
+    }
+
+    // Restarts into the game's Download Play child (installed from this game) without joining a
+    // room: a checkpoint taken while the child ran restores into the child only.
+    async function bootDownloadPlayChild() {
+        const before = readCurrentProgramId();
+        const result = wasmModule._azahar_dlp_boot_child?.() ?? -1;
+        if (result !== 0) {
+            throw new Error(window.AzaharNetplay?.downloadPlay(true)?.error ||
+                `Could not start the Download Play game (${result})`);
+        }
+        const deadline = performance.now() + 60000;
+        while (performance.now() < deadline) {
+            await delay(100);
+            if (!running) throw new Error('Emulation stopped while starting the Download Play game');
+            if (readCurrentProgramId() !== before) {
+                titleMayChange = true;
+                checkTitleChange();
+                return currentProgramId;
+            }
+        }
+        throw new Error('The Download Play game did not start');
+    }
+
     // Start a new page session that plays `sourceUrl` from the library's
     // local cache once the emulator is ready.
     function restartWithPlayable(sourceUrl) {
@@ -2161,6 +2250,13 @@ void main() { frag_color = vec4(1.0); }`);
         },
         getCanvas: () => canvas,
         getModule: () => (initialized ? wasmModule : null),
+        // The title that runs (a Download Play child after joining a room), as 16 hex digits.
+        getProgramId: () => (romLoaded ? readCurrentProgramId() : ''),
+        captureState,
+        restoreState,
+        // Whether a save or load asked for now happens at the next frame (see azahar_state_ready).
+        stateReady: () => Boolean(romLoaded && (wasmModule._azahar_state_ready?.() ?? 1)),
+        bootDownloadPlayChild,
         // The current game as another session can reopen it: a library URL or a picked file.
         getPlayableSource: () => ({ url: romRecoveryUrl, file: romRecoveryFile, name: romName,
             renderer: isWebGL2Artifact ? 'webgl2' : 'software' }),

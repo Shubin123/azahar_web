@@ -7,13 +7,17 @@
     "lobby-guest: the console is on the screen that lists nearby rooms.",
     "Capture the two scenes in separate sessions so each console has its own address and ID.",
     "Steps run after linking: 'key CODE MS', 'touch X Y [MS]' (fractions of the canvas), 'wait MS'.",
-    "A pairing [hostBuild, guestBuild] with different builds also checks cross-version play."
+    "A pairing [hostBuild, guestBuild] with different builds also checks cross-version play.",
+    "A build's 'match' finds its ROM by file name in a folder given with --roms DIR or AZAHAR_ROMS when 'rom' is not there (tests/game_roms.cjs).",
+    "downloadPlay: further players join the host's Download Play room (each console with the Download Play part of its own copy of the game) instead of running guest steps from a lobby; 'downloadplay' in guest steps does that.",
+    "followCheck: steps the host takes after the game started, and screen regions (fractions of the canvas) that change with them and must look alike on host and guest (mean channel difference at most 'agree'; the steps change them by at least 'differ')."
   ],
   "smash": {
     "title": "Super Smash Bros. for Nintendo 3DS",
     "builds": {
       "full": {
-        "rom": "test_games/Smash_Bros_USA_Rev7_Decrypted.3ds"
+        "rom": "test_games/Smash_Bros_USA_Rev7_Decrypted.3ds",
+        "match": "Super Smash Bros.*3DS.*\\(USA\\)"
       },
       "kiosk": {
         "rom": "test_games/Smash_Bros_Kiosk_Decrypted.3ds",
@@ -51,7 +55,8 @@
     "title": "Mario Kart 7",
     "builds": {
       "full": {
-        "rom": "test_games/Mario_Kart_7_USA_Rev1_Decrypted.3ds"
+        "rom": "test_games/Mario_Kart_7_USA_Rev1_Decrypted.3ds",
+        "match": "^Mario Kart 7"
       }
     },
     "host": {
@@ -228,6 +233,60 @@
       "minRowsAgree": 6,
       "readyX": 0.155,
       "readyWidth": 0.05
+    }
+  },
+  "mario-party-island-tour": {
+    "title": "Mario Party: Island Tour",
+    "builds": {
+      "full": {
+        "rom": "test_games/Mario_Party_Island_Tour_USA_Decrypted.3ds",
+        "match": "^Mario Party - Island Tour"
+      }
+    },
+    "downloadPlay": true,
+    "host": {
+      "fixture": null,
+      "steps": [
+        "wait 6000",
+        "touch 0.5 0.79 300",
+        "wait 4000",
+        "touch 0.5 0.79 300",
+        "wait 8000"
+      ],
+      "afterJoin": [
+        "wait 2000",
+        "touch 0.70 0.965 300"
+      ]
+    },
+    "guest": {
+      "fixture": null,
+      "steps": [
+        "wait 75000",
+        "downloadplay"
+      ]
+    },
+    "pairings": [
+      [
+        "full",
+        "full"
+      ]
+    ],
+    "note": "Multiplayer is Download Play only: the host's Multiplayer button opens a lobby that others join from the 3DS HOME Menu. Steps: two taps on Multiplayer (the first can land while the title screen is still loading), then End in the lobby once every guest is listed. The dump decrypts only the main partition; the Download Play child is installed from the still-encrypted partition 2 on each guest. The guest idles 75 s on the title before joining: Mario Party's attract intro (3D characters with shadows) then plays, which stopped the accelerated renderer with 'RuntimeError: null function' before shadow passes were skipped on WebGL2. followCheck: on the Main Menu after the game starts, the host picks Party, then Minigames; the guest's top screen shows the same description box.",
+    "followCheck": {
+      "steps": [
+        "touch 0.29 0.69 300",
+        "touch 0.66 0.69 300"
+      ],
+      "rects": [
+        [
+          0.159,
+          0.375,
+          0.43,
+          0.1
+        ]
+      ],
+      "agree": 12,
+      "differ": 25
     }
   }
 }

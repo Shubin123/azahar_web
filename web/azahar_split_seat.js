@@ -1,7 +1,10 @@
 // One console of split.html, which runs several consoles on one device. The
 // page loads index.html?seat=N in a frame per console and, once this frame
 // reports that its emulator is ready, sends the ROM and the shared link:
-//   {kind: 'azahar-split', action: 'start', file, name, buffer, seat, nick, muted}
+//   {kind: 'azahar-split', action: 'start', file, name, buffer, seat, nick, muted, restore, holdFrames}
+// `restore` ({programId, bytes}, optional) is a checkpoint this console took before the page
+// restarted it; the console comes back to it (see restoreGroup in azahar_split.js), with the
+// link's frames held (`holdFrames`, see AzaharNetplay) until every console is back.
 // Every console runs on the page's main thread, so this frame publishes how
 // long its emulation steps take and fills only the share of each refresh the
 // page gives it (see tuneFrameBudget in azahar_ui.js).
@@ -25,14 +28,30 @@
         try {
             const netplay = window.AzaharNetplay;
             netplay.name = String(message.nick || 'Player').slice(0, 10);
+            netplay.holdFrames = message.holdFrames || null;
             netplay.linkShared(message.buffer, message.seat);
             slot = netplay.shared.slot();
             window.AzaharAudio?.setMuted(Boolean(message.muted));
             await window.AzaharUI.loadRomBytes(message.file, message.name, true);
+            if (message.restore) await restore(message.restore);
             post({event: 'running'});
         } catch (error) {
             post({event: 'error', message: error.message || String(error)});
         }
+    }
+
+    async function restore(checkpoint) {
+        const ui = window.AzaharUI;
+        post({event: 'restoring'});
+        // A Download Play guest's checkpoint is of the game's child, which runs only after the
+        // console restarts into it.
+        if (checkpoint.programId !== ui.getProgramId()) {
+            ui.setStatus('Starting the Download Play game to restore its checkpoint...');
+            await ui.bootDownloadPlayChild();
+        }
+        ui.setStatus('Restoring the checkpoint...');
+        await ui.restoreState(checkpoint.bytes);
+        ui.setStatus('Running from the checkpoint.', 'ok');
     }
 
     window.addEventListener('message', event => {
@@ -61,6 +80,11 @@
     else announceReady();
 
     window.AzaharSplitSeat = {
+        // The run loop failed (see handleRunFailure in azahar_ui.js); the page restarts this
+        // console. `compiled`: compiled code was on.
+        failed(detail, compiled) {
+            post({event: 'failed', detail, compiled});
+        },
         // Fraction of a refresh this console may spend emulating.
         budgetShare() {
             const share = slot ? slot[window.AzaharSharedLink.SLOT.share] : 0;

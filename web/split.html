@@ -81,6 +81,7 @@
             .seats.seats-2 { --columns: 1; }
         }
         .seat {
+            position: relative;
             display: flex;
             flex-direction: column;
             min-height: 0;
@@ -110,14 +111,47 @@
         .seat-legend { padding: 0 8px 5px; font-size: 0.68rem; color: #9aa4c4; }
         .seat-bar select { padding: 2px 4px; font-size: 0.72rem; }
         .seat-bar .btn { padding: 2px 8px; font-size: 0.75rem; }
+        .seat-bar .btn[hidden] { display: none; }
+        /* Over the screen, so offering it does not resize the console's screen mid-game. */
+        .seat-dlp { position: absolute; right: 10px; bottom: 10px; z-index: 1; box-shadow: 0 2px 10px #000a; }
+        .seat-dlp[hidden] { display: none; }
         .seat iframe { flex: 1 1 auto; min-height: 120px; width: 100%; border: 0; background: #000; }
         footer { font-size: 0.7rem; color: #666; }
+        #btn-help { padding: 4px 11px; border-radius: 50%; font-size: 0.9rem; }
+        #help-dialog {
+            margin: auto;
+            width: min(40rem, calc(100vw - 24px));
+            max-height: calc(100vh - 24px);
+            overflow-y: auto;
+            background: #16213e;
+            color: #e0e0e0;
+            border: 1px solid #0f3460;
+            border-radius: 8px;
+            padding: 16px 20px;
+            font-size: 0.85rem;
+            line-height: 1.45;
+        }
+        #help-dialog::backdrop { background: #000a; }
+        #help-dialog h2 { font-size: 1rem; color: #ff6b6b; margin-bottom: 8px; }
+        #help-dialog h3 { font-size: 0.88rem; color: #ffd479; margin: 14px 0 4px; }
+        #help-dialog ol, #help-dialog ul { padding-left: 1.3em; }
+        #help-dialog li { margin: 3px 0; }
+        #help-dialog kbd, #help-dialog .chip {
+            padding: 0 5px;
+            border: 1px solid #0f3460;
+            border-radius: 4px;
+            background: #0a0a1a;
+            white-space: nowrap;
+        }
+        #help-dialog form { text-align: right; margin-top: 14px; }
     </style>
 </head>
 <body>
     <header>
         <h1>👥 Local Play on this device</h1>
         <a href="index.html">← Back to the emulator</a>
+        <button type="button" class="btn btn-secondary" id="btn-help" aria-haspopup="dialog"
+                aria-controls="help-dialog" title="How players join a game room">?</button>
         <input type="file" id="rom-file" accept=".3ds,.3dsx,.cia,.elf,.cxi,.app,.cci">
         <label for="rom-file" class="file-label" id="rom-label">Choose a 3DS ROM file…</label>
         <select id="stored-games" aria-label="Games stored in this browser">
@@ -136,6 +170,13 @@
             <option value="webgl2">Accelerated (WebGL2)</option>
             <option value="software">Compatibility (software)</option>
         </select>
+        <select id="checkpoints" aria-label="Checkpoints"
+                title="While everyone is in one game room, all consoles save a checkpoint together now and then (every screen pauses for about half a second per console). When a console stops, every console goes back to it.">
+            <option value="120" selected>Checkpoints: every 2 min</option>
+            <option value="300">Checkpoints: every 5 min</option>
+            <option value="0">Checkpoints: off</option>
+        </select>
+        <button type="button" class="btn btn-secondary" id="btn-checkpoint-restore" disabled>⤺ Back to checkpoint</button>
         <button type="button" class="btn btn-primary" id="btn-start" disabled>Start</button>
         <button type="button" class="btn btn-secondary" id="btn-stop" disabled>Stop</button>
         <div id="status" aria-live="polite">Choose a game. Each player gets a screen of their own.</div>
@@ -143,7 +184,11 @@
             Every screen is its own console with its own address, linked to the others through memory
             shared on this device instead of a network, so use the game's local wireless
             (Local Play / Download Play) menus as on real consoles: host a room on one screen and join
-            it from the others. Players 1 and 2 share the keyboard, each with their own keys (listed
+            it from the others. A Download Play room is joined with 📥 on the other screens (each uses
+            the Download Play part of its own copy of the game). ↺ restarts one console afresh while the
+            others play on; ⤺ brings every console back to the checkpoint they last took together, so
+            their games agree again. A console that stops is restarted on its own, and everyone goes
+            back to the checkpoint when there is one. Players 1 and 2 share the keyboard, each with their own keys (listed
             under each screen, or pick other keys there); Ctrl+1–9 gives one player the whole
             keyboard and Ctrl+0 shares it again. Controllers go to the players in the order they
             connect, or pick one per screen; click a screen to touch it with the mouse. All consoles
@@ -152,6 +197,57 @@
     </header>
     <main class="seats" id="seats" aria-label="Consoles"></main>
     <footer id="link-stats"></footer>
+
+    <dialog id="help-dialog" aria-labelledby="help-title">
+        <h2 id="help-title">How Player 2 joins a game room</h2>
+        <p>Every screen is its own console. One player hosts a room in the game; the others join it.
+            How they join depends on the game.</p>
+
+        <h3>Download Play games (such as Mario Party: Island Tour)</h3>
+        <ol>
+            <li>On Player 1's screen, open the game's multiplayer mode (Mario Party: <b>Multiplayer</b>).
+                Its lobby says it is gathering players.</li>
+            <li>Leave the other screens on the game's title screen: if two screens open the lobby,
+                both are hosting and nobody can join.</li>
+            <li>On Player 2's screen, click <span class="chip">📥 Join Player 1's Download Play</span>
+                at its bottom right. It shows while Player 1's lobby is open and Player 2 is in no room.
+                Do the same on every other screen that should play.</li>
+            <li>Within a few seconds each player is listed in Player 1's lobby.</li>
+            <li>Player 1 starts the game (Mario Party: <b>End</b>). The other screens restart into the
+                game's Download Play version and join Player 1's game.</li>
+        </ol>
+
+        <h3>Games where everyone has the game (such as Mario Kart 7)</h3>
+        <ol>
+            <li>Player 1 hosts from the game's own menu (Mario Kart 7: <b>Local Multiplayer</b>,
+                then create a room).</li>
+            <li>Player 2 opens the same menu on their screen and picks Player 1's room from the list.</li>
+        </ol>
+        <p>Some of these games accept Download Play players too (Mario Kart 7 does), so 📥 can show
+            there as well; joining from the game's menu plays the full game.</p>
+
+        <h3>Players on other devices or browsers</h3>
+        <ol>
+            <li>On the emulator page, link the consoles in the <b>📡 Local Play</b> card: send an invite
+                code and paste back the reply, or use a public lobby.</li>
+            <li>Join from the game's menu as above. For a Download Play room, press
+                <span class="chip">📥 Join Download Play</span> in the Local Play card: it joins the first
+                room offering the game.</li>
+        </ol>
+
+        <h3>When joining does not work</h3>
+        <ul>
+            <li>The bar above each screen says which room its console is in:
+                <span class="chip">🏠 Hosting a room · 2 players</span> on the host,
+                <span class="chip">🚪 In Player 1's room</span> on a player who joined.</li>
+            <li>If a screen stays on <span class="chip">📥 Joining…</span> (the host left its lobby,
+                say), press <span class="chip">↺</span> on that screen and join again once the lobby
+                is open.</li>
+            <li><span class="chip">↺</span> restarts one console; <span class="chip">⤺ Back to checkpoint</span>
+                brings every console back to the moment they last saved together, still in one room.</li>
+        </ul>
+        <form method="dialog"><button class="btn btn-primary" value="close">Close</button></form>
+    </dialog>
 
     <template id="seat-template">
         <section class="seat">
@@ -167,9 +263,11 @@
                     <option value="none">Controller: none</option>
                 </select>
                 <button type="button" class="btn btn-secondary seat-mute"></button>
+                <button type="button" class="btn btn-secondary seat-reset" title="Restart this console afresh; the others play on">↺</button>
             </div>
             <div class="seat-legend"></div>
             <iframe allow="autoplay; gamepad; fullscreen"></iframe>
+            <button type="button" class="btn btn-primary seat-dlp" hidden></button>
         </section>
     </template>
 

@@ -71,6 +71,14 @@
         return Array.from(mac, byte => byte.toString(16).padStart(2, '0')).join(':');
     }
 
+    // "aa:bb:cc:dd:ee:ff" -> 6 bytes
+    function macBytes(text) {
+        return Uint8Array.from(String(text).split(':'), part => parseInt(part, 16));
+    }
+
+    // The local wireless network a Download Play host runs while gathering players.
+    const DOWNLOAD_PLAY_COMM_ID = 0x2810;
+
     function randomId() {
         return Array.from(crypto.getRandomValues(new Uint8Array(6)),
             byte => byte.toString(16).padStart(2, '0')).join('');
@@ -144,6 +152,11 @@
             this.pacingStats = {holds: 0, heldMs: 0, throttledMs: 0, gaveUp: 0};
             this.speedPermille = 1000;
             this.holdSince = 0;
+            // split.html holds frames on the shared link while it checkpoints or restores the
+            // consoles together: 'keep' leaves them in the rings, 'drop' throws them away.
+            this.holdFrames = null;
+            // A Download Play join was started and has not ended (see downloadPlay()).
+            this.joiningDownloadPlay = false;
         }
 
         guestTimeUs() {
@@ -174,6 +187,79 @@
                 return JSON.parse(new TextDecoder().decode(module.HEAPU8.slice(pointer, pointer + length)));
             } catch (_) {
                 return null;
+            } finally {
+                module._free(pointer);
+            }
+        }
+
+        // ── Download Play ────────────────────────────────────────────
+        // Joins a Download Play room as the HOME Menu's Download Play app would: the engine
+        // installs the game's Download Play child from this console's own copy of the game, joins
+        // the room, and when its host starts the game restarts into the child. `hostMac` picks
+        // the room; without it, the first room offering this game's child. Returns null once the
+        // join has started, otherwise why it could not.
+        joinDownloadPlay(hostMac = null) {
+            const module = this.module();
+            if (!module?._azahar_dlp_join) return 'this build cannot join Download Play rooms';
+            const name = new TextEncoder().encode(this.name.slice(0, 10) + '\0');
+            const pointer = module._malloc(6 + name.length);
+            try {
+                if (hostMac) module.HEAPU8.set(macBytes(hostMac), pointer);
+                module.HEAPU8.set(name, pointer + 6);
+                const result = module._azahar_dlp_join(hostMac ? pointer : 0, pointer + 6);
+                this.joiningDownloadPlay = result === 0;
+                this.emit('change');
+                if (result === 0) return null;
+                return this.downloadPlay(true)?.error || (result === -2 ?
+                    'this console is already playing a Download Play game' : 'no game is running');
+            } finally {
+                module._free(pointer);
+            }
+        }
+
+        cancelDownloadPlay() {
+            this.module()?._azahar_dlp_cancel?.();
+            this.joiningDownloadPlay = false;
+            this.emit('change');
+        }
+
+        // The Download Play join: {stage: 'idle' | 'scanning' | 'connecting' | 'joined' |
+        // 'starting', host, rooms: [addresses of rooms seen], error}, or null without a game.
+        // Without a join under way it is idle, and the engine is not asked (pages poll this)
+        // unless `ask`, for why a join could not start.
+        downloadPlay(ask = false) {
+            const module = this.module();
+            if (!module?._azahar_get_dlp_status) return null;
+            if (!this.joiningDownloadPlay && !ask) return {stage: 'idle', host: null, rooms: []};
+            const pointer = module._malloc(1024);
+            try {
+                const length = module._azahar_get_dlp_status(pointer, 1024);
+                const status = length < 0 ? null :
+                    JSON.parse(new TextDecoder().decode(module.HEAPU8.slice(pointer, pointer + length)));
+                // The join ends idle: cancelled, or the console restarted into the child.
+                if (status?.stage === 'idle') this.joiningDownloadPlay = false;
+                return status;
+            } catch (_) {
+                return null;
+            } finally {
+                module._free(pointer);
+            }
+        }
+
+        // Whether a game room (gameRoom()) is a Download Play host's room.
+        isDownloadPlayRoom(room) {
+            return room?.wlanCommId === DOWNLOAD_PLAY_COMM_ID;
+        }
+
+        // A linked console left for good: drop it from the game room this console hosts, so it
+        // can join again under the same address (a host refuses an address it still lists).
+        forgetConsole(mac) {
+            const module = this.module();
+            if (!mac || !module?._azahar_net_forget_console) return false;
+            const pointer = module._malloc(6);
+            try {
+                module.HEAPU8.set(macBytes(mac), pointer);
+                return module._azahar_net_forget_console(pointer) === 1;
             } finally {
                 module._free(pointer);
             }
@@ -352,6 +438,21 @@
             return worst;
         }
 
+        // Every console's game clock jumped (they were restored to a checkpoint together):
+        // measure each pair's baseline again.
+        rebaseClocks() {
+            for (const [key, peer] of this.peers) {
+                peer.clock = null;
+                peer.clockOffset = null;
+                peer.smoothedLead = null;
+                peer.offsetSamples = [];
+                if (this.id > peer.netId) this.sendControlTo(key, {kind: 'clock-rebase'});
+            }
+            this.leadSince = 0;
+            this.setSpeedScale(1);
+            this.endHold(false);
+        }
+
         setSpeedScale(scale) {
             const permille = Math.round(scale * 1000);
             if (permille === this.speedPermille) return;
@@ -503,6 +604,7 @@
                 // dropped: frames a full shared-link ring could not take (shared mode).
                 stats: this.shared ? {...this.stats, dropped: this.shared.dropped()} : {...this.stats},
                 gameRoom: this.gameRoom(),
+                downloadPlay: this.downloadPlay(),
                 netsim: this.netsim && {...this.netsim, ...this.netsimStats},
                 pacing: this.pacing ? {...this.pacingStats, heldMs: Math.round(this.pacingStats.heldMs),
                     throttledMs: Math.round(this.pacingStats.throttledMs), speed: this.speedPermille / 1000} : null,
@@ -636,7 +738,11 @@
                 if (data.to && data.to !== this.id) return;
                 this.handleClockControl(this.peers.get(data.from), data);
             } else if (data.kind === 'bye') {
+                const peer = this.peers.get(data.from);
                 this.peers.delete(data.from);
+                // A console in another tab that leaves is gone. A console of split.html may come
+                // back restored from a checkpoint, still in the room; that page decides.
+                if (this.mode !== 'shared') this.forgetConsole(peer?.mac);
                 this.emit('peer-left', {id: data.from});
             }
         }
@@ -671,10 +777,10 @@
         // this before every emulation step, so frames reach the engine as soon as the
         // console that sent them has finished its own step.
         pump() {
-            if (!this.shared) return 0;
+            if (!this.shared || this.holdFrames === 'keep') return 0;
             return this.shared.receive((kind, bytes, seat) => {
                 if (kind === window.AzaharSharedLink.KIND_FRAME) {
-                    this.deliver(bytes);
+                    if (this.holdFrames !== 'drop') this.deliver(bytes);
                 } else if (kind === window.AzaharSharedLink.KIND_CONTROL) {
                     // TextDecoder refuses views of shared memory.
                     this.handleRoomMessage(JSON.parse(new TextDecoder().decode(bytes.slice())), seat);
@@ -699,6 +805,7 @@
                 const peer = this.peers.get(peerId);
                 if (peer?.channel === channel) {
                     this.peers.delete(peerId);
+                    this.forgetConsole(peer.mac);
                     this.emit('peer-left', {id: peerId});
                 }
             };
@@ -887,6 +994,21 @@
             }
             location.assign(destination.toString());
         }));
+        // Games such as Mario Party: Island Tour let further players join only through Download
+        // Play, which a 3DS starts from its HOME Menu; this console joins with the Download Play
+        // part of its own copy of the game instead.
+        // While joining, the same button stops (a host that left its lobby leaves the join waiting).
+        $('btn-local-play-dlp')?.addEventListener('click', run(() => {
+            const stage = netplay.downloadPlay()?.stage;
+            if (stage && stage !== 'idle' && stage !== 'starting') {
+                netplay.cancelDownloadPlay();
+                say('Stopped joining Download Play.');
+                return;
+            }
+            const error = netplay.joinDownloadPlay();
+            if (error) throw new Error(`Cannot join Download Play: ${error}.`);
+            say('Looking for a linked console gathering Download Play players…', 'ok');
+        }));
         $('btn-local-play-copy').addEventListener('click', run(() => navigator.clipboard.writeText(codeOut.value)));
         $('btn-local-play-leave').addEventListener('click', run(() => netplay.leave()));
 
@@ -900,6 +1022,16 @@
                 return item;
             }));
             $('btn-local-play-leave').disabled = !state.mode;
+            const dlpButton = $('btn-local-play-dlp');
+            if (dlpButton) {
+                const join = state.downloadPlay;
+                const joining = join && join.stage !== 'idle';
+                dlpButton.disabled = !state.joined || !join || join.stage === 'starting' ||
+                    (!joining && /^00040001/.test(state.title || ''));
+                dlpButton.textContent = !joining ? '📥 Join Download Play' :
+                    join.stage === 'joined' ? '📥 Waiting for the host to start · ✖ stop' :
+                    join.stage === 'starting' ? '📥 Starting the game…' : '📥 Looking for the room · ✖ stop';
+            }
             if (!state.mode) {
                 if (!status.dataset.kind || status.dataset.kind === 'linked') say('Not linked.');
             } else if (state.mac && state.peers.some(peer => peer.mac === state.mac)) {
@@ -919,8 +1051,12 @@
         netplay.addEventListener('change', render);
         render();
         // The title may start, or a save state may change the console, after linking.
+        let joinStage = null;
         const timer = setInterval(() => {
-            if (netplay.sync()) render();
+            // A Download Play join moves on by itself (finds the room, waits for its host).
+            const stage = netplay.downloadPlay()?.stage ?? null;
+            if (netplay.sync() || stage !== joinStage) render();
+            joinStage = stage;
         }, 500);
         window.addEventListener('pagehide', () => clearInterval(timer));
 

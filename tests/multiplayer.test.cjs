@@ -19,7 +19,9 @@
  *
  * Usage:
  *   node tests/multiplayer.test.cjs [--game smash] [--pair full:kiosk]
- *       [--renderer software|webgl2] [--gpu] [--timeout SECONDS]
+ *       [--renderer software|webgl2] [--gpu] [--timeout SECONDS] [--roms DIR]
+ *   --roms DIR finds a build's ROM there by name when its `rom` is missing (game_roms.cjs).
+ *   A Download Play game's guest joins with the Local Play card's 📥 Join Download Play.
  *   node tests/multiplayer.test.cjs --link-smoke [--rom PATH]
  *   add --via lobby to link through a public lobby (local tracker) instead of codes
  *   add --netsim drop=0.05,delay=60,jitter=40,burst=800/15000 to impair the link
@@ -38,6 +40,7 @@ const { startTracker } = require('./lobby_tracker.cjs');
 const { checkSync } = require('./sync_check.cjs');
 const { guestSleep } = require('./guest_time.cjs');
 const cfg = require('./config.cjs');
+const { findBuildRom } = require('./game_roms.cjs');
 
 const PORT = 8797;
 const BASE = (cfg.argVal('--base', '') || `http://127.0.0.1:${PORT}`).replace(/\/+$/, '');
@@ -159,7 +162,12 @@ async function linkViaLobby(host, guest) {
 async function runSteps(page, steps) {
     for (const step of steps) {
         const [action, ...args] = step.split(/\s+/);
-        if (action === 'wait') {
+        if (action === 'downloadplay') {
+            // Join the linked console's Download Play room with this console's own copy of the game.
+            await page.waitForFunction(() => !document.getElementById('btn-local-play-dlp').disabled, { timeout: timeoutMs });
+            await page.click('#btn-local-play-dlp');
+            await page.waitForFunction(() => window.AzaharNetplay.downloadPlay()?.stage !== 'idle', { timeout: 30000 });
+        } else if (action === 'wait') {
             await guestSleep(page, Number(args[0]));
         } else if (action === 'key') {
             await page.keyboard.down(args[0]);
@@ -198,9 +206,9 @@ function preflight(game, hostBuild, guestBuild) {
     const sides = [['host', game.builds[hostBuild], game.host], ['guest', game.builds[guestBuild], game.guest]];
     for (const [side, build, plan] of sides) {
         if (!build) { reasons.push(`no build for the ${side}`); continue; }
-        const rom = path.join(cfg.ROOT, build.rom);
+        const rom = findBuildRom(build) || path.join(cfg.ROOT, build.rom);
         if (build.localWireless === false) reasons.push(`${build.rom}: ${build.note}`);
-        else if (!fs.existsSync(rom)) reasons.push(`${build.rom} is missing`);
+        else if (!fs.existsSync(rom)) reasons.push(`${build.rom} is missing (or pass --roms DIR)`);
         else if (!isDecrypted(rom)) reasons.push(`${build.rom} is an encrypted dump; Azahar needs a decrypted one`);
         else if (plan.fixture && !findFixture(rom, plan.fixture)) {
             reasons.push(`${build.rom} has no ${plan.fixture} fixture under ${path.relative(cfg.ROOT, fixtureDirectory(rom))}`);
@@ -219,8 +227,8 @@ async function playPairing(key, game, hostBuild, guestBuild) {
     const directory = path.join(OUTPUT, `${key}-${hostBuild}-${guestBuild}`);
     const browsers = [await launch(), await launch()];
     try {
-        const hostRom = path.join(cfg.ROOT, game.builds[hostBuild].rom);
-        const guestRom = path.join(cfg.ROOT, game.builds[guestBuild].rom);
+        const hostRom = findBuildRom(game.builds[hostBuild]);
+        const guestRom = findBuildRom(game.builds[guestBuild]);
         const [host, guest] = await Promise.all([
             // A side without a fixture boots fresh and reaches its lobby through its steps.
             boot(browsers[0], hostRom, 'Host', game.host.fixture && findFixture(hostRom, game.host.fixture)),
@@ -425,7 +433,8 @@ async function main() {
     if (count('fail')) process.exitCode = 1;
 }
 
-main().catch(error => {
+// Exit once the results are in: a browser or connection left behind must not keep the run open.
+main().then(() => process.exit(process.exitCode ?? 0)).catch(error => {
     console.error(error);
     process.exit(1);
 });

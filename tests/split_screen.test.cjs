@@ -8,19 +8,31 @@
  *   3. the page gives a console that finishes early less of each refresh and
  *      the others the rest, and a stopped console its fair share back;
  *   4. the real keyboard reaches only the console whose screen has focus;
- *   5. with --rom, two consoles play a real title's local wireless mode: the
+ *   5. ↺ restarts one console, which gets the game and the link again while the
+ *      others play on, and a console that stops is restarted on its own;
+ *   6. with --rom, two consoles play a real title's local wireless mode: the
  *      steps for that title in multiplayer_games.json (--game, default
  *      mario-kart-7) host a room on Player 1's screen and join it on Player 2's,
  *      then (unless --no-race) start the match and check that both screens
  *      agree on it. Waits and holds count emulated time, since consoles that
- *      share a device may run below full speed.
+ *      share a device may run below full speed. A Download Play game
+ *      (mario-party-island-tour) is joined with each other screen's 📥; once the
+ *      host starts it, every guest runs the game's Download Play child in the
+ *      host's room. Then (unless --no-recover) the consoles take a checkpoint
+ *      together and the guest must show the host's choices (followCheck); Player 2
+ *      and then Player 1 are made to stop, and each time every console goes back
+ *      to the checkpoint and the screens agree again; ↺ restarts Player 2 afresh
+ *      (the host drops it) and ⤺ brings everyone back, Player 2 in the game again.
  *
  * Usage:
  *   node tests/split_screen.test.cjs
  *   node tests/split_screen.test.cjs --rom PATH [--game mario-kart-7] [--renderer webgl2|software]
- *       [--no-race] [--gpu] [--timeout SECONDS] [--web DIR] [--query cpuJit=0] [--players N]
+ *       [--no-race] [--no-recover] [--gpu] [--timeout SECONDS] [--web DIR] [--query cpuJit=0]
+ *       [--players N] [--game-only]
+ *   --game GAME --roms DIR finds the game's ROM in DIR (see game_roms.cjs) instead of --rom.
  *   --players N (2-8) puts N consoles in the game's room: players 1 and 2 on their keyboard
  *   keys, the others on a controller each; the race check needs two players.
+ *   --game-only skips the checks that need no game (multiplayer_suite.cjs runs them once).
  *   add --base URL to test a deployed site (https://shubin123.github.io/azahar_web) instead of web/
  */
 'use strict';
@@ -31,9 +43,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { listen } = require('../web/server.cjs');
 const cfg = require('./config.cjs');
-const { checkSync } = require('./sync_check.cjs');
+const { checkSync, regionSignatures } = require('./sync_check.cjs');
 const { guestSleep } = require('./guest_time.cjs');
 const { installFrameTrace, saveFrameTrace } = require('./frame_trace.cjs');
+const { findBuildRom } = require('./game_roms.cjs');
 
 const PORT = 8799;
 const BASE = (cfg.argVal('--base', '') || `http://127.0.0.1:${PORT}`).replace(/\/+$/, '');
@@ -145,6 +158,7 @@ async function linkChecks(browser) {
     fs.writeFileSync(dummy, Buffer.alloc(4096));
     const page = await openSplit(browser, 'players=3&renderer=software', dummy);
     await ringChecks(page);
+    await helpChecks(page);
     await page.waitForFunction(() => document.querySelectorAll('#seats iframe').length === 3, { timeout: 10000 });
     const frames = await seatFrames(page);
     for (const frame of frames) {
@@ -220,6 +234,7 @@ async function linkChecks(browser) {
         `a stopped console's time goes to the others: ${shares.oneStopped}`);
     console.log(`PASS refresh sharing: busy ${fmt(shares.allBusy)}, one light ${fmt(shares.oneLight)}, ` +
         `one stopped ${fmt(shares.oneStopped)}`);
+    await resetChecks(page);
     const errors = page.errors.filter(error => !/ROM|load/i.test(error));
     assert.deepStrictEqual(errors, [], 'no page errors');
     await page.close();
@@ -318,6 +333,56 @@ async function libraryHandOff(browser) {
 
 const fmt = shares => shares.map(share => share.toFixed(2)).join('/');
 
+// The ? on the top bar explains how players join a game room, and closes again.
+async function helpChecks(page) {
+    await page.click('#btn-help');
+    const shown = await page.$eval('#help-dialog', dialog => ({ open: dialog.open, text: dialog.textContent }));
+    assert.ok(shown.open, '? opens the help');
+    for (const part of ["Join Player 1's Download Play", 'Local Multiplayer', 'Local Play', '↺']) {
+        assert.ok(shown.text.includes(part), `the help mentions ${part}`);
+    }
+    await page.keyboard.press('Escape');
+    assert.ok(!(await page.$eval('#help-dialog', dialog => dialog.open)), 'Escape closes it');
+    await page.click('#btn-help');
+    await page.mouse.click(5, 5);
+    assert.ok(!(await page.$eval('#help-dialog', dialog => dialog.open)), 'a click outside closes it');
+    console.log('PASS ? on the top bar explains how players join a room (Download Play and the game\'s own menu)');
+}
+
+// One console restarts while the others play on: its frame reloads and gets the game and the
+// link again, and the others drop the old console and see the new one. A console that stops on
+// its own is restarted too, with compiled code off when it stopped with it on.
+async function resetChecks(page) {
+    const linkOf = index => page.evaluate(i => {
+        const netplay = window.AzaharSplit.seats()[i].contentWindow.AzaharNetplay;
+        return netplay ? { id: netplay.id, mode: netplay.mode } : null;
+    }, index);
+    const before = await linkOf(1);
+    await page.evaluate(() => document.querySelectorAll('#seats .seat-reset')[1].click());
+    await page.waitForFunction(old => {
+        const netplay = window.AzaharSplit.seats()[1].contentWindow.AzaharNetplay;
+        return netplay && netplay.id !== old && netplay.mode === 'shared';
+    }, { timeout: 120000 }, before.id).catch(() => { throw new Error('↺ did not bring player 2\'s console back on the link'); });
+    const after = await linkOf(1);
+    await page.waitForFunction(id => window.AzaharSplit.seats().every((frame, index) => {
+        const peers = frame.contentWindow.AzaharNetplay?.status().peers.map(peer => peer.id) || [];
+        return peers.length === 2 && (index === 1 || peers.includes(id));
+    }), { timeout: 60000 }, after.id).catch(() => { throw new Error('the others did not see the restarted console rejoin'); });
+    const others = await page.evaluate(() => window.AzaharSplit.seats()[0].contentWindow.AzaharNetplay.status().peers.map(peer => peer.id));
+    assert.ok(!others.includes(before.id), 'the old console is gone from the others\' peers');
+    console.log('PASS ↺ restarts one console: it gets the game and the link again, and the others drop the old one and see it rejoin');
+
+    await page.evaluate(() => window.AzaharSplit.seats()[2].contentWindow.AzaharSplitSeat.failed('test stop', true));
+    await page.waitForFunction(() => {
+        const window3 = window.AzaharSplit.seats()[2].contentWindow;
+        return /cpuJit=0/.test(window3.location.search) && window3.AzaharNetplay?.mode === 'shared';
+    }, { timeout: 120000 }).catch(() => { throw new Error('a console that stopped was not restarted'); });
+    const said = await page.$eval('#status', element => element.textContent);
+    assert.match(said, /Player 3 stopped \(test stop\)/, 'the page says which console stopped and why');
+    assert.match(said, /compiled code off/, 'and that it restarts with compiled code off');
+    console.log('PASS a console that stops is restarted on its own, with compiled code off after it stopped with it on');
+}
+
 // Each player presses their own keys on the shared keyboard (split.html hands every console
 // its player's keys), so both consoles' steps can run at once; the shared mouse is taken one
 // touch at a time.
@@ -334,7 +399,16 @@ async function runSteps(page, frame, steps, holdKey) {
     const canvas = await frame.$('#canvas');
     for (const step of steps) {
         const [action, ...args] = step.split(/\s+/);
-        if (action === 'wait') {
+        if (action === 'downloadplay') {
+            // Join the Download Play room another console gathers players in, with this
+            // screen's 📥 (the page offers it once that room is up).
+            const index = await frame.evaluate(() => Number(new URLSearchParams(location.search).get('seat')));
+            await page.waitForFunction(i => !document.querySelectorAll('#seats .seat-dlp')[i].hidden,
+                { timeout: timeoutMs }, index).catch(() => { throw new Error(`player ${index + 1} was not offered 📥`); });
+            await page.evaluate(i => document.querySelectorAll('#seats .seat-dlp')[i].click(), index);
+            await frame.waitForFunction(() => window.AzaharNetplay.downloadPlay()?.stage !== 'idle', { timeout: 30000 })
+                .catch(async () => { throw new Error(`player ${index + 1} did not start joining: ${await page.$eval('#status', e => e.textContent)}`); });
+        } else if (action === 'wait') {
             await guestSleep(frame, Number(args[0]));
         } else if (action === 'key') {
             await holdKey(frame, args[0], true);
@@ -501,7 +575,8 @@ async function playGame(browser, rom) {
         const read = frame => frame.evaluate(() => document.getElementById('fps').textContent).catch(() => '?');
         const shares = await page.evaluate(() => window.AzaharSplit.shares().map(s => s.toFixed(2)).join('/')).catch(() => '?');
         const seconds = Math.round((Date.now() - started) / 1000);
-        console.log(`  t+${seconds}s P1 ${await read(host)} | P2 ${await read(guest)} | shares ${shares}`);
+        const checkpoints = await page.evaluate(() => JSON.stringify(window.AzaharSplit.checkpointStats())).catch(() => '?');
+        console.log(`  t+${seconds}s P1 ${await read(frames[0])} | P2 ${await read(frames[1])} | shares ${shares} | checkpoints ${checkpoints}`);
         if (film) await page.screenshot({ path: path.join(directory, `film-${String(seconds).padStart(4, '0')}.png`) }).catch(() => {});
     }, 15000);
     const screenshot = name => page.screenshot({ path: path.join(directory, `${name}.png`) });
@@ -538,8 +613,15 @@ async function playGame(browser, rom) {
             `${players > 2 ? ` and ${players - 2} on controllers` : ''} (Player 1 hosts network ` +
             `0x${(hostRoom.wlanCommId >>> 0).toString(16)} with nodes ${hostRoom.nodes.map(node => node.id).join(', ')}; ` +
             `${stats.delivered} frames delivered to Player 2)`);
+        if (game.downloadPlay) {
+            await downloadPlayStarts(page, frames, game, holdKey, screenshot);
+            if (!cfg.argFlag('--no-recover')) {
+                await recoverConsoles(page, frames, game);
+                await screenshot('recovered');
+            }
+        }
         // The next phase, such as the host starting a race, and whether both consoles agree on it.
-        if (players === 2 && !cfg.argFlag('--no-race') && (game.host.afterJoin || game.guest.afterJoin)) {
+        if (!game.downloadPlay && players === 2 && !cfg.argFlag('--no-race') && (game.host.afterJoin || game.guest.afterJoin)) {
             await Promise.all([runSteps(page, host, game.host.afterJoin || [], holdKey),
                 runSteps(page, guest, game.guest.afterJoin || [], holdKey)]);
             await guestSleep(host, Number(game.afterJoinWaitMs || 30000));
@@ -602,6 +684,140 @@ async function playGame(browser, rom) {
     console.log(`  screenshots in ${path.relative(cfg.ROOT, directory)}`);
 }
 
+// The host starts a Download Play game (its afterJoin steps): every guest restarts into the
+// game's Download Play child, which joins the game's own room on the host.
+async function downloadPlayStarts(page, frames, game, holdKey, screenshot) {
+    const [host] = frames;
+    // No console stopped on the way here (the guest idled through the attract intro first).
+    const stops = await page.evaluate(() => window.AzaharSplit.events().flat().filter(event => event.kind === 'stopped'));
+    assert.deepStrictEqual(stops, [], 'no console stopped while the host gathered players');
+    const programId = await host.evaluate(() => window.AzaharUI.getProgramId());
+    await runSteps(page, host, game.host.afterJoin || [], holdKey);
+    for (const [index, frame] of frames.entries()) {
+        if (!index) continue;
+        await frame.waitForFunction(() => /^00040001/.test(window.AzaharUI.getProgramId()), { timeout: timeoutMs })
+            .catch(async () => {
+                const join = await frame.evaluate(() => JSON.stringify(window.AzaharNetplay.downloadPlay()));
+                throw new Error(`player ${index + 1} did not start the Download Play game (${join})`);
+            });
+    }
+    // Everyone in the game's own room: the host left its Download Play room for it.
+    await page.waitForFunction(() => {
+        const host = window.AzaharSplit.seats()[0].contentWindow.AzaharNetplay.gameRoom();
+        return window.AzaharSplit.together() === 0 && host?.status === 'host' && host.wlanCommId !== 0x2810;
+    }, { timeout: timeoutMs }).catch(async () => {
+        const rooms = await Promise.all(frames.map(frame => frame.evaluate(() => window.AzaharNetplay.gameRoom())));
+        throw new Error(`the Download Play guests are not in the host's game room: ${JSON.stringify(rooms)}`);
+    });
+    const child = await frames[1].evaluate(() => window.AzaharUI.getProgramId());
+    const hostRoom = await host.evaluate(() => window.AzaharNetplay.gameRoom());
+    assert.strictEqual(child.slice(8), programId.slice(8), 'the child belongs to the host\'s game');
+    await guestSleep(host, 10000);
+    await screenshot('download-play-started');
+    console.log(`PASS ${game.title}: the host started the game and all ${frames.length - 1} guest(s) run its Download Play ` +
+        `child ${child} in Player 1's game room (network 0x${(hostRoom.wlanCommId >>> 0).toString(16)}, nodes ` +
+        `${hostRoom.nodes.map(node => node.id).join(', ')})`);
+}
+
+// Whether the guest shows what the host does: the host makes each of the game's followCheck
+// choices, and a region that changes with them must look the same on both screens.
+async function followsHost(page, frames, check, label) {
+    const [host, guest] = frames;
+    const io = (frame, step) => runSteps(page, frame, [step], () => {});
+    const shoot = async frame => (await frame.$('#canvas')).screenshot({ encoding: 'base64' });
+    const mean = (a, b) => a.reduce((sum, grid, k) => sum + grid.reduce((s, v, j) => s + Math.abs(v - b[k][j]), 0) / grid.length, 0) / a.length;
+    const seen = [];
+    for (const step of check.steps) {
+        await io(host, step);
+        await guestSleep(host, check.settleMs || 3000);
+        const [a, b] = await Promise.all([host, guest].map(shoot));
+        const [sa, sb] = await Promise.all([regionSignatures(host, a, check.rects), regionSignatures(guest, b, check.rects)]);
+        const apart = mean(sa, sb);
+        assert.ok(apart <= check.agree, `${label}: after "${step}" the guest shows something else than the host ` +
+            `(${apart.toFixed(1)} apart, at most ${check.agree} allowed)`);
+        seen.push(sa);
+    }
+    const changed = mean(seen[0], seen[seen.length - 1]);
+    assert.ok(changed >= check.differ, `${label}: the host's choices did not change the compared region (${changed.toFixed(1)})`);
+    return changed;
+}
+
+const seatEvents = (page, index) => page.evaluate(i => window.AzaharSplit.events()[i], index);
+
+// A console stops (its step throws `RuntimeError: null function`, as a WebAssembly trap does):
+// every console goes back to the checkpoint they took together, the stopped one reloading, and
+// the guest must show the host's choices again.
+async function crashAndRecover(page, frames, check, index) {
+    const before = (await seatEvents(page, index)).length;
+    const restores = (await page.evaluate(() => window.AzaharSplit.restores())).length;
+    await frames[index].evaluate(() => {
+        window.AzaharUI.getModule()._azahar_step_frame = () => { throw new WebAssembly.RuntimeError('null function (test)'); };
+    });
+    await page.waitForFunction((i, n, r) => {
+        const events = window.AzaharSplit.events()[i].slice(n).map(event => event.kind).join();
+        return events === 'stopped,restarted,restored' && window.AzaharSplit.restores()[r]?.restored;
+    }, { timeout: timeoutMs }, index, before, restores).catch(async () => {
+        throw new Error(`player ${index + 1} stopped and did not come back with the others ` +
+            `(${JSON.stringify(await page.evaluate(() => window.AzaharSplit.events()))}): ${await page.$eval('#status', e => e.textContent)}`);
+    });
+    const fresh = await seatFrames(page);
+    frames.splice(0, frames.length, ...fresh);
+    for (const [other, frame] of frames.entries()) {
+        if (other === index) continue;
+        const events = (await seatEvents(page, other)).map(event => event.kind);
+        assert.strictEqual(events[events.length - 1], 'restored', `player ${other + 1} went back to the checkpoint too`);
+        assert.ok(await frame.evaluate(() => window.AzaharUI.isRunning()), `player ${other + 1} plays on`);
+    }
+    await page.waitForFunction(() => window.AzaharSplit.together() === 0, { timeout: 60000 })
+        .catch(() => { throw new Error(`after player ${index + 1} stopped, the players are not in one room`); });
+    const search = await frames[index].evaluate(() => location.search);
+    const changed = await followsHost(page, frames, check, `after player ${index + 1} stopped`);
+    console.log(`PASS player ${index + 1} stopped: every console went back to the checkpoint they took together` +
+        `${/cpuJit=0/.test(search) ? ` (player ${index + 1} with compiled code off)` : ''}, and the guest shows the ` +
+        `host's choices again (screens apart by at most ${check.agree}; the choices changed them by ${changed.toFixed(0)})`);
+}
+
+// Checkpoints and recovery with a game running in one room: the consoles' screens agree before
+// anything happens; a stopped guest and a stopped host each bring everyone back to the checkpoint
+// with the screens agreeing again; ↺ restarts the guest afresh (the host drops it from its room)
+// and ⤺ brings everyone, it too, back to the checkpoint.
+async function recoverConsoles(page, frames, game) {
+    const check = game.followCheck;
+    assert.ok(check, `${game.title} has no followCheck in multiplayer_games.json`);
+    await page.waitForFunction(() => {
+        const at = window.AzaharSplit.checkpoints();
+        return at.every(value => value !== null && value === at[0]);
+    }, { timeout: 180000 }).catch(() => { throw new Error('the consoles took no checkpoint together while in one room'); });
+    await followsHost(page, frames, check, 'before any stop');
+    console.log('PASS every console took a checkpoint at one moment, and the guest shows the host\'s choices');
+
+    await crashAndRecover(page, frames, check, 1);
+    await crashAndRecover(page, frames, check, 0);
+
+    await page.evaluate(() => document.querySelectorAll('#seats .seat-reset')[1].click());
+    await frames[0].waitForFunction(() => window.AzaharNetplay.gameRoom()?.nodes.length === 1, { timeout: 60000 })
+        .catch(() => { throw new Error('the host kept the restarted console in its room'); });
+    await page.waitForFunction(() => window.AzaharSplit.seats()[1].contentWindow.AzaharUI?.isRunning(), { timeout: timeoutMs });
+    frames.splice(0, frames.length, ...(await seatFrames(page)));
+    const room = await frames[1].evaluate(() => window.AzaharNetplay.gameRoom());
+    assert.ok(!room || room.status !== 'client', `the fresh console is in no room (${JSON.stringify(room)})`);
+    console.log('PASS ↺ restarts player 2 afresh: Player 1 drops it from its room, so it can join again under its address');
+
+    await page.waitForFunction(() => !document.getElementById('btn-checkpoint-restore').disabled, { timeout: timeoutMs });
+    const restores = (await page.evaluate(() => window.AzaharSplit.restores())).length;
+    await page.click('#btn-checkpoint-restore');
+    await page.waitForFunction(r => window.AzaharSplit.restores()[r]?.restored && window.AzaharSplit.together() === 0,
+        { timeout: timeoutMs }, restores).catch(async () => {
+        throw new Error(`⤺ did not bring everyone back into one room: ${await page.$eval('#status', e => e.textContent)}`);
+    });
+    frames.splice(0, frames.length, ...(await seatFrames(page)));
+    const programId = await frames[1].evaluate(() => window.AzaharUI.getProgramId());
+    assert.match(programId, /^00040001/, 'player 2 runs the Download Play game again');
+    await followsHost(page, frames, check, 'after ⤺');
+    console.log('PASS ⤺ brings every console, the restarted one too, back to the checkpoint: player 2 is in ' +
+        'Player 1\'s game again and shows the host\'s choices');
+}
+
 async function main() {
     assert.ok(cfg.chromePath, 'Chrome not found; set CHROME_PATH');
     const root = cfg.argVal('--web', null);
@@ -609,10 +825,15 @@ async function main() {
         await listen(PORT, '127.0.0.1', root ? { root: path.resolve(root) } : {});
     const browser = await launch();
     try {
-        await linkChecks(browser);
-        const rom = cfg.argVal('--rom', null);
+        if (!cfg.argFlag('--game-only')) await linkChecks(browser);
+        let rom = cfg.argVal('--rom', null);
+        const gameKey = cfg.argVal('--game', null);
+        if (!rom && gameKey) {
+            rom = findBuildRom(GAMES[gameKey]?.builds?.full);
+            if (!rom) console.log(`SKIP ${gameKey}: no ROM found (pass --rom PATH, or --roms DIR with the game in it)`);
+        }
         if (rom) await playGame(browser, path.resolve(rom));
-        else console.log('SKIP game session (pass --rom PATH to play a title between two consoles)');
+        else if (!gameKey) console.log('SKIP game session (pass --rom PATH to play a title between two consoles)');
     } finally {
         await browser.close().catch(() => {});
         server?.close();

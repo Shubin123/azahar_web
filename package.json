@@ -18,7 +18,8 @@
     "test:audio": "node tests/audio.test.cjs",
     "test:renderer-recovery": "node tests/renderer_recovery.test.cjs",
     "test:local-play": "node tests/local_play.test.cjs && node tests/public_lobbies.test.cjs && node tests/split_screen.test.cjs",
-    "test:multiplayer": "node tests/multiplayer.test.cjs --link-smoke && node tests/multiplayer.test.cjs"
+    "test:multiplayer": "node tests/multiplayer.test.cjs --link-smoke && node tests/multiplayer.test.cjs",
+    "test:multiplayer-suite": "node tests/multiplayer_suite.cjs"
   },
   "repository": {
     "type": "git",
