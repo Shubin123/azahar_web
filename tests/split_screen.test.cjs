@@ -10,6 +10,8 @@
  *   4. the real keyboard reaches only the console whose screen has focus;
  *   5. ↺ restarts one console, which gets the game and the link again while the
  *      others play on, and a console that stops is restarted on its own;
+ *   each player's Screens menu lays out only their console's screens (big top by default,
+ *   stretched, or as on a 3DS), kept across restarts, with the join panel over the top screen;
  *   6. with --rom, two consoles play a real title's local wireless mode: the
  *      steps for that title in multiplayer_games.json (--game, default
  *      mario-kart-7) host a room on Player 1's screen and join it on Player 2's,
@@ -180,6 +182,7 @@ async function linkChecks(browser) {
     const card = await frames[1].$eval('#local-play-status', element => element.textContent);
     assert.match(card, /Linked \(this device\)/, 'the console reports the link');
     console.log('PASS split.html links three consoles through shared memory and carries frames between all of them');
+    await screensChecks(page, frames);
     await keyboardChecks(page, frames);
 
     // Every console has the whole game, so two can host at once (both pick Download Play, say);
@@ -358,6 +361,102 @@ async function helpChecks(page) {
 // down and joins it with no click, its keys doing nothing while it waits; Leave keeps it out and
 // 📥 joins again; Player 3, whose game has its wireless menu open, is only offered 📥; and once
 // Player 3 opens a lobby too, it is offered a restart that joins Player 1's.
+// Steps give touches and screen regions as fractions of the native 400x480 frame (both screens
+// at one size, stacked); a console's Screens setting puts its screens elsewhere on its canvas.
+// [x, y, w, h] in the native frame -> the same on the console's canvas. A region is on the
+// screen it starts on.
+async function onCanvas(frame, rects) {
+    return frame.evaluate(rects => {
+        const { width, height, top, bottom } = window.AzaharSplitSeat.screens();
+        return rects.map(([x, y, w = 0, h = 0]) => {
+            // The native frame's touch screen spans x 0.1-0.9 of its lower half.
+            const [screen, fx, fw, fy] = y < 0.5 ? [top, x, w, y * 2] : [bottom, (x - 0.1) / 0.8, w / 0.8, y * 2 - 1];
+            return [(screen.x + fx * screen.w) / width, (screen.y + fy * screen.h) / height,
+                fw * screen.w / width, h * 2 * screen.h / height];
+        });
+    }, rects);
+}
+
+// Where each console's screens are, and its canvas (its drawable and its size on the page).
+const screensOf = frames => Promise.all(frames.map(frame => frame.evaluate(() => {
+    const canvas = document.getElementById('canvas');
+    return { ...window.AzaharSplitSeat.screens(), drawable: [canvas.width, canvas.height],
+        frame: [window.innerWidth, window.innerHeight], url: new URLSearchParams(location.search).get('screens') };
+})));
+
+// Each player's Screens menu lays out their console's two screens: big top (the default, both
+// screens keeping their shape, the touch screen 50-75% of the top one's size), stretched (the
+// top screen over all the room the touch screen leaves), or as on a 3DS.
+async function screensChecks(page, frames) {
+    const near = (a, b, within = 1.5) => Math.abs(a - b) <= within;
+    const pick = (index, value) => page.evaluate((i, value) => {
+        const select = document.querySelectorAll('#seats .seat-screens')[i];
+        select.value = value;
+        select.dispatchEvent(new Event('change'));
+    }, index, value);
+    const inside = (rect, width, height) => rect.x >= -0.5 && rect.y >= -0.5 &&
+        rect.x + rect.w <= width + 0.5 && rect.y + rect.h <= height + 0.5;
+    const apart = (a, b) => a.x + a.w <= b.x + 0.5 || b.x + b.w <= a.x + 0.5 || a.y + a.h <= b.y + 0.5 || b.y + b.h <= a.y + 0.5;
+
+    assert.deepStrictEqual(await page.$$eval('#seats .seat-screens', selects => selects.map(select => select.value)),
+        ['top', 'top', 'top'], 'every player starts with the big top screen');
+    for (const [index, shown] of (await screensOf(frames)).entries()) {
+        const { width, height, top, bottom } = shown;
+        const label = `Player ${index + 1}, big top ${JSON.stringify(shown)}`;
+        assert.strictEqual(shown.screens, 'top', label);
+        assert.deepStrictEqual([width, height], shown.frame, `${label}: the canvas fills the frame`);
+        assert.ok(shown.drawable[0] >= 400 && shown.drawable[1] >= 480, `${label}: the drawable is at least the native frame`);
+        assert.ok(near(top.w / top.h, 5 / 3, 0.01) && near(bottom.w / bottom.h, 4 / 3, 0.01), `${label}: both screens keep their shape`);
+        const ratio = (bottom.w / 320) / (top.w / 400);
+        assert.ok(ratio >= 0.5 - 0.001 && ratio <= 0.75 + 0.001, `${label}: the touch screen is 50-75% of the top one (${ratio.toFixed(2)})`);
+        assert.ok(inside(top, width, height) && inside(bottom, width, height) && apart(top, bottom), `${label}: both on the canvas, apart`);
+        const native = Math.min(width, height * 400 / 480);
+        assert.ok(top.w > native * 1.1, `${label}: the top screen is larger than as on a 3DS (${Math.round(top.w)} > ${Math.round(native)} wide)`);
+    }
+
+    await pick(1, 'stretch');
+    await pick(2, 'native');
+    await page.waitForFunction(() => {
+        const seats = window.AzaharSplit.seats().map(frame => frame.contentWindow.AzaharSplitSeat.screens()?.screens);
+        return seats.join() === 'top,stretch,native';
+    }, { timeout: 5000 }).catch(() => { throw new Error('the Screens menus did not reach their consoles'); });
+    const [first, stretched, native] = await screensOf(frames);
+    assert.strictEqual(first.screens, 'top', 'Player 1 keeps the big top screen');
+    {
+        const { width, height, top, bottom } = stretched;
+        const label = `Player 2, stretched ${JSON.stringify(stretched)}`;
+        const filled = (near(top.w, width) && near(top.h + bottom.h, height)) || (near(top.w + bottom.w, width) && near(top.h, height));
+        assert.ok(filled, `${label}: the top screen takes all the room the touch screen leaves`);
+        assert.ok(near(bottom.w / bottom.h, 4 / 3, 0.01) && inside(bottom, width, height) && apart(top, bottom),
+            `${label}: the touch screen keeps its shape`);
+    }
+    assert.deepStrictEqual(native.drawable, [400, 480], 'Player 3, as on a 3DS: the native frame');
+    assert.ok(near(native.width / native.height, 400 / 480, 0.01) && near(native.top.h, native.height / 2),
+        `Player 3, as on a 3DS: both screens at one size, stacked (${JSON.stringify(native)})`);
+    assert.deepStrictEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('azahar-split-screens'))),
+        [null, 'stretch', 'native'], 'each player\'s choice is kept in this browser');
+    // The pages opened next in this browser (the games too) start from big top again; this page
+    // keeps the choices (resetChecks restarts Player 2, which must stay stretched).
+    await page.evaluate(() => localStorage.removeItem('azahar-split-screens'));
+    console.log('PASS each player\'s Screens menu lays out only their screens: big top by default (a top screen ' +
+        `${Math.round(first.top.w)}×${Math.round(first.top.h)} where a 3DS layout fits ` +
+        `${Math.round(Math.min(first.width, first.height * 400 / 480))}×${Math.round(Math.min(first.width, first.height * 400 / 480) * 0.6)}` +
+        `, the touch screen ${Math.round((first.bottom.w / 320) / (first.top.w / 400) * 100)}% of its size), stretched, or as on a 3DS`);
+}
+
+// Where a seat's join panel is, and the top screen of its console, in the page.
+const panelAndTop = (page, index) => page.evaluate(i => {
+    const seat = document.querySelectorAll('#seats .seat')[i];
+    const frame = seat.querySelector('iframe');
+    const canvas = frame.contentDocument.getElementById('canvas').getBoundingClientRect();
+    const { top } = frame.contentWindow.AzaharSplitSeat.screens();
+    const box = frame.getBoundingClientRect();
+    const panel = seat.querySelector('.seat-join').getBoundingClientRect();
+    return { panel: { left: panel.left, right: panel.right, bottom: panel.bottom },
+        top: { left: box.left + canvas.left + top.x, right: box.left + canvas.left + top.x + top.w,
+            bottom: box.top + canvas.top + top.y + top.h } };
+}, index);
+
 async function joinPanelChecks(page, frames) {
     await Promise.all(frames.map((frame, index) => frame.evaluate(index => {
         const netplay = window.AzaharNetplay;
@@ -406,6 +505,11 @@ async function joinPanelChecks(page, frames) {
     assert.strictEqual(shown[0], null, 'the host is offered nothing');
     assert.match(shown[1].text, /Player 1 opened a Download Play lobby\. Player 2 joins it in [1-5] s\./);
     assert.deepStrictEqual(shown[1].buttons, ['📥 Join now', 'Not now']);
+    const placed = await panelAndTop(page, 1);
+    assert.ok(Math.abs(placed.panel.bottom - placed.top.bottom) <= 2 &&
+        Math.abs((placed.panel.left + placed.panel.right) / 2 - (placed.top.left + placed.top.right) / 2) <= 2 &&
+        placed.panel.left >= placed.top.left && placed.panel.right <= placed.top.right,
+    `the panel sits over the lower part of Player 2's top screen, where its Screens setting put it: ${JSON.stringify(placed)}`);
     assert.deepStrictEqual(shown[2], { mode: 'offer', text: '', buttons: ["📥 Join Player 1's Download Play"] },
         'a console whose game has its wireless menu open is only offered 📥');
     await waitPanel(1, 'lobby', 'Player 2 joins on its own');
@@ -486,7 +590,10 @@ async function resetChecks(page) {
     }), { timeout: 60000 }, after.id).catch(() => { throw new Error('the others did not see the restarted console rejoin'); });
     const others = await page.evaluate(() => window.AzaharSplit.seats()[0].contentWindow.AzaharNetplay.status().peers.map(peer => peer.id));
     assert.ok(!others.includes(before.id), 'the old console is gone from the others\' peers');
-    console.log('PASS ↺ restarts one console: it gets the game and the link again, and the others drop the old one and see it rejoin');
+    await page.waitForFunction(() => window.AzaharSplit.seats()[1].contentWindow.AzaharSplitSeat?.screens()?.screens === 'stretch',
+        { timeout: 10000 }).catch(() => { throw new Error('player 2 lost their Screens setting when restarted'); });
+    console.log('PASS ↺ restarts one console: it gets the game and the link again (its screens as its player set them), ' +
+        'and the others drop the old one and see it rejoin');
 
     await page.evaluate(() => window.AzaharSplit.seats()[2].contentWindow.AzaharSplitSeat.failed('test stop', true));
     await page.waitForFunction(() => {
@@ -538,7 +645,8 @@ async function runSteps(page, frame, steps, holdKey) {
         } else if (action === 'touch') {
             const touch = mouseLock.then(async () => {
                 const box = await canvas.boundingBox();
-                await page.mouse.move(box.x + box.width * Number(args[0]), box.y + box.height * Number(args[1]));
+                const [[x, y]] = await onCanvas(frame, [[Number(args[0]), Number(args[1])]]);
+                await page.mouse.move(box.x + box.width * x, box.y + box.height * y);
                 await page.mouse.down();
                 await guestSleep(frame, Number(args[2] || 250));
                 await page.mouse.up();
@@ -774,6 +882,7 @@ async function playGame(browser, rom) {
                 const io = {
                     shoot: async frame => (await frame.$('#canvas')).screenshot({ encoding: 'base64' }),
                     hold: holdKey,
+                    place: onCanvas,
                 };
                 const { share, details } = await checkSync(host, guest, game.syncCheck, io);
                 await screenshot('sync');
@@ -932,7 +1041,8 @@ async function followsHost(page, frames, check, label) {
         await io(host, step);
         await guestSleep(host, check.settleMs || 3000);
         const [a, b] = await Promise.all([host, guest].map(shoot));
-        const [sa, sb] = await Promise.all([regionSignatures(host, a, check.rects), regionSignatures(guest, b, check.rects)]);
+        const [sa, sb] = await Promise.all([regionSignatures(host, a, await onCanvas(host, check.rects)),
+            regionSignatures(guest, b, await onCanvas(guest, check.rects))]);
         const apart = mean(sa, sb);
         assert.ok(apart <= check.agree, `${label}: after "${step}" the guest shows something else than the host ` +
             `(${apart.toFixed(1)} apart, at most ${check.agree} allowed)`);

@@ -1152,6 +1152,9 @@
             width: min(100vw, calc(100vh * 400 / 480)); height: auto; max-height: none;
             aspect-ratio: 400 / 480; border: 0; border-radius: 0; box-shadow: none;
         }
+        /* Its player's Screens setting fills the frame: the engine draws both screens into a
+           canvas of the frame's shape (see azahar_split_seat.js). */
+        html.split-seat-fill .screen-stage canvas { width: 100vw; height: 100vh; aspect-ratio: auto; }
     </style>
 </head>
 <body>

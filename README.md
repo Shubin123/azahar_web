@@ -50,7 +50,12 @@ player the whole keyboard (the emulator's usual keymap) and Ctrl+0 shares it
 again. Controllers go to the players in the order they connect, or pick one per
 screen. Each screen also shows the game room its console hosts or joined, and
 the page says when every player is in one room. Only Player 1
-is heard at first; each screen has its own mute button. All consoles share
+is heard at first; each screen has its own mute button. Each player's
+**Screens** menu sets how their console's two screens fill its space: **big
+top** (the default: the top screen as large as it fits, the touch screen
+50–75% of its size below or beside it), **stretched** (the top screen also
+stretched over the room the touch screen leaves) or **3DS** (both at one size,
+stacked); the browser remembers each player's choice. All consoles share
 this device's processor: the page splits each display refresh between them,
 and a console that is waiting for its next frame passes the rest of its time
 to the others. With the accelerated renderer an Apple M4 runs a two-player

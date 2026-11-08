@@ -110,10 +110,12 @@
         return { kind, t, r, top, bottom };
     }
 
-    function computeLayout(width, height) {
-        const rMin = settings.bottomMin / 100, rMax = settings.bottomMax / 100;
-        if (settings.arrangement !== 'auto') {
-            return arrange(settings.arrangement, width, height, rMin, rMax);
+    // `bounds`: {arrangement, bottomMin, bottomMax}, the fullscreen settings by default (split.html's
+    // consoles pass their own, see azahar_split_seat.js).
+    function computeLayout(width, height, bounds = settings) {
+        const rMin = bounds.bottomMin / 100, rMax = bounds.bottomMax / 100;
+        if (bounds.arrangement !== 'auto') {
+            return arrange(bounds.arrangement, width, height, rMin, rMax);
         }
         const side = arrange('side', width, height, rMin, rMax);
         const stacked = arrange('stacked', width, height, rMin, rMax);
@@ -122,11 +124,11 @@
         return side.r >= stacked.r ? side : stacked;
     }
 
-    function pixelRect(rect, scale, maxW, maxH) {
-        const x = Math.max(0, Math.round(rect.x * scale));
-        const y = Math.max(0, Math.round(rect.y * scale));
-        const w = Math.max(1, Math.min(maxW - x, Math.round(rect.w * scale)));
-        const h = Math.max(1, Math.min(maxH - y, Math.round(rect.h * scale)));
+    function pixelRect(rect, scaleX, scaleY, maxW, maxH) {
+        const x = Math.max(0, Math.round(rect.x * scaleX));
+        const y = Math.max(0, Math.round(rect.y * scaleY));
+        const w = Math.max(1, Math.min(maxW - x, Math.round(rect.w * scaleX)));
+        const h = Math.max(1, Math.min(maxH - y, Math.round(rect.h * scaleY)));
         return [x, y, w, h];
     }
 
@@ -159,19 +161,33 @@
             stage.style.setProperty('--az-bottom-w', `${Math.round(layout.bottom.w)}px`);
         }
 
+        const result = drawLayout(layout, width, height);
+        if (result) window.AzaharUI?.log?.(`Fullscreen layout rejected (code ${result}).`);
+    }
+
+    // The drawable's pixels per CSS pixel: the display's resolution.
+    function displayScale(layout, width, height) {
         let scale = window.devicePixelRatio || 1;
         if (!isWebGL2) scale = Math.min(scale, SOFTWARE_MAX_TOP_WIDTH / layout.top.w);
         // The engine's drawable is never smaller than the native 400x480 frame.
-        scale = Math.max(scale, TOP_W / width, (TOP_H + BOTTOM_H) / height);
-        scale = Math.min(scale, MAX_CANVAS_SIDE / width, MAX_CANVAS_SIDE / height);
-        const canvasW = Math.round(width * scale), canvasH = Math.round(height * scale);
+        return Math.max(scale, TOP_W / width, (TOP_H + BOTTOM_H) / height);
+    }
+
+    // Has the engine draw `layout` (in CSS pixels of a canvas `width` x `height`) into a
+    // drawable `scale` times that size, or [x, y] times on each axis (the browser fits the
+    // drawable to the canvas, and the engine maps touches on each axis). Returns the engine's
+    // result (0, or negative: -1 before the emulator is ready), or null before its module has
+    // loaded.
+    function drawLayout(layout, width, height, scale = displayScale(layout, width, height)) {
+        const most = Math.min(MAX_CANVAS_SIDE / width, MAX_CANVAS_SIDE / height);
+        const [scaleX, scaleY] = (Array.isArray(scale) ? scale : [scale, scale]).map(s => Math.min(s, most));
+        const canvasW = Math.round(width * scaleX), canvasH = Math.round(height * scaleY);
 
         const module = window.AzaharUI?.getModule?.();
-        if (!module?._azahar_set_screen_layout) return;
-        const result = module._azahar_set_screen_layout(canvasW, canvasH,
-            ...pixelRect(layout.top, scale, canvasW, canvasH),
-            ...pixelRect(layout.bottom, scale, canvasW, canvasH));
-        if (result !== 0) window.AzaharUI?.log?.(`Fullscreen layout rejected (code ${result}).`);
+        if (!module?._azahar_set_screen_layout) return null;
+        return module._azahar_set_screen_layout(canvasW, canvasH,
+            ...pixelRect(layout.top, scaleX, scaleY, canvasW, canvasH),
+            ...pixelRect(layout.bottom, scaleX, scaleY, canvasW, canvasH));
     }
 
     function scheduleLayout() {
@@ -338,6 +354,7 @@
         enter, exit,
         isActive: () => active,
         computeLayout,
+        drawLayout,
         getSettings: () => ({ ...settings })
     };
 })();

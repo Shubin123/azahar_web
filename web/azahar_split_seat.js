@@ -72,14 +72,92 @@
         }, true);
     }
 
+    // How the two screens fill this frame, the player's Screens menu on the page (?screens=):
+    //   'top': each keeps its shape, the top screen as large as the frame allows and the touch
+    //          screen 50-75% of its size, below it or beside it, whichever leaves the top larger;
+    //   'stretch': the same touch screen, and the top screen stretched over all the rest;
+    //   'native': both at one size, stacked as on a 3DS.
+    const SCREENS = ['top', 'stretch', 'native'];
+    const BIG_TOP = {arrangement: 'auto', bottomMin: 50, bottomMax: 75};
+    // The engine's drawable is at least the native 400x480 frame (it keeps that minimum
+    // window size), on each axis on its own: the browser fits it to the canvas, so a short
+    // frame need not cost a wide drawable. Every console shares this device's processor, on
+    // which the software renderer scales the screens and copies them to the page every frame:
+    // it otherwise draws only as many pixels as the native frame, and the browser enlarges them.
+    const NATIVE_W = 400, NATIVE_H = 480;
+    const software = window.AzaharWebConfig?.renderer !== 'webgl2';
+    const canvas = document.getElementById('canvas');
+    const requested = new URLSearchParams(location.search).get('screens');
+    let screens = SCREENS.includes(requested) ? requested : 'top';
+    let layout = null;  // {screens, width, height, top, bottom}: CSS pixels of the canvas
+    let pendingLayout = 0;
+
+    // The top screen takes the room the touch screen leaves, in the arrangement Big top chose.
+    function stretchTop({kind, bottom}, width, height) {
+        if (kind === 'side') {
+            return {kind, top: {x: 0, y: 0, w: width - bottom.w, h: height},
+                bottom: {...bottom, x: width - bottom.w, y: (height - bottom.h) / 2}};
+        }
+        return {kind, top: {x: 0, y: 0, w: width, h: height - bottom.h},
+            bottom: {...bottom, x: (width - bottom.w) / 2, y: height - bottom.h}};
+    }
+
+    function applyScreens() {
+        pendingLayout = 0;
+        const module = window.AzaharUI?.getModule?.();
+        if (!window.AzaharUI?.isInitialized() || !module?._azahar_set_screen_layout) return;
+        const fill = screens !== 'native';
+        // Filling the frame, the canvas is the frame's shape (see html.split-seat-fill).
+        document.documentElement.classList.toggle('split-seat-fill', fill);
+        const width = canvas.clientWidth, height = canvas.clientHeight;
+        if (width < 1 || height < 1) return;
+        let next;
+        if (fill) {
+            next = window.AzaharFullscreen.computeLayout(width, height, BIG_TOP);
+            if (screens === 'stretch') next = stretchTop(next, width, height);
+            let scale = window.devicePixelRatio || 1;
+            if (software) scale = Math.min(scale, Math.sqrt(NATIVE_W * NATIVE_H / (width * height)));
+            const result = window.AzaharFullscreen.drawLayout(next, width, height,
+                [Math.max(scale, NATIVE_W / width), Math.max(scale, NATIVE_H / height)]);
+            if (result) window.AzaharUI.log(`Screen layout rejected (code ${result}).`);
+        } else {
+            module._azahar_set_screen_layout(0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+            next = {top: {x: 0, y: 0, w: width, h: height / 2},
+                bottom: {x: width / 10, y: height / 2, w: width * 0.8, h: height / 2}};
+        }
+        layout = {screens, width, height, top: next.top, bottom: next.bottom};
+        // The page puts its join panel over the top screen (see placeJoinPanel in azahar_split.js).
+        const box = canvas.getBoundingClientRect();
+        post({event: 'screens', top: {x: box.left + next.top.x, y: box.top + next.top.y,
+            w: next.top.w, h: next.top.h}, frame: {w: window.innerWidth, h: window.innerHeight}});
+    }
+
+    function scheduleScreens() {
+        if (!pendingLayout) pendingLayout = requestAnimationFrame(applyScreens);
+    }
+    window.addEventListener('resize', scheduleScreens);
+
     function announceReady() {
-        if (window.AzaharUI?.isInitialized()) post({event: 'ready'});
-        else window.addEventListener('azahar-initialized', () => post({event: 'ready'}), {once: true});
+        const ready = () => {
+            applyScreens();
+            post({event: 'ready'});
+        };
+        if (window.AzaharUI?.isInitialized()) ready();
+        else window.addEventListener('azahar-initialized', ready, {once: true});
     }
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', announceReady);
     else announceReady();
 
     window.AzaharSplitSeat = {
+        // The player picked another Screens setting on the page.
+        setScreens(value) {
+            if (!SCREENS.includes(value) || value === screens) return;
+            screens = value;
+            applyScreens();
+        },
+        // Where the screens are: {screens, width, height, top, bottom} in CSS pixels of the
+        // canvas (null until the emulator is ready).
+        screens: () => layout && {...layout, top: {...layout.top}, bottom: {...layout.bottom}},
         // The run loop failed (see handleRunFailure in azahar_ui.js); the page restarts this
         // console. `compiled`: compiled code was on.
         failed(detail, compiled) {

@@ -82,6 +82,24 @@
     // Players 1 and 2 split the keyboard; more players use controllers.
     const DEFAULT_KEYS = ['left', 'right', 'none', 'none'];
 
+    // How each player's console lays out its two screens (see azahar_split_seat.js), kept in
+    // this browser per player.
+    const SCREENS = {
+        top: 'Screens: big top',
+        stretch: 'Screens: stretched',
+        native: 'Screens: 3DS',
+    };
+    const SCREENS_KEY = 'azahar-split-screens';
+    const screenChoices = (() => {
+        try {
+            const stored = JSON.parse(localStorage.getItem(SCREENS_KEY) || '[]');
+            return Array.isArray(stored) ? stored.map(value => (Object.hasOwn(SCREENS, value) ? value : 'top')) : [];
+        } catch (_) {
+            return [];
+        }
+    })();
+    const screensFor = index => screenChoices[index] || 'top';
+
     // Query options handed through to every console.
     const PASS_THROUGH = ['logFilter', 'netsim', 'pacing', 'frameBudget', 'scheduler', 'cpuClock',
         'adaptiveClock', 'hwShader', 'resolution', 'crossVersion', 'cores', 'cpuJit'];
@@ -181,6 +199,7 @@
         // Halving the main thread is expected here, not a slow renderer to leave.
         url.searchParams.set('autoFallback', '0');
         if (build) url.searchParams.set('v', build);
+        url.searchParams.set('screens', screensFor(index));
         if ($('renderer').value === 'software') url.searchParams.set('renderer', 'software');
         for (const name of PASS_THROUGH) {
             if (query.has(name)) url.searchParams.set(name, query.get(name));
@@ -198,6 +217,7 @@
             fps: element.querySelector('.seat-fps'),
             pad: element.querySelector('.seat-pad'),
             keys: element.querySelector('.seat-keys'),
+            screens: element.querySelector('.seat-screens'),
             legend: element.querySelector('.seat-legend'),
             room: element.querySelector('.seat-room'),
             mute: element.querySelector('.seat-mute'),
@@ -272,6 +292,16 @@
             releaseKeys();
             renderKeys();
         });
+        for (const [value, label] of Object.entries(SCREENS)) seat.screens.append(new Option(label, value));
+        seat.screens.value = screensFor(index);
+        seat.screens.addEventListener('click', event => event.stopPropagation());
+        seat.screens.addEventListener('change', () => {
+            screenChoices[index] = seat.screens.value;
+            try {
+                localStorage.setItem(SCREENS_KEY, JSON.stringify(screenChoices));
+            } catch (_) { /* this session only */ }
+            seat.frame.contentWindow?.AzaharSplitSeat?.setScreens(seat.screens.value);
+        });
         element.querySelector('.seat-bar').addEventListener('click', () => focusSeat(seat));
         // Touches land in the console's own frame (keys and controllers come through this page).
         seat.frame.addEventListener('load', () => seat.frame.contentWindow?.addEventListener('pointerdown', () => {
@@ -279,6 +309,16 @@
         }, true));
         seat.frame.src = seatUrl(index, count);
         return seat;
+    }
+
+    // The join panel goes over the lower part of the console's top screen, wherever its Screens
+    // setting put it (`top`, in CSS pixels of its frame, `frame` its size; see .seat-join in
+    // split.html). The frame spans its seat and ends at its bottom.
+    function placeJoinPanel(seat, top, frame) {
+        const style = seat.element.style;
+        style.setProperty('--top-center', `${Math.round(top.x + top.w / 2)}px`);
+        style.setProperty('--top-gap', `${Math.round(frame.h - top.y - top.h)}px`);
+        style.setProperty('--top-width', `${Math.round(top.w)}px`);
     }
 
     // Restarts one console, the others playing on: its frame reloads and gets the game and the
@@ -646,6 +686,8 @@
             seat.restore = null;
             seat.whenRunning?.(true);
             seat.whenRunning = null;
+        } else if (message.event === 'screens') {
+            placeJoinPanel(seat, message.top, message.frame);
         } else if (message.event === 'failed') {
             seatFailed(seat, message.detail, message.compiled);
         } else if (message.event === 'error') {

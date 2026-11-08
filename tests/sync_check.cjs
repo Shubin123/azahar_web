@@ -33,10 +33,12 @@ async function regionSignatures(page, png, rects) {
     }, `data:image/png;base64,${png}`, rects);
 }
 
-// Each console's screen and keys: a page per console by default.
+// Each console's screen and keys: a page per console by default. `place` maps regions given in
+// the native 400x480 frame to where that console's canvas shows them.
 const pageIo = {
     shoot: async page => (await page.$('#canvas')).screenshot({ encoding: 'base64' }),
     hold: (page, key, down) => (down ? page.keyboard.down(key) : page.keyboard.up(key)),
+    place: async (page, rects) => rects,
 };
 
 // While both consoles play, compares what each shows in matching screen regions
@@ -63,8 +65,8 @@ async function checkSync(host, guest, sync, io = pageIo) {
     const readyBy = Date.now() + (sync.readyTimeoutMs || 120000);
     for (;;) {
         const shots = await Promise.all([host, guest].map(io.shoot));
-        const grids = await Promise.all([regionSignatures(host, shots[0], readyRects),
-            regionSignatures(guest, shots[1], readyRects)]);
+        const grids = await Promise.all([regionSignatures(host, shots[0], await io.place(host, readyRects)),
+            regionSignatures(guest, shots[1], await io.place(guest, readyRects))]);
         if (grids.every(g => variety(g) > (sync.minVariety ?? 25))) break;
         if (Date.now() > readyBy) {
             throw new Error('the consoles never reached the synced scene (both stayed on a blank or loading screen)');
@@ -77,7 +79,8 @@ async function checkSync(host, guest, sync, io = pageIo) {
     for (let sample = 0; sample < sync.samples; sample++) {
         await sleep(sync.intervalMs);
         const shots = await Promise.all([host, guest].map(io.shoot));
-        const [a, b] = await Promise.all([regionSignatures(host, shots[0], rects), regionSignatures(guest, shots[1], rects)]);
+        const [a, b] = await Promise.all([regionSignatures(host, shots[0], await io.place(host, rects)),
+            regionSignatures(guest, shots[1], await io.place(guest, rects))]);
         const differing = a.map((grid, row) => grid.reduce((sum, value, i) => sum + Math.abs(value - b[row][i]), 0) / grid.length)
             .map((distance, row) => [row + 1, Math.round(distance)]).filter(([, distance]) => distance > sync.threshold);
         // Close racers can swap places between two snapshots taken milliseconds apart.
