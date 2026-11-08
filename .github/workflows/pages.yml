@@ -28,6 +28,16 @@ jobs:
         uses: actions/checkout@v4
       - name: Configure Pages
         uses: actions/configure-pages@v5
+      # GitHub Pages lets a browser keep any file for 10 minutes, and a reload checks only the
+      # page itself, so a page could run the previous deploy's scripts. Stamp this commit on
+      # every script the pages load; azahar_ui.js and azahar_split.js pass it on to the engine's
+      # files and to each console's page on split.html.
+      - name: Stamp this deploy on the pages' scripts
+        run: |
+          build="${GITHUB_SHA::12}"
+          sed -i -E "s#(<script src=\")(azahar[a-z0-9_]*\.js)(\")#\1\2?v=${build}\3#g" web/*.html
+          grep -c "?v=${build}" web/*.html
+          ! grep -nE '<script src="azahar[a-z0-9_]*\.js"' web/*.html
       - name: Upload web bundle
         uses: actions/upload-pages-artifact@v3
         with:

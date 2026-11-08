@@ -13,6 +13,10 @@
 
     const $ = id => document.getElementById(id);
     const query = new URLSearchParams(location.search);
+    // The deploy's commit, stamped on this script's URL (see .github/workflows/pages.yml): each
+    // console's page is asked for with it, so none comes from the browser's cache of an earlier
+    // deploy (the old page's scripts would not drive this page's join panel).
+    const build = new URL(document.currentScript?.src || location.href).searchParams.get('v');
     const REBALANCE_MS = 250;
     const STATUS_MS = 500;
     // A console that has not stepped for this long is paused or loading.
@@ -176,6 +180,7 @@
         url.searchParams.set('seats', String(count));
         // Halving the main thread is expected here, not a slow renderer to leave.
         url.searchParams.set('autoFallback', '0');
+        if (build) url.searchParams.set('v', build);
         if ($('renderer').value === 'software') url.searchParams.set('renderer', 'software');
         for (const name of PASS_THROUGH) {
             if (query.has(name)) url.searchParams.set(name, query.get(name));

@@ -11,6 +11,11 @@
     const isWebGL2Artifact = webConfig.renderer === 'webgl2';
     const artifactName = webConfig.artifact || (isWebGL2Artifact ? 'azahar_webgl2' : 'azahar');
     const softwareFallbackUrl = webConfig.softwareFallbackUrl || 'index.html';
+    // The deploy stamps its commit on every script a page loads (?v=, see .github/workflows/
+    // pages.yml), so a page never runs another deploy's scripts out of the browser's cache
+    // (GitHub Pages lets one keep a file for 10 minutes). The engine's files carry it too.
+    const build = new URL(document.currentScript?.src || location.href).searchParams.get('v');
+    const stamped = file => build ? `${file}?v=${encodeURIComponent(build)}` : file;
     const autoStart = new URLSearchParams(location.search).get('autostart') !== '0';
     const explicitWebGL2 = new URLSearchParams(location.search).get('renderer') === 'webgl2';
     const canvas = document.getElementById('canvas');
@@ -1301,12 +1306,14 @@ void main() { frag_color = vec4(1.0); }`);
         installSharedMemoryFallback();
         return new Promise((resolve, reject) => {
             const script = document.createElement('script');
-            script.src = `${artifactName}.js`;
+            // Its worker threads load this same URL; its .wasm comes through locateFile.
+            script.src = stamped(`${artifactName}.js`);
             // SDL2's Emscripten backend must use the UI canvas that already
             // exists in the page. Set this before loading the generated glue
             // script so it does not create an unbound canvas target.
             window.Module = window.Module || {};
             window.Module.canvas = canvas;
+            window.Module.locateFile = (file, directory) => directory + stamped(file);
             // Keep native frontend/core diagnostics visible in the browser UI.
             // Emscripten invokes these hooks for stdout and stderr after the
             // generated runtime starts, which lets real-ROM testing expose
