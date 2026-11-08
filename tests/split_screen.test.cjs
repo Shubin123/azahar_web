@@ -16,7 +16,7 @@
  *      then (unless --no-race) start the match and check that both screens
  *      agree on it. Waits and holds count emulated time, since consoles that
  *      share a device may run below full speed. A Download Play game
- *      (mario-party-island-tour) is joined with each other screen's 📥; once the
+ *      (mario-party-island-tour) is joined by each other screen on its own; once the
  *      host starts it, every guest runs the game's Download Play child in the
  *      host's room. Then (unless --no-recover) the consoles take a checkpoint
  *      together and the guest must show the host's choices (followCheck); Player 2
@@ -28,11 +28,13 @@
  *   node tests/split_screen.test.cjs
  *   node tests/split_screen.test.cjs --rom PATH [--game mario-kart-7] [--renderer webgl2|software]
  *       [--no-race] [--no-recover] [--gpu] [--timeout SECONDS] [--web DIR] [--query cpuJit=0]
- *       [--players N] [--game-only]
+ *       [--players N] [--game-only] [--save-logs] [--stall-dump]
  *   --game GAME --roms DIR finds the game's ROM in DIR (see game_roms.cjs) instead of --rom.
  *   --players N (2-8) puts N consoles in the game's room: players 1 and 2 on their keyboard
  *   keys, the others on a controller each; the race check needs two players.
  *   --game-only skips the checks that need no game (multiplayer_suite.cjs runs them once).
+ *   --stall-dump writes every guest thread and data channel of both consoles when one stops
+ *   reading its race channel or drawing during a race (see watchStall).
  *   add --base URL to test a deployed site (https://shubin123.github.io/azahar_web) instead of web/
  */
 'use strict';
@@ -156,7 +158,8 @@ async function linkChecks(browser) {
     const dummy = path.join(OUTPUT, 'not-a-game.3ds');
     fs.mkdirSync(OUTPUT, { recursive: true });
     fs.writeFileSync(dummy, Buffer.alloc(4096));
-    const page = await openSplit(browser, 'players=3&renderer=software', dummy);
+    // joinIdle: a console joins a lobby on its own once left alone for 3 s (joinPanelChecks).
+    const page = await openSplit(browser, 'players=3&renderer=software&joinIdle=3', dummy);
     await ringChecks(page);
     await helpChecks(page);
     await page.waitForFunction(() => document.querySelectorAll('#seats iframe').length === 3, { timeout: 10000 });
@@ -193,6 +196,7 @@ async function linkChecks(browser) {
     assert.deepStrictEqual(hostBadges, ['🏠 Hosting a room · 1 player', '🏠 Hosting a room · 1 player', '']);
     await Promise.all(frames.map(frame => frame.evaluate(() => { delete window.AzaharNetplay.gameRoom; })));
     console.log('PASS consoles hosting at once are named, with how to join one room instead');
+    await joinPanelChecks(page, frames);
 
     // Sharing the main thread, driven through the slots the consoles publish.
     const shares = await page.evaluate(async () => {
@@ -349,6 +353,118 @@ async function helpChecks(page) {
     console.log('PASS ? on the top bar explains how players join a room (Download Play and the game\'s own menu)');
 }
 
+// Player 1 opens a Download Play lobby (the consoles' rooms and joins are stood in for): Player 2,
+// in no room, is invited while its player presses keys, then, left alone (?joinIdle=3), counts
+// down and joins it with no click, its keys doing nothing while it waits; Leave keeps it out and
+// 📥 joins again; Player 3, whose game has its wireless menu open, is only offered 📥; and once
+// Player 3 opens a lobby too, it is offered a restart that joins Player 1's.
+async function joinPanelChecks(page, frames) {
+    await Promise.all(frames.map((frame, index) => frame.evaluate(index => {
+        const netplay = window.AzaharNetplay;
+        const mac = `02:00:00:00:00:0${index}`;
+        const idle = { stage: 'idle', host: null, rooms: [] };
+        window.testLobby = {
+            room: index === 0 ? { status: 'host', host: mac, wlanCommId: 0x2810, networkId: 7, node: 1,
+                nodes: [{ id: 1, name: 'Player 1' }], initialized: true } : { status: 'none', initialized: index === 2 },
+            join: idle, joins: [],
+            saved: { status: netplay.status, join: netplay.joinDownloadPlay, cancel: netplay.cancelDownloadPlay,
+                running: window.AzaharUI.isRunning, programId: window.AzaharUI.getProgramId },
+        };
+        netplay.status = () => ({ ...window.testLobby.saved.status.call(netplay), joined: true, mac,
+            gameRoom: window.testLobby.room, downloadPlay: window.testLobby.join });
+        netplay.joinDownloadPlay = host => {
+            window.testLobby.joins.push(host);
+            window.testLobby.join = { stage: 'scanning', host: '00:00:00:00:00:00', rooms: [] };
+            return null;
+        };
+        netplay.cancelDownloadPlay = () => { window.testLobby.join = idle; };
+        window.AzaharUI.isRunning = () => true;
+        window.AzaharUI.getProgramId = () => '0004000000123400';
+    }, index)));
+    const panels = () => page.$$eval('#seats .seat-join', elements => elements.map(element => element.hidden ? null : {
+        mode: element.dataset.mode, text: element.querySelector('.seat-join-text').textContent,
+        buttons: [...element.querySelectorAll('button')].filter(button => !button.hidden).map(button => button.textContent),
+    }));
+    const waitPanel = (index, mode, label) => page.waitForFunction((i, mode) =>
+        document.querySelectorAll('#seats .seat-join')[i].dataset.mode === mode &&
+        !document.querySelectorAll('#seats .seat-join')[i].hidden, { timeout: 10000 }, index, mode)
+        .catch(async () => { throw new Error(`${label}: ${JSON.stringify(await panels())}`); });
+    const click = (index, selector) => page.evaluate((i, selector) =>
+        document.querySelectorAll('#seats .seat-join')[i].querySelector(selector).click(), index, selector);
+    const setJoin = (index, join) => frames[index].evaluate(join => { window.testLobby.join = join; }, join);
+
+    // Player 2's player is pressing keys: invited, not joined.
+    await page.evaluate(() => document.activeElement?.blur());
+    await page.keyboard.press('KeyL');
+    await waitPanel(1, 'invite', 'Player 2, in use, is invited');
+    let shown = await panels();
+    assert.deepStrictEqual(shown[1], { mode: 'invite', text: 'Player 1 opened a Download Play lobby.',
+        buttons: ["📥 Join Player 1's lobby", 'Not now'] });
+    assert.deepStrictEqual(await page.evaluate(() => window.AzaharSplit.joins()[1]), [], 'and does not join yet');
+    await waitPanel(1, 'countdown', 'Player 2, left alone, counts down to joining Player 1\'s lobby');
+    shown = await panels();
+    assert.strictEqual(shown[0], null, 'the host is offered nothing');
+    assert.match(shown[1].text, /Player 1 opened a Download Play lobby\. Player 2 joins it in [1-5] s\./);
+    assert.deepStrictEqual(shown[1].buttons, ['📥 Join now', 'Not now']);
+    assert.deepStrictEqual(shown[2], { mode: 'offer', text: '', buttons: ["📥 Join Player 1's Download Play"] },
+        'a console whose game has its wireless menu open is only offered 📥');
+    await waitPanel(1, 'lobby', 'Player 2 joins on its own');
+    assert.deepStrictEqual(await frames[1].evaluate(() => window.testLobby.joins), ['02:00:00:00:00:00'],
+        'Player 2 joined Player 1\'s lobby by its address');
+    assert.deepStrictEqual(await page.evaluate(() => window.AzaharSplit.joins()), [[], [{ how: 'auto', host: 0 }], []]);
+    shown = await panels();
+    assert.match(shown[1].text, /Joining Player 1's lobby/);
+    assert.deepStrictEqual(shown[1].buttons, ['Leave']);
+    assert.deepStrictEqual(shown[2].mode, 'offer', 'Player 3 still only has 📥');
+
+    // Waiting in the lobby, Player 2's keys do nothing (Player 1's still work).
+    await page.evaluate(() => document.activeElement?.blur());
+    await page.keyboard.down('KeyL');
+    await page.keyboard.down('KeyG');
+    await sleep(300);
+    const held = await Promise.all(frames.map(frame => frame.evaluate(() => window.AzaharInput.getPressedCodes())));
+    await page.keyboard.up('KeyL');
+    await page.keyboard.up('KeyG');
+    assert.deepStrictEqual(held, [['KeyA'], [], []], 'a console in the lobby gets no keys');
+
+    await setJoin(1, { stage: 'joined', host: '02:00:00:00:00:00', rooms: [] });
+    await page.waitForFunction(() => /In Player 1's lobby\. Player 1 starts the game/.test(
+        document.querySelectorAll('#seats .seat-join-text')[1].textContent), { timeout: 5000 });
+    await click(1, '.seat-join-later');
+    await waitPanel(1, 'offer', 'Leave leaves the lobby');
+    await sleep(6000);
+    shown = await panels();
+    assert.strictEqual(shown[1].mode, 'offer', 'after Leave it does not join that lobby on its own again');
+    assert.strictEqual((await frames[1].evaluate(() => window.testLobby.joins)).length, 1);
+    await click(1, '.seat-dlp');
+    await waitPanel(1, 'lobby', '📥 joins again');
+    assert.deepStrictEqual((await page.evaluate(() => window.AzaharSplit.joins()))[1].map(join => join.how), ['auto', 'button']);
+
+    // Player 3 opens a lobby too.
+    await frames[2].evaluate(() => {
+        window.testLobby.room = { status: 'host', host: '02:00:00:00:00:02', wlanCommId: 0x2810, networkId: 9,
+            node: 1, nodes: [{ id: 1, name: 'Player 3' }], initialized: true };
+    });
+    await waitPanel(2, 'hosting', 'Player 3, hosting too, is offered a restart');
+    shown = await panels();
+    assert.match(shown[2].text, /Player 1 opened a lobby too, so nobody can join either/);
+    assert.deepStrictEqual(shown[2].buttons, ['↺ Restart and join Player 1', 'Not now']);
+    await click(2, '.seat-join-later');
+    await page.waitForFunction(() => document.querySelectorAll('#seats .seat-join')[2].hidden, { timeout: 5000 });
+
+    await Promise.all(frames.map(frame => frame.evaluate(() => {
+        const { saved } = window.testLobby;
+        Object.assign(window.AzaharNetplay, { status: saved.status, joinDownloadPlay: saved.join, cancelDownloadPlay: saved.cancel });
+        Object.assign(window.AzaharUI, { isRunning: saved.running, getProgramId: saved.programId });
+        delete window.testLobby;
+    })));
+    await page.waitForFunction(() => [...document.querySelectorAll('#seats .seat-join')].every(panel => panel.hidden),
+        { timeout: 5000 }).catch(() => { throw new Error('the join panels stayed after the lobby closed'); });
+    console.log('PASS a Download Play lobby on one screen: another screen in no room is asked while in use, then ' +
+        'left alone joins it on its own after a countdown (its keys wait), Leave and 📥 work, a screen in its own wireless menu is only offered 📥, ' +
+        'and one hosting too is offered a restart that joins');
+}
+
 // One console restarts while the others play on: its frame reloads and gets the game and the
 // link again, and the others drop the old console and see the new one. A console that stops on
 // its own is restarted too, with compiled code off when it stopped with it on.
@@ -400,14 +516,19 @@ async function runSteps(page, frame, steps, holdKey) {
     for (const step of steps) {
         const [action, ...args] = step.split(/\s+/);
         if (action === 'downloadplay') {
-            // Join the Download Play room another console gathers players in, with this
-            // screen's 📥 (the page offers it once that room is up).
+            // This screen joins the Download Play lobby another console opened on its own, with
+            // no click (split.html counts down, then joins).
             const index = await frame.evaluate(() => Number(new URLSearchParams(location.search).get('seat')));
-            await page.waitForFunction(i => !document.querySelectorAll('#seats .seat-dlp')[i].hidden,
-                { timeout: timeoutMs }, index).catch(() => { throw new Error(`player ${index + 1} was not offered 📥`); });
-            await page.evaluate(i => document.querySelectorAll('#seats .seat-dlp')[i].click(), index);
+            await page.waitForFunction(i => window.AzaharSplit.joins()[i]?.length > 0, { timeout: timeoutMs }, index)
+                .catch(async () => {
+                    const panel = await page.evaluate(i => document.querySelectorAll('#seats .seat-join')[i].textContent, index);
+                    throw new Error(`player ${index + 1} did not join the lobby on its own (${panel.trim()}): ` +
+                        `${await page.$eval('#status', e => e.textContent)}`);
+                });
+            const joins = await page.evaluate(i => window.AzaharSplit.joins()[i], index);
+            assert.deepStrictEqual(joins, [{ how: 'auto', host: 0 }], `player ${index + 1} joined Player 1's lobby on its own, once`);
             await frame.waitForFunction(() => window.AzaharNetplay.downloadPlay()?.stage !== 'idle', { timeout: 30000 })
-                .catch(async () => { throw new Error(`player ${index + 1} did not start joining: ${await page.$eval('#status', e => e.textContent)}`); });
+                .catch(async () => { throw new Error(`player ${index + 1} is not joining: ${await page.$eval('#status', e => e.textContent)}`); });
         } else if (action === 'wait') {
             await guestSleep(frame, Number(args[0]));
         } else if (action === 'key') {
@@ -581,6 +702,18 @@ async function playGame(browser, rom) {
     }, 15000);
     const screenshot = name => page.screenshot({ path: path.join(directory, `${name}.png`) });
     fs.mkdirSync(directory, { recursive: true });
+    // In a game every player has, a player joins from the game's menu with the full game, so
+    // they say Not now when their screen, left alone while Player 1 opens a room that takes
+    // Download Play players too (Mario Kart 7's does), counts down to joining it that way.
+    const declined = new Set();
+    let stopWatch = () => {};
+    const decliner = game.downloadPlay ? null : setInterval(() => {
+        page.evaluate(() => [...document.querySelectorAll('#seats .seat-join')].map((panel, index) => {
+            if (panel.hidden || !['countdown', 'invite'].includes(panel.dataset.mode)) return -1;
+            panel.querySelector('.seat-join-later').click();
+            return index;
+        })).then(list => list.forEach(index => index >= 0 && declined.add(index))).catch(() => {});
+    }, 300);
     try {
         await runSteps(page, host, game.host.steps, holdKey);
         for (const [index, frame] of guests.entries()) {
@@ -608,6 +741,15 @@ async function playGame(browser, rom) {
         assert.match(badges[0], new RegExp(`Hosting a room · ${players} players`));
         for (const badge of badges.slice(1)) assert.match(badge, /In Player 1's room/);
         await screenshot('joined');
+        // Guests that joined from the game's own menu had its wireless open, so the page did
+        // not take them into Download Play on its own.
+        const joins = await page.evaluate(() => window.AzaharSplit.joins());
+        if (!game.downloadPlay) {
+            assert.ok(joins.every(list => !list.length), `no console joined with Download Play: ${JSON.stringify(joins)}`);
+            if (declined.size) {
+                console.log(`  ${[...declined].map(index => `Player ${index + 1}`).join(', ')} said Not now to joining with Download Play`);
+            }
+        }
         const stats = await guest.evaluate(() => window.AzaharNetplay.status().stats);
         console.log(`PASS ${game.title}: all ${players} players are in one room, players 1 and 2 on one keyboard` +
             `${players > 2 ? ` and ${players - 2} on controllers` : ''} (Player 1 hosts network ` +
@@ -615,13 +757,15 @@ async function playGame(browser, rom) {
             `${stats.delivered} frames delivered to Player 2)`);
         if (game.downloadPlay) {
             await downloadPlayStarts(page, frames, game, holdKey, screenshot);
-            if (!cfg.argFlag('--no-recover')) {
+            // Recovery compares the screens through the game's followCheck.
+            if (!cfg.argFlag('--no-recover') && game.followCheck) {
                 await recoverConsoles(page, frames, game);
                 await screenshot('recovered');
             }
         }
         // The next phase, such as the host starting a race, and whether both consoles agree on it.
         if (!game.downloadPlay && players === 2 && !cfg.argFlag('--no-race') && (game.host.afterJoin || game.guest.afterJoin)) {
+            if (cfg.argFlag('--stall-dump')) stopWatch = watchStall(frames, directory);
             await Promise.all([runSteps(page, host, game.host.afterJoin || [], holdKey),
                 runSteps(page, guest, game.guest.afterJoin || [], holdKey)]);
             await guestSleep(host, Number(game.afterJoinWaitMs || 30000));
@@ -665,10 +809,17 @@ async function playGame(browser, rom) {
         console.log(`  logs in ${path.relative(cfg.ROOT, directory)}`);
         throw error;
     } finally {
+        stopWatch();
         clearInterval(monitor);
+        clearInterval(decliner);
         await screenshot('split');
         for (const [index, frame] of frames.entries()) {
             await saveFrameTrace(frame, path.join(directory, `frames-${index + 1}.txt`)).catch(() => {});
+            // --save-logs keeps each console's log of a run that passed too (a failure always does).
+            if (cfg.argFlag('--save-logs')) {
+                const log = await frame.evaluate(() => window.AzaharUI.getLog()).catch(() => '');
+                if (log) fs.writeFileSync(path.join(directory, `player-${index + 1}.log`), log);
+            }
             // Each bound data channel's queue: packets waiting now and the most ever waiting.
             const uds = await frame.evaluate(() => {
                 const log = () => window.AzaharUI.getLog();
@@ -717,6 +868,56 @@ async function downloadPlayStarts(page, frames, game, holdKey, screenshot) {
     console.log(`PASS ${game.title}: the host started the game and all ${frames.length - 1} guest(s) run its Download Play ` +
         `child ${child} in Player 1's game room (network 0x${(hostRoom.wlanCommId >>> 0).toString(16)}, nodes ` +
         `${hostRoom.nodes.map(node => node.id).join(', ')})`);
+}
+
+// --stall-dump: while the consoles set up a race, every second, each console's data channels.
+// Once both read a race channel, every guest thread of both consoles is written to
+// stall-healthy.txt; when a console stops reading (a queue past 40 packets) or stops drawing
+// (0 game FPS three times running), to stall-1.txt, and again 4 s later to stall-2.txt.
+function watchStall(frames, directory) {
+    const read = frame => frame.evaluate(() => {
+        const log = () => window.AzaharUI.getLog();
+        const module = window.AzaharUI.getModule();
+        const before = log().length;
+        module?._azahar_debug_uds?.();
+        const uds = log().slice(before).split('\n').filter(line => /azahar_debug_uds/.test(line))
+            .map(line => line.replace(/.*azahar_debug_uds:\d+: /, ''));
+        const middle = log().length;
+        module?._azahar_debug_threads?.();
+        const threads = log().slice(middle).split('\n').filter(line => /azahar_debug_threads/.test(line))
+            .map(line => line.replace(/.*azahar_debug_threads:\d+: /, ''));
+        return { uds, threads, fps: document.getElementById('fps').textContent,
+            time: window.AzaharNetplay.guestTimeUs() / 1e6 };
+    }).catch(() => null);
+    const write = (name, states) => fs.writeFileSync(path.join(directory, name), states.map((state, index) =>
+        `Player ${index + 1} at ${state?.time?.toFixed(1)} s (${state?.fps}):\n` +
+        [...(state?.uds || []), ...(state?.threads || [])].map(line => `  ${line}`).join('\n')).join('\n\n') + '\n');
+    let healthy = false;
+    let stalledAt = null;
+    let zero = [0, 0];
+    let done = false;
+    const timer = setInterval(async () => {
+        if (done) return;
+        const states = await Promise.all(frames.slice(0, 2).map(read));
+        const queues = states.map(state => (state?.uds || []).filter(line => /channel 243 /.test(line))
+            .map(line => Number(/(\d+) packets/.exec(line)?.[1] || 0)));
+        zero = states.map((state, index) => /^0 game FPS/.test(state?.fps || '') ? zero[index] + 1 : 0);
+        if (!healthy && queues.every(list => list.length)) {
+            healthy = true;
+            setTimeout(async () => write('stall-healthy.txt', await Promise.all(frames.slice(0, 2).map(read))), 5000);
+        }
+        const stalled = queues.some(list => list.some(count => count > 40)) || zero.some(count => count >= 3);
+        if (stalled && stalledAt === null) {
+            stalledAt = Date.now();
+            write('stall-1.txt', states);
+            console.log(`  stall: queues ${JSON.stringify(queues)}, game FPS ${states.map(state => state?.fps).join(' / ')}`);
+            setTimeout(async () => {
+                write('stall-2.txt', await Promise.all(frames.slice(0, 2).map(read)));
+                done = true;
+            }, 4000);
+        }
+    }, 1000);
+    return () => clearInterval(timer);
 }
 
 // Whether the guest shows what the host does: the host makes each of the game's followCheck

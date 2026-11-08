@@ -29,11 +29,13 @@ one pool of memory shared inside the tab (a ring per console that every other
 console reads) instead of a network. Use the game's own local wireless menus as on real consoles, for
 example Mario Kart 7's *Local Multiplayer*. Games that add players through
 **Download Play**, such as Mario Party: Island Tour, open a lobby on the host's
-screen that a 3DS joins from its HOME Menu; here each other screen shows
-**📥 Join Player N's Download Play** instead, and joins with the Download Play
-part of its own copy of the game (nothing is downloaded, and the dump may leave
-that part encrypted). When everyone is listed, the host starts the game and the
-other screens restart into it. The
+screen that a 3DS joins from its HOME Menu; here every other screen joins it
+on its own after a 5-second countdown (with **Not now**; **📥 Join Player N's
+Download Play** joins later; a screen its player is using asks instead), with the Download Play part of its own copy of the
+game (nothing is downloaded, and the dump may leave that part encrypted). A
+screen whose game has its own wireless menu open is only offered 📥, so Mario
+Kart 7 players can still join from the menu with the full game. When everyone
+is listed, the host starts the game and the other screens restart into it. The
 current game comes along (it is copied into browser storage if it was picked
 from disk); otherwise choose a file, or a game played before, on that page.
 Every game in the library's *Downloaded & ready to play* list also has a

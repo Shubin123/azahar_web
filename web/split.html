@@ -112,9 +112,37 @@
         .seat-bar select { padding: 2px 4px; font-size: 0.72rem; }
         .seat-bar .btn { padding: 2px 8px; font-size: 0.75rem; }
         .seat-bar .btn[hidden] { display: none; }
-        /* Over the screen, so offering it does not resize the console's screen mid-game. */
-        .seat-dlp { position: absolute; right: 10px; bottom: 10px; z-index: 1; box-shadow: 0 2px 10px #000a; }
-        .seat-dlp[hidden] { display: none; }
+        /* Over the screen, so showing it does not resize the console's screen mid-game: a panel
+           over the lower part of the top screen (ending above the touch screen, which the
+           player may be using) while the console joins a lobby on its own (or is in one), only
+           the 📥 button in a corner when the player said not now. */
+        .seat-join {
+            position: absolute;
+            left: 50%;
+            bottom: 50%;
+            transform: translateX(-50%);
+            z-index: 1;
+            width: min(24rem, calc(100% - 20px));
+            padding: 12px 14px;
+            background: #16213ef0;
+            border: 2px solid #e94560;
+            border-radius: 10px;
+            box-shadow: 0 4px 18px #000c;
+            text-align: center;
+            font-size: 0.9rem;
+            line-height: 1.35;
+        }
+        .seat-join[hidden] { display: none; }
+        .seat-join-text { margin-bottom: 10px; }
+        .seat-join-text:empty { display: none; }
+        .seat-join-buttons { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+        .seat-join-buttons .btn[hidden] { display: none; }
+        .seat-join .seat-dlp { font-size: 1rem; padding: 8px 16px; }
+        .seat-join[data-mode="offer"] {
+            left: auto; right: 10px; bottom: 10px; transform: none; width: auto;
+            padding: 0; background: none; border: 0;
+        }
+        .seat-join[data-mode="offer"] .seat-dlp { font-size: 0.85rem; padding: 6px 12px; }
         .seat iframe { flex: 1 1 auto; min-height: 120px; width: 100%; border: 0; background: #000; }
         footer { font-size: 0.7rem; color: #666; }
         #btn-help { padding: 4px 11px; border-radius: 50%; font-size: 0.9rem; }
@@ -184,8 +212,8 @@
             Every screen is its own console with its own address, linked to the others through memory
             shared on this device instead of a network, so use the game's local wireless
             (Local Play / Download Play) menus as on real consoles: host a room on one screen and join
-            it from the others. A Download Play room is joined with 📥 on the other screens (each uses
-            the Download Play part of its own copy of the game). ↺ restarts one console afresh while the
+            it from the others. The other screens join a Download Play lobby on their own after a short
+            countdown (each with the Download Play part of its own copy of the game). ↺ restarts one console afresh while the
             others play on; ⤺ brings every console back to the checkpoint they last took together, so
             their games agree again. A console that stops is restarted on its own, and everyone goes
             back to the checkpoint when there is one. Players 1 and 2 share the keyboard, each with their own keys (listed
@@ -207,15 +235,22 @@
         <ol>
             <li>On Player 1's screen, open the game's multiplayer mode (Mario Party: <b>Multiplayer</b>).
                 Its lobby says it is gathering players.</li>
-            <li>Leave the other screens on the game's title screen: if two screens open the lobby,
-                both are hosting and nobody can join.</li>
-            <li>On Player 2's screen, click <span class="chip">📥 Join Player 1's Download Play</span>
-                at its bottom right. It shows while Player 1's lobby is open and Player 2 is in no room.
-                Do the same on every other screen that should play.</li>
-            <li>Within a few seconds each player is listed in Player 1's lobby.</li>
+            <li>Leave the other screens alone, on the game's title screen. Each one counts down for
+                5 seconds and joins Player 1's lobby by itself (<span class="chip">📥 Join now</span>
+                skips the wait, <span class="chip">Not now</span> keeps that screen out; then
+                <span class="chip">📥 Join Player 1's Download Play</span> at its bottom right joins later).
+                A screen whose player is pressing its buttons is asked instead
+                (<span class="chip">📥 Join Player 1's lobby</span>, one click), and counts down once
+                left alone for 30 seconds.</li>
+            <li>Within a few seconds each player is listed in Player 1's lobby. A screen waiting there
+                ignores its player's buttons, so nothing takes its game away from the lobby;
+                <span class="chip">Leave</span> takes it out.</li>
             <li>Player 1 starts the game (Mario Party: <b>End</b>). The other screens restart into the
                 game's Download Play version and join Player 1's game.</li>
         </ol>
+        <p>If another screen opened the lobby too, nobody can join either; that screen shows
+            <span class="chip">↺ Restart and join Player 1</span>, which restarts its console and
+            joins Player 1's lobby as soon as it is back.</p>
 
         <h3>Games where everyone has the game (such as Mario Kart 7)</h3>
         <ol>
@@ -223,8 +258,10 @@
                 then create a room).</li>
             <li>Player 2 opens the same menu on their screen and picks Player 1's room from the list.</li>
         </ol>
-        <p>Some of these games accept Download Play players too (Mario Kart 7 does), so 📥 can show
-            there as well; joining from the game's menu plays the full game.</p>
+        <p>Some of these games accept Download Play players too (Mario Kart 7 does): a screen that is
+            not in the game's wireless menu then counts down to join with Download Play as above.
+            Press <span class="chip">Not now</span>, or open the menu first, to join from the menu
+            with the full game instead.</p>
 
         <h3>Players on other devices or browsers</h3>
         <ol>
@@ -267,7 +304,13 @@
             </div>
             <div class="seat-legend"></div>
             <iframe allow="autoplay; gamepad; fullscreen"></iframe>
-            <button type="button" class="btn btn-primary seat-dlp" hidden></button>
+            <div class="seat-join" role="status" hidden>
+                <p class="seat-join-text"></p>
+                <div class="seat-join-buttons">
+                    <button type="button" class="btn btn-primary seat-dlp"></button>
+                    <button type="button" class="btn btn-secondary seat-join-later"></button>
+                </div>
+            </div>
         </section>
     </template>
 

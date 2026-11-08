@@ -38,6 +38,14 @@
     const CAPTURE_HOLD_MS = 1500;
     const CHECKPOINT_NOT_READY_MS = 1000;
     const CHECKPOINT_RETRY_MS = 20000;
+    // A console in no room joins a Download Play lobby another console opened after this long
+    // (its screen counts down, with Not now) once its player has left it alone (no key, button
+    // or touch) for AUTO_JOIN_IDLE_MS (?joinIdle=SECONDS), and gives up joining that lobby on its
+    // own after AUTO_JOIN_TRIES joins that did not start.
+    const AUTO_JOIN_MS = 5000;
+    const AUTO_JOIN_IDLE_MS = (Number(query.get('joinIdle')) || 30) * 1000;
+    const AUTO_JOIN_TRIES = 3;
+    const DOWNLOAD_PLAY_COMM_ID = 0x2810;
     // Keyboard layouts that let two players share one keyboard. Each maps a physical key
     // (KeyboardEvent.code) to the key of the console's own default layout that drives that
     // control (see KEYMAP in azahar_input.js): A KeyA, B KeyS, X KeyZ, Y KeyX, L KeyQ,
@@ -188,7 +196,18 @@
             legend: element.querySelector('.seat-legend'),
             room: element.querySelector('.seat-room'),
             mute: element.querySelector('.seat-mute'),
+            join: element.querySelector('.seat-join'),
+            joinText: element.querySelector('.seat-join-text'),
             dlp: element.querySelector('.seat-dlp'),
+            joinLater: element.querySelector('.seat-join-later'),
+            joinMode: null,      // what its join panel shows (see renderSeatButtons)
+            joinOffer: null,     // {lobby, at}: the lobby it joins on its own at `at`
+            joinDeclined: null,  // the lobby its player said not now to (or left)
+            joinAfterRestart: null, // the lobby it joins as soon as it runs again
+            autoJoins: {lobby: null, count: 0},
+            inLobby: false,      // waiting in a lobby: its buttons do nothing
+            lastInput: -Infinity, // when its player last pressed a key or button or touched it
+            joins: [],           // each Download Play join it started: {how: 'auto' | 'button' | 'restart', host}
             reset: element.querySelector('.seat-reset'),
             mac: null,           // the console's address, kept for after it restarts
             checkpoint: null,    // {programId, bytes, at}: its part of the last checkpoint
@@ -221,9 +240,20 @@
             event.stopPropagation();
             void restartSeat(seat, {reason: 'restarted'});
         });
-        seat.dlp.addEventListener('click', event => {
-            event.stopPropagation();
-            joinDownloadPlay(seat);
+        seat.join.addEventListener('click', event => event.stopPropagation());
+        seat.dlp.addEventListener('click', () => {
+            if (seat.joinMode === 'hosting') {
+                seat.joinAfterRestart = seat.joinLobby;
+                void restartSeat(seat, {reason: `leaves its own lobby to join Player ${session.downloadPlayHost + 1}'s`});
+            } else {
+                joinDownloadPlay(seat, 'button');
+            }
+            session.lastStatus = 0;
+        });
+        seat.joinLater.addEventListener('click', () => {
+            if (seat.joinMode === 'lobby') seat.frame.contentWindow?.AzaharNetplay?.cancelDownloadPlay();
+            seat.joinDeclined = seat.joinLobby;
+            session.lastStatus = 0;
         });
         for (const [value, layout] of Object.entries(KEY_LAYOUTS)) {
             const option = document.createElement('option');
@@ -238,6 +268,10 @@
             renderKeys();
         });
         element.querySelector('.seat-bar').addEventListener('click', () => focusSeat(seat));
+        // Touches land in the console's own frame (keys and controllers come through this page).
+        seat.frame.addEventListener('load', () => seat.frame.contentWindow?.addEventListener('pointerdown', () => {
+            seat.lastInput = performance.now();
+        }, true));
         seat.frame.src = seatUrl(index, count);
         return seat;
     }
@@ -346,11 +380,22 @@
         });
     }
 
-    function joinDownloadPlay(seat) {
+    // `how`: 'auto' (on its own), 'button' (📥) or 'restart' (after ↺ Restart and join). Returns
+    // whether the join started.
+    function joinDownloadPlay(seat, how) {
         const host = session.seats[session.downloadPlayHost];
-        if (!host) return;
+        if (!host) return false;
+        seat.joinOffer = null;
+        seat.joinAfterRestart = null;
         const error = seat.frame.contentWindow?.AzaharNetplay?.joinDownloadPlay(host.mac);
-        if (error) say(`Player ${seat.index + 1} cannot join Download Play: ${error}.`, 'error');
+        if (error) {
+            // Not again on its own for this lobby; 📥 still tries.
+            seat.joinDeclined = seat.joinLobby;
+            say(`Player ${seat.index + 1} cannot join Download Play: ${error}.`, 'error');
+            return false;
+        }
+        seat.joins.push({how, host: session.downloadPlayHost});
+        return true;
     }
 
     // While everyone is in one room, all consoles take a checkpoint together now and then. Not
@@ -464,8 +509,8 @@
     function syncKeys() {
         const owners = keyOwners();
         for (const seat of session.seats) {
-            const codes = [...heldKeys].map(key => owners.get(key)).filter(owner => owner?.seat === seat)
-                .map(owner => owner.code);
+            const codes = seat.inLobby ? [] : [...heldKeys].map(key => owners.get(key))
+                .filter(owner => owner?.seat === seat).map(owner => owner.code);
             const signature = codes.join();
             if (signature === seat.keyCodes) continue;
             const input = seat.frame.contentWindow?.AzaharInput;
@@ -507,7 +552,9 @@
             if (type === 'keydown' && index < session.seats.length) assignKeys(index);
             return true;
         }
-        if (event.ctrlKey || event.metaKey || event.altKey || !keyOwners().has(event.code)) return false;
+        const owner = keyOwners().get(event.code);
+        if (event.ctrlKey || event.metaKey || event.altKey || !owner) return false;
+        if (type === 'keydown') owner.seat.lastInput = performance.now();
         if (type === 'keydown') heldKeys.add(event.code);
         else heldKeys.delete(event.code);
         syncKeys();
@@ -645,7 +692,8 @@
             let pad = null;
             if (seat.pad.value === 'auto') pad = free[next++] || null;
             else if (seat.pad.value !== 'none') pad = pads.find(candidate => candidate.index === Number(seat.pad.value)) || null;
-            const codes = pad ? input.padCodes(pad) : [];
+            const codes = pad && !seat.inLobby ? input.padCodes(pad) : [];
+            if (codes.length) seat.lastInput = performance.now();
             const key = codes.join();
             if (key !== seat.padCodes || codes.length) {
                 seat.padCodes = key;
@@ -701,6 +749,9 @@
         const dlpHost = session.downloadPlayHost;
         if (session.restoring || session.capturing || session.seats.some(seat => seat.restore || !seat.started)) {
             // restartSeat, restoreGroup or captureGroup said what is happening.
+        } else if (session.together >= 0 && dlpHost === session.together) {
+            say(`All ${session.seats.length} players are in Player ${dlpHost + 1}'s Download Play lobby: ` +
+                `Player ${dlpHost + 1} starts the game from it (Mario Party: End; Mario Kart 7: Start).`, 'ok');
         } else if (session.together >= 0) {
             say(`All ${session.seats.length} players are in one game room, hosted by Player ${session.together + 1}.`, 'ok');
         } else if (session.hosts?.length > 1) {
@@ -708,11 +759,13 @@
             const names = session.hosts.map(index => index + 1);
             say(`Players ${names.slice(0, -1).join(', ')} and ${names[names.length - 1]} are each hosting a room, so ` +
                 'nobody can join. Back out on all but one screen; the others join that room from the ' +
-                'game\'s multiplayer menu (Local Play), or with 📥 when it is a Download Play room.', 'error');
+                'game\'s multiplayer menu (Local Play), or, for a Download Play lobby, with ↺ Restart and ' +
+                'join on their screen.', 'error');
         } else if (dlpHost >= 0) {
-            say(`Player ${dlpHost + 1}'s room takes Download Play players: press 📥 on the other screens (each ` +
-                'uses the Download Play part of its own copy of the game), or join from the game\'s own ' +
-                `multiplayer menu where it has one. When everyone is listed, Player ${dlpHost + 1} starts the game.`, 'ok');
+            say(`Player ${dlpHost + 1} opened a Download Play lobby: the other screens join it on their own in a ` +
+                'few seconds (each with the Download Play part of its own copy of the game; 📥 joins one now), ' +
+                'except a screen whose game has its wireless menu open, which can join from that menu. ' +
+                `When everyone is listed, Player ${dlpHost + 1} starts the game.`, 'ok');
         } else if (running === session.seats.length) {
             say(`Playing ${session.rom.name} on ${running} consoles. Host a room on one screen and ` +
                 'join it from the others in the game\'s local wireless menu.', 'ok');
@@ -724,7 +777,7 @@
         const hostOf = room => session.seats.findIndex((seat, i) =>
             netplay[i]?.mac && netplay[i].mac.toLowerCase() === String(room.host).toLowerCase());
         const rooms = netplay.map(state => state?.gameRoom);
-        const isDownloadPlay = room => room?.wlanCommId === 0x2810;
+        const isDownloadPlay = room => room?.wlanCommId === DOWNLOAD_PLAY_COMM_ID;
         // A console gathering Download Play players (only one at a time is offered to the others).
         session.downloadPlayHost = rooms.findIndex(room => room?.status === 'host' && isDownloadPlay(room));
         for (const [index, seat] of session.seats.entries()) {
@@ -758,22 +811,106 @@
         session.hosts = hosts;
     }
 
-    // Each console's 📥 (join the Download Play room another console gathers players in), and ⤺
-    // (everyone back to the last checkpoint).
+    // ⤺ (everyone back to the last checkpoint), and each console's join panel. While another
+    // console gathers players in a Download Play lobby, a console in no room that its player
+    // left alone joins it on its own after AUTO_JOIN_MS (its screen counts down, with Not now);
+    // one in use is invited to (one click). A console whose game has its local wireless open is
+    // only offered 📥: its player may be joining from the game's own menu (Mario Kart 7 players
+    // do, with the full game). Waiting in the lobby, its buttons do nothing until the host
+    // starts: they could take its game into a wireless menu of its own, which ends the join. A
+    // console that opened a lobby too (nobody can join either) is offered a restart, after which
+    // it joins at once.
     function renderSeatButtons(now, netplay) {
         const back = $('btn-checkpoint-restore');
         back.disabled = !canRestore();
         back.title = session.checkpointAt ? 'Every console back to the checkpoint of ' +
             `${Math.round((now - session.checkpointAt) / 1000)} s ago` : 'No checkpoint yet (see Checkpoints)';
         const host = session.downloadPlayHost;
+        const hostRoom = host >= 0 ? netplay[host]?.gameRoom : null;
+        const lobby = hostRoom ? `${hostRoom.host}/${hostRoom.networkId}` : null;
+        const hostName = `Player ${host + 1}`;
+        const playerAt = mac => {
+            const index = session.seats.findIndex(seat => seat.mac && seat.mac.toLowerCase() === String(mac).toLowerCase());
+            return index >= 0 ? `Player ${index + 1}` : host >= 0 ? hostName : 'the host';
+        };
         for (const [index, seat] of session.seats.entries()) {
             const state = netplay[index];
-            const offered = host >= 0 && host !== index && state?.joined &&
-                (!state.gameRoom || state.gameRoom.status === 'none') &&
-                (!state.downloadPlay || state.downloadPlay.stage === 'idle') &&
-                !/^00040001/.test(seat.frame.contentWindow?.AzaharUI?.getProgramId?.() || '');
-            seat.dlp.hidden = !offered;
-            if (offered) seat.dlp.textContent = `📥 Join Player ${host + 1}'s Download Play`;
+            const room = state?.gameRoom;
+            const join = state?.downloadPlay;
+            const seatWindow = seat.frame.contentWindow;
+            const ready = seat.started && !seat.restore && state?.joined && seatWindow?.AzaharUI?.isRunning() &&
+                !/^00040001/.test(seatWindow.AzaharUI.getProgramId?.() || '');
+            const other = host >= 0 && host !== index && ready;
+            let mode = null;
+            let text = '';
+            let main = '';
+            let later = '';
+            if (join && join.stage !== 'idle') {
+                mode = 'lobby';
+                const name = playerAt(join.host);
+                text = join.stage === 'starting' ? `${name} started the game: loading its Download Play version…` :
+                    join.stage === 'joined' ? `✔ In ${name}'s lobby. ${name} starts the game once everyone is listed.` :
+                    `📥 Joining ${name}'s lobby…`;
+                later = join.stage === 'starting' ? '' : 'Leave';
+            } else if (other && room?.status === 'host' && room.wlanCommId === DOWNLOAD_PLAY_COMM_ID) {
+                if (seat.joinDeclined !== lobby) {
+                    mode = 'hosting';
+                    text = `${hostName} opened a lobby too, so nobody can join either. Restart this console ` +
+                        `and it joins ${hostName}'s.`;
+                    main = `↺ Restart and join ${hostName}`;
+                    later = 'Not now';
+                }
+            } else if (other && (!room || room.status === 'none')) {
+                if (seat.autoJoins.lobby !== lobby) seat.autoJoins = {lobby, count: 0};
+                const auto = !room?.initialized && seat.joinDeclined !== lobby && seat.autoJoins.count < AUTO_JOIN_TRIES;
+                const idle = seat.joinAfterRestart === lobby || now - seat.lastInput >= AUTO_JOIN_IDLE_MS;
+                if (auto && idle && seat.joinOffer?.lobby !== lobby) seat.joinOffer = {lobby, at: now + AUTO_JOIN_MS};
+                const due = auto && idle && (seat.joinAfterRestart === lobby || now >= seat.joinOffer.at);
+                if (due) {
+                    seat.joinLobby = lobby;
+                    seat.autoJoins.count++;
+                }
+                if (due && joinDownloadPlay(seat, seat.joinAfterRestart === lobby ? 'restart' : 'auto')) {
+                    mode = 'lobby';
+                    text = `📥 Joining ${hostName}'s lobby…`;
+                    later = 'Leave';
+                } else if (due) {
+                    mode = 'offer';
+                    main = `📥 Join ${hostName}'s Download Play`;
+                } else if (auto && idle) {
+                    mode = 'countdown';
+                    text = `${hostName} opened a Download Play lobby. Player ${index + 1} joins it in ` +
+                        `${Math.max(1, Math.ceil((seat.joinOffer.at - now - 1) / 1000))} s.`;
+                    main = '📥 Join now';
+                    later = 'Not now';
+                } else if (auto) {
+                    mode = 'invite';
+                    text = `${hostName} opened a Download Play lobby.`;
+                    main = `📥 Join ${hostName}'s lobby`;
+                    later = 'Not now';
+                } else {
+                    mode = 'offer';
+                    main = `📥 Join ${hostName}'s Download Play`;
+                }
+            }
+            if (mode !== 'countdown') seat.joinOffer = null;
+            // What the buttons act on (a lobby gone by the click is no longer joined on its own).
+            if (mode !== 'lobby') seat.joinLobby = lobby;
+            seat.joinMode = mode;
+            seat.join.hidden = !mode;
+            if (mode) {
+                seat.join.dataset.mode = mode;
+                if (seat.joinText.textContent !== text) seat.joinText.textContent = text;
+                seat.dlp.textContent = main;
+                seat.dlp.hidden = !main;
+                seat.joinLater.textContent = later;
+                seat.joinLater.hidden = !later;
+            }
+            if ((mode === 'lobby') !== seat.inLobby) {
+                seat.inLobby = mode === 'lobby';
+                if (seat.inLobby) seatWindow?.AzaharInput?.setSourceCodes('gamepad', []);
+                syncKeys();
+            }
         }
     }
 
@@ -847,6 +984,10 @@
         checkpoints: () => session?.seats.map(seat => seat.checkpoint?.at ?? null) || [],
         // Index of the player gathering Download Play players, or -1.
         downloadPlayHost: () => session?.downloadPlayHost ?? -1,
+        // How long ago each console's player last pressed a key or button or touched it (ms).
+        idleFor: () => session?.seats.map(seat => performance.now() - seat.lastInput) || [],
+        // Each console's Download Play joins: {how: 'auto' | 'button' | 'restart', host}.
+        joins: () => session?.seats.map(seat => seat.joins.slice()) || [],
         shares: () => session?.slots.map(slot => slot[window.AzaharSharedLink.SLOT.share]) || [],
     };
 })();

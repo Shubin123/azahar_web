@@ -3,20 +3,23 @@
  * The multiplayer games on one device (split.html, tests/split_screen.test.cjs), one after
  * another, so a change to Local Play is checked against both ways games add players:
  *   - mario-kart-7: every player has the game; Player 2 joins Player 1's room from the
- *     game's Local Multiplayer menu, then both race and their screens are compared.
+ *     game's Local Multiplayer menu (saying Not now to the page's offer to join it with
+ *     Download Play), then both race and their screens are compared.
+ *   - mario-kart-7-download-play: Player 2, left alone on the title, joins Player 1's room on
+ *     its own with Mario Kart 7's Download Play child, which runs once Player 1 starts.
  *   - mario-party-island-tour: further players join only through Download Play; each other
- *     screen joins with 📥, the host starts, every guest runs the game's Download Play child in
+ *     screen joins on its own, the host starts, every guest runs the game's Download Play child in
  *     the host's room, and Player 2 is made to stop and comes back from its checkpoint.
  * The checks that need no game run once, first, and are never retried. A game whose ROM is not found
  * is skipped with the reason. A game that fails is played again up to --retries times
- * (default 1), and the summary says so: Mario Kart 7 sometimes breaks off with a communication
- * error between its lobby and the race, on the code before this suite too (1 of 5 runs there,
- * 2026-11-07). With --two-browsers, tests/multiplayer.test.cjs also links two browsers through
+ * (default 1), and the summary says so. (Mario Kart 7 used to break off between its lobby and
+ * the race in about half the runs: a lost update to one of the game's locks between the two
+ * emulated cores, fixed in the engine on 2026-11-07.) With --two-browsers, tests/multiplayer.test.cjs also links two browsers through
  * invite codes for each game.
  *
  * Usage:
  *   node tests/multiplayer_suite.cjs --roms DIR [--gpu] [--renderer webgl2|software]
- *       [--timeout SECONDS] [--games mario-kart-7,mario-party-island-tour] [--retries N]
+ *       [--timeout SECONDS] [--games mario-kart-7,mario-kart-7-download-play,mario-party-island-tour] [--retries N]
  *       [--two-browsers]
  *   ROMs come from each build's `rom` in multiplayer_games.json, or are found by name in DIR
  *   (or AZAHAR_ROMS); see game_roms.cjs.
@@ -30,7 +33,7 @@ const cfg = require('./config.cjs');
 const { findBuildRom } = require('./game_roms.cjs');
 
 const GAMES = JSON.parse(fs.readFileSync(path.join(__dirname, 'multiplayer_games.json'), 'utf8'));
-const DEFAULT_GAMES = ['mario-kart-7', 'mario-party-island-tour'];
+const DEFAULT_GAMES = ['mario-kart-7', 'mario-kart-7-download-play', 'mario-party-island-tour'];
 const PASSED_ON = ['--roms', '--renderer', '--timeout', '--web', '--query'];
 
 function run(script, args) {

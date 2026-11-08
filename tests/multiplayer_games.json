@@ -9,7 +9,7 @@
     "Steps run after linking: 'key CODE MS', 'touch X Y [MS]' (fractions of the canvas), 'wait MS'.",
     "A pairing [hostBuild, guestBuild] with different builds also checks cross-version play.",
     "A build's 'match' finds its ROM by file name in a folder given with --roms DIR or AZAHAR_ROMS when 'rom' is not there (tests/game_roms.cjs).",
-    "downloadPlay: further players join the host's Download Play room (each console with the Download Play part of its own copy of the game) instead of running guest steps from a lobby; 'downloadplay' in guest steps does that.",
+    "downloadPlay: further players join the host's Download Play room (each console with the Download Play part of its own copy of the game) instead of running guest steps from a lobby; 'downloadplay' in guest steps waits for that (split.html joins a console in no room on its own).",
     "followCheck: steps the host takes after the game started, and screen regions (fractions of the canvas) that change with them and must look alike on host and guest (mean channel difference at most 'agree'; the steps change them by at least 'differ')."
   ],
   "smash": {
@@ -234,6 +234,49 @@
       "readyX": 0.155,
       "readyWidth": 0.05
     }
+  },
+  "mario-kart-7-download-play": {
+    "title": "Mario Kart 7 (Download Play guest)",
+    "builds": {
+      "full": {
+        "rom": "test_games/Mario_Kart_7_USA_Rev1_Decrypted.3ds",
+        "match": "^Mario Kart 7"
+      }
+    },
+    "downloadPlay": true,
+    "host": {
+      "fixture": null,
+      "steps": [
+        "wait 12000",
+        "key KeyA 200",
+        "wait 15000",
+        "touch 0.5 0.71 300",
+        "wait 6000",
+        "touch 0.62 0.945 300",
+        "wait 1500",
+        "key KeyA 200",
+        "wait 4000"
+      ],
+      "afterJoin": [
+        "wait 3000",
+        "touch 0.62 0.945 300",
+        "wait 1500",
+        "key KeyA 200"
+      ]
+    },
+    "guest": {
+      "fixture": null,
+      "steps": [
+        "downloadplay"
+      ]
+    },
+    "pairings": [
+      [
+        "full",
+        "full"
+      ]
+    ],
+    "note": "Player 2 is left alone on the title while Player 1 creates a Local Multiplayer room, which also takes Download Play players: split.html joins Player 2 to it on its own, and when Player 1 starts, Player 2 runs Mario Kart 7's Download Play child."
   },
   "mario-party-island-tour": {
     "title": "Mario Party: Island Tour",
