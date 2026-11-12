@@ -1406,29 +1406,36 @@ void main() { frag_color = vec4(1.0); }`);
     }
 
     // ── Screen layout ────────────────────────────────────────────
-    // Where the top screen is drawn, for the AI player: the native layout (top screen over
-    // the upper half) until fullscreen or a split-screen seat sets one of its own.
+    // Where the screens are drawn, for the AI player: the native layout (the top screen over
+    // the upper half, the bottom one centred below) until fullscreen or a split-screen seat
+    // sets one of its own.
+    const NATIVE_LAYOUT = {width: 400, height: 480, top: {x: 0, y: 0, w: 400, h: 240},
+        bottom: {x: 40, y: 240, w: 320, h: 240}};
     let screenLayout = null;
 
     function trackScreenLayout() {
         const setLayout = wasmModule._azahar_set_screen_layout;
         if (!setLayout) return;
-        wasmModule._azahar_set_screen_layout = (width, height, topX, topY, topW, topH, ...bottom) => {
-            const result = setLayout(width, height, topX, topY, topW, topH, ...bottom);
+        wasmModule._azahar_set_screen_layout = (width, height, topX, topY, topW, topH, bottomX, bottomY, bottomW, bottomH) => {
+            const result = setLayout(width, height, topX, topY, topW, topH, bottomX, bottomY, bottomW, bottomH);
             if (result === 0) {
-                screenLayout = width > 0 && height > 0 ?
-                    {width, height, top: {x: topX, y: topY, w: topW, h: topH}} : null;
+                screenLayout = width > 0 && height > 0 ? {width, height, top: {x: topX, y: topY, w: topW, h: topH},
+                    bottom: {x: bottomX, y: bottomY, w: bottomW, h: bottomH}} : null;
             }
             return result;
         };
     }
 
-    // The top screen's rectangle in the canvas's pixels.
-    function topScreenRect() {
-        const layout = screenLayout || {width: 400, height: 480, top: {x: 0, y: 0, w: 400, h: 240}};
+    // A screen's rectangle ('top' or 'bottom') in the canvas's pixels.
+    function screenRect(which) {
+        const layout = screenLayout || NATIVE_LAYOUT;
         const sx = canvas.width / layout.width, sy = canvas.height / layout.height;
-        const {x, y, w, h} = layout.top;
+        const {x, y, w, h} = layout[which];
         return {x: Math.round(x * sx), y: Math.round(y * sy), w: Math.round(w * sx), h: Math.round(h * sy)};
+    }
+
+    function topScreenRect() {
+        return screenRect('top');
     }
 
     // Emulated time since the title started, in microseconds.
@@ -2297,6 +2304,7 @@ void main() { frag_color = vec4(1.0); }`);
         getCanvas: () => canvas,
         getModule: () => (initialized ? wasmModule : null),
         getTopScreenRect: topScreenRect,
+        getBottomScreenRect: () => screenRect('bottom'),
         getGuestTimeUs: guestTimeUs,
         // Whether frames run: a title is loaded and the run loop is going.
         isPlaying: () => romLoaded && running,

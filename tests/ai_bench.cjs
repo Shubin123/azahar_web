@@ -19,7 +19,10 @@
 //        [--reference tmp_test/ai_reference/f32] [--frames tmp_test/ai_frames/valid]
 //        [--decisions 60] [--fidelity-frames 32] [--rom ROM [--state STATE.cst]]
 //        [--min-per-second N] [--backend wasm] [--no-fidelity]
-//        [--distribution [--distribution-frames 32] [--samples 12]]
+//        [--distribution [--distribution-frames 32] [--samples 12]] [--expert gate|light|heavy]
+//
+// With a light expert in the model's manifest, --expert picks the encoder: gate (the
+// mixture, as the page runs it), light or heavy (NitroGen's own) alone.
 //
 // Results are printed and written to tmp_test/ai_bench/latest.json.
 const fs = require('node:fs');
@@ -75,32 +78,45 @@ async function main() {
         if (option('--rom')) await bootGame(page, option('--rom'), option('--state'));
 
         const started = Date.now();
-        const model = await common.startModelWorker(page, 'model', '/__bench/model/', '/__bench/ng.pt', option('--backend'));
+        const model = await common.startModelWorker(page, 'model', '/__bench/model/', '/__bench/ng.pt', option('--backend'),
+            option('--expert'));
         summary.backend = model.loaded.backend;
+        summary.routing = model.loaded.routing;
         summary.prepareSeconds = (Date.now() - started) / 1000;
-        summary.weightsMB = Math.round(Object.values(JSON.parse(fs.readFileSync(path.join(modelDir, 'manifest.json'))).graphs)
-            .reduce((sum, graph) => sum + graph.weightsSize, 0) / 1e6);
+        const manifest = JSON.parse(fs.readFileSync(path.join(modelDir, 'manifest.json')));
+        summary.weightsMB = Math.round((Object.values(manifest.graphs).reduce((sum, graph) => sum + graph.weightsSize, 0) +
+            (manifest.light ? manifest.light.weightsSize : 0)) / 1e6);
 
         // Speed.
         const times = {encodeMs: [], denoiseMs: [], totalMs: []};
+        let light = 0;
+        const gates = [];
         for (let i = 0; i < decisions + 3; i++) {
             const frame = frames[i % frames.length];
             const timing = await page.evaluate(async (rgb, seed) => {
                 const started = performance.now();
                 const out = await window.__models.model('act', {pixels: Uint8Array.from(rgb), noise: window.__noise(seed),
                     profile: true});
-                return {encodeMs: out.encodeMs, denoiseMs: out.denoiseMs, totalMs: performance.now() - started};
+                return {encodeMs: out.encodeMs, denoiseMs: out.denoiseMs, totalMs: performance.now() - started,
+                    expert: out.expert, gate: out.gate};
             }, frame.rgb, i);
             if (i < 3) continue;   // warm-up
+            if (timing.expert === 'light') light++;
+            if (timing.gate !== null && timing.gate !== undefined) gates.push(timing.gate);
             for (const key of Object.keys(times)) times[key].push(timing[key]);
         }
         for (const [key, list] of Object.entries(times)) {
             summary[key] = {median: +common.median(list).toFixed(1), p90: +percentile(list, 0.9).toFixed(1)};
         }
         summary.decisionsPerSecond = +(1000 / summary.totalMs.median).toFixed(2);
+        summary.lightShare = +(light / decisions).toFixed(3);
+        // The gate's predicted error per frame (log), against the manifest's threshold.
+        if (gates.length) summary.gate = {median: +common.median(gates).toFixed(3), max: +Math.max(...gates).toFixed(3)};
         console.log(`${summary.model} on ${summary.backend}${summary.game ? ` with ${summary.game} running` : ''}: ` +
             `${summary.decisionsPerSecond} decisions/s — median ${summary.totalMs.median} ms ` +
-            `(encoder ${summary.encodeMs.median}, denoiser ${summary.denoiseMs.median}), p90 ${summary.totalMs.p90} ms`);
+            `(encoder ${summary.encodeMs.median}, denoiser ${summary.denoiseMs.median}), p90 ${summary.totalMs.p90} ms` +
+            (model.loaded.light ? `; ${summary.routing}: light expert alone on ${Math.round(100 * summary.lightShare)}% ` +
+                `of decisions` + (summary.gate ? ` (gate median ${summary.gate.median}, max ${summary.gate.max})` : '') : ''));
         const minimum = Number(option('--min-per-second', 0));
         if (minimum) {
             const fast = summary.decisionsPerSecond >= minimum;

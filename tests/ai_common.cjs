@@ -106,9 +106,10 @@ function installNoise(page) {
 }
 
 // An AI worker in the page named `name` (window.__models[name](type, payload)) for the
-// model at `modelPath`, converted from `sourcePath` into its memory only.
-function startModelWorker(page, name, modelPath, sourcePath, preferred) {
-    return page.evaluate(async (name, modelUrl, sourceUrl, preferred) => {
+// model at `modelPath`, converted from `sourcePath` into its memory only. `expert`: with a
+// light expert, which encoder decides ('gate', the default: the mixture; 'light'; 'heavy').
+function startModelWorker(page, name, modelPath, sourcePath, preferred, expert) {
+    return page.evaluate(async (name, modelUrl, sourceUrl, preferred, expert) => {
         const worker = new Worker('azahar_ai_worker.js', {type: 'module'});
         let id = 0;
         const pending = new Map();
@@ -127,9 +128,9 @@ function startModelWorker(page, name, modelPath, sourcePath, preferred) {
         });
         window.__workers[name] = worker;
         const meta = await window.__models[name]('prepare', {sourceUrl, store: false});
-        const loaded = await window.__models[name]('load', {preferred});
+        const loaded = await window.__models[name]('load', {preferred, expert});
         return {meta, loaded};
-    }, name, new URL(modelPath, page.url()).href, sourcePath, preferred || null);
+    }, name, new URL(modelPath, page.url()).href, sourcePath, preferred || null, expert || null);
 }
 
 // Same 3DS keys (with the page's own key mapping), stick error and largest raw difference

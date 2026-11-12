@@ -17,16 +17,25 @@
 //     code), converted from ng.pt by a second worker into its memory only. The two are
 //     compared as policies, over many noise draws per frame (ai_common.cjs's
 //     distributionChecks).
-//  5. With a game running (--rom, optionally --state), "Let the AI play" holds keys that
+//     With a light expert in the manifest (scripts/nitrogen/nitrogen_light_expert.py), its
+//     weights come with the download, the page decides with the mixture (the light encoder,
+//     NitroGen's when its gate is unsure), and the widget's encoder choice takes effect.
+//  5. The planner (System 2, azahar_ai_planner.js) steers NitroGen: with a plan to head
+//     left, favour A and avoid B, the chunks played (the best of a batch of draws) head left
+//     and press A more often than NitroGen's own, and never press B.
+//  6. With a game running (--rom, optionally --state), "Let the AI play" holds keys that
 //     change the game, in real time (the game not held, a new decision at least every 18
 //     frames) and waiting for each decision (one per 18 frames of game time); taking back
-//     control releases them.
-//  6. Delete model empties the browser's model storage.
+//     control releases them. A planner's touch reaches the bottom screen.
+//  7. Delete model empties the browser's model storage.
 //
 //   node tests/ai_player.test.cjs --ckpt ng.pt [--frames tmp_test/ai_frames/valid]
 //        [--reference-model tmp_test/ai_reference/f32] [--rom ROM [--state STATE.cst]]
 //        [--live-frames 16] [--saved-frames 32] [--samples 12] [--min-per-second 5] [--offline]
-//        [--keep-model] [--backend wasm] [--software]
+//        [--keep-model] [--backend wasm] [--software] [--tap X,Y]
+//
+// --tap: where the planner's touch check touches, in its 400x480 view of both screens (the
+// default is Pokemon X's "Friends" button on the overworld's bottom screen).
 //
 // --backend wasm runs the model on WebAssembly instead of WebGPU; --software runs the
 // emulator's compatibility renderer.
@@ -52,6 +61,51 @@ const results = [];
 function check(name, ok, detail = '') {
     results.push({name, ok: Boolean(ok), detail});
     console.log(`${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`);
+}
+
+// The planner steering NitroGen on the frames: for each, the same batch of draws, played as
+// NitroGen alone would (the first draw) and as the planner picks with a fixed plan. Counted
+// over each chunk's first 8 actions (what plays before the next decision).
+async function steeringChecks(page, frames) {
+    const counts = await page.evaluate(async (frames, seeds) => {
+        const player = window.AzaharAIPlayer, planner = window.AzaharAIPlanner;
+        const code = (group, control) => window.AzaharInput.KEYMAP.find(e => e.group === group && e.control === control).code;
+        const left = [code('D-pad', 'Left'), code('Circle Pad', 'Left')], a = code('Face buttons', 'A');
+        const b = code('Face buttons', 'B');
+        const plan = {move: 'left', press: ['A'], avoid: ['B']};
+        const tally = {alone: {left: 0, a: 0, b: 0}, steered: {left: 0, a: 0, b: 0}, steps: 0};
+        const count = (into, chunk) => {
+            for (let step = 0; step < 8; step++) {
+                const keys = player.keysFor(chunk, step);
+                if (keys.some(k => left.includes(k))) into.left++;
+                if (keys.includes(a)) into.a++;
+                if (keys.includes(b)) into.b++;
+            }
+        };
+        for (const [index, frame] of frames.entries()) {
+            const noises = Array.from({length: planner.STEER_DRAWS}, (_, i) => window.__noise(seeds + 100 * index + i));
+            const out = await player.act(Uint8Array.from(frame.rgb), null, noises);
+            planner.steer(null);
+            count(tally.alone, out.actions.subarray(0, 450));
+            planner.steer(plan);
+            const chosen = planner.pick(out.actions, noises.length, player.BUTTONS);
+            count(tally.steered, out.actions.subarray(chosen * 450, (chosen + 1) * 450));
+            tally.steps += 8;
+        }
+        planner.steer(null);
+        return tally;
+    }, frames.map(frame => ({rgb: frame.rgb})), 5e6);
+    const share = (who, key) => counts[who][key] / counts.steps;
+    console.log(`  steering on ${frames.length} framebuffers: left ${share('alone', 'left').toFixed(3)} -> ` +
+        `${share('steered', 'left').toFixed(3)}, A ${share('alone', 'a').toFixed(3)} -> ${share('steered', 'a').toFixed(3)}, ` +
+        `B ${share('alone', 'b').toFixed(3)} -> ${share('steered', 'b').toFixed(3)}`);
+    check('the planner steers NitroGen left (left held at least 1.5 x as often, and more than 0.1 more)',
+        share('steered', 'left') >= 1.5 * share('alone', 'left') && share('steered', 'left') - share('alone', 'left') > 0.1,
+        `${share('alone', 'left').toFixed(3)} -> ${share('steered', 'left').toFixed(3)}`);
+    check('the planner makes NitroGen favour A', share('steered', 'a') > share('alone', 'a'),
+        `${share('alone', 'a').toFixed(3)} -> ${share('steered', 'a').toFixed(3)}`);
+    check('a button the planner avoids is never pressed', counts.steered.b === 0,
+        `B on ${counts.steered.b} of ${counts.steps} actions (NitroGen alone: ${counts.alone.b})`);
 }
 
 // The page's model against the float32 one (the 'reference' worker): its speed, and its
@@ -176,6 +230,35 @@ async function run(page, state, ai, wait = false) {
     return {start, end, seconds, held, first, stats};
 }
 
+// The bottom screen (40,240 to 360,480 of the planner's 400x480 view) of both screens, as
+// numbers 0-255, and how much it changed between two such views.
+const bottomNow = page => page.evaluate(async () => {
+    const screens = await window.AzaharAIPlayer.nextFrameScreens();
+    const out = [];
+    for (let y = 240; y < 480; y++) {
+        for (let x = 40; x < 360; x++) {
+            const i = (y * 400 + x) * 4;
+            out.push(screens.data[i], screens.data[i + 1], screens.data[i + 2]);
+        }
+    }
+    return out;
+});
+
+// A planner's touch at `point` of its view, from the state: the bottom screen's change over
+// 1.5 s, with and without it.
+async function tapEffect(page, state, point) {
+    const changes = {};
+    for (const touch of [false, true]) {
+        if (state) await restoreState(page, state);
+        await waitGuest(page, (await frameNow(page)).guestUs, SETTLE_SECONDS);
+        const before = await bottomNow(page);
+        if (touch) await page.evaluate(point => window.AzaharAIPlanner.tap(point), point);
+        await waitGuest(page, (await frameNow(page)).guestUs, 1.5);
+        changes[touch ? 'touched' : 'alone'] = difference(before, await bottomNow(page));
+    }
+    return changes;
+}
+
 async function playthrough(page, state) {
     console.log(`  game running; runs of ${RUN_SECONDS} s of game time from the same state`);
     const out = path.join(ROOT, 'tmp_test', 'ai_player');
@@ -218,6 +301,12 @@ async function playthrough(page, state) {
         waiting.held.size > 0 && effect(waiting) > Math.max(2.0, 2 * noise), `${effect(waiting).toFixed(2)} vs ${noise.toFixed(2)}`);
     check('taking back control stops the AI and releases its keys',
         !after.playing && after.codes.length === 0, JSON.stringify(after));
+    // Pokemon X's Player Search System on the bottom screen: "Friends" at (99, 280).
+    const point = (option('--tap') || '99,280').split(',').map(Number);
+    const touched = await tapEffect(page, state, point);
+    check(`a planner's touch at ${point.join(',')} reaches the bottom screen`,
+        touched.touched > Math.max(2.0, 2 * touched.alone),
+        `bottom screen change ${touched.touched.toFixed(2)} touched, ${touched.alone.toFixed(2)} without`);
 }
 
 async function main() {
@@ -251,7 +340,8 @@ async function main() {
         await sleep(3000);
 
         // 1. Nothing is fetched or stored before the player asks.
-        const early = [...requests, ...served].filter(url => /huggingface\.co|jsdelivr|vendor\/nitrogen|azahar_ai_worker|__test/.test(url));
+        const early = [...requests, ...served].filter(url =>
+            /huggingface\.co|jsdelivr|vendor\/nitrogen|azahar_ai_worker|azahar_ai_planner_worker|__test/.test(url));
         check('opening the page fetches nothing of the model', early.length === 0, early.join(', '));
         const before = await page.evaluate(async () => ({
             stored: await caches.has(window.AzaharAIPlayer.CACHE_NAME),
@@ -265,6 +355,20 @@ async function main() {
         check('the widget names the model, its origin, license and runtime',
             ['NitroGen', 'NVIDIA', 'huggingface.co/nvidia/NitroGen', 'NVIDIA License', 'non-commercial', 'cdn.jsdelivr.net']
                 .every(text => origins.includes(text)));
+        if (manifest.light) {
+            check('the widget names the light expert, its origin and license',
+                ['Light expert', 'SigLIP-base', 'Apache 2.0', 'Laya-Vision', 'nitrogen_light_expert.py']
+                    .every(text => origins.includes(text)));
+        }
+        const planner = await page.evaluate(() => ({
+            text: document.querySelector('#ai-player-card').textContent,
+            choice: document.querySelector('#ai-planner-model').value,
+            options: [...document.querySelectorAll('#ai-planner-model option')].map(option => option.value),
+        }));
+        check('the planner is off until chosen, and the widget names its models, origin, license and runtime',
+            planner.choice === 'off' && planner.options.length > 1 &&
+            ['Planner (System 2)', 'huggingface.co', 'Transformers.js', 'cdn.jsdelivr.net', 'Apache 2.0']
+                .every(text => planner.text.includes(text)), planner.options.join(', '));
 
         // 2. The real origin works from this page.
         if (!flag('--offline')) {
@@ -286,6 +390,16 @@ async function main() {
                 meta.weightsSha256[graph] === description.weightsSha256, meta.weightsSha256[graph]);
         }
         check('the download streamed ng.pt from its source', served.includes(MIRROR_PATH));
+        if (manifest.light) {
+            const cached = await page.evaluate(async files => {
+                const cache = await caches.open(window.AzaharAIPlayer.CACHE_NAME);
+                const keys = (await cache.keys()).map(request => request.url);
+                return files.map(file => keys.some(url => url.endsWith(`/ai-model/${file}`)));
+            }, manifest.light.weights.map(entry => entry.file));
+            check('the light expert\'s weights came with the download, as the manifest describes them, and are kept',
+                meta.weightsSha256.light === manifest.light.weights.map(entry => entry.sha256).join(',') && cached.every(Boolean),
+                manifest.light.weights.map(entry => `${entry.file} ${Math.round(entry.size / 1e6)} MB`).join(', '));
+        }
         const stored = await page.evaluate(async () => ({
             stored: await caches.has(window.AzaharAIPlayer.CACHE_NAME),
             remove: !document.querySelector('#btn-ai-delete').hidden,
@@ -298,6 +412,20 @@ async function main() {
         if (option('--backend')) check(`the model runs on ${option('--backend')}`, loaded.backend === option('--backend'), loaded.backend);
         console.log(`  model loaded on ${loaded.backend} in ${loaded.loadSeconds?.toFixed(1)} s (warm-up ${Math.round(loaded.warmupMs)} ms)`);
         check('ONNX Runtime Web is fetched only once the AI starts', requests.some(url => url.includes('jsdelivr')));
+        if (manifest.light) {
+            check('the page decides with the mixture of the light and NitroGen\'s encoders', loaded.light && loaded.routing === 'gate',
+                JSON.stringify({light: loaded.light, routing: loaded.routing}));
+            const used = {};
+            for (const expert of ['heavy', 'light', 'gate']) {
+                await page.select('#ai-expert', expert);
+                used[expert] = await page.evaluate(async () => {
+                    const pixels = new Uint8Array(256 * 256 * 3).map((_, i) => (i * 7) % 251);
+                    return (await window.AzaharAIPlayer.act(pixels, window.__noise ? window.__noise(1) : null)).expert;
+                });
+            }
+            check('the widget\'s encoder choice decides which encoder runs', used.heavy === 'heavy' && used.light === 'light',
+                JSON.stringify(used));
+        }
         await common.installNoise(page);
         const frames = fs.existsSync(framesDir)
             ? await common.framesFromDisk(page, framesDir, Number(option('--saved-frames', 32))) : [];
@@ -318,6 +446,7 @@ async function main() {
                 `(${[...new Set(frames.map(frame => frame.scene))].join(', ')})`);
             await validateOnFramebuffers(page, frames);
             await page.evaluate(() => window.__workers.reference.terminate());
+            await steeringChecks(page, frames);
         }
 
         // 5. Play.

@@ -16436,5 +16436,45 @@
    "length": 4194304,
    "crc32": 644966889
   }
+ },
+ "light": {
+  "onnx": "light.onnx",
+  "shares": "encoder.weights",
+  "weights": [
+   {
+    "file": "light_tower.weights",
+    "size": 91176960,
+    "sha256": "aeef5b8ead98d25bf9c20a99831b74a990ab55a7d64533f7b03b64b42648b86d"
+   },
+   {
+    "file": "light_adapter.weights",
+    "size": 30908420,
+    "sha256": "4216db9c7f8f991956922366d3b5d801f0602542fd22ddbcaa5b392d05cd51b8"
+   }
+  ],
+  "weightsSize": 122085380,
+  "tower": {
+   "repo": "google/siglip-base-patch16-224",
+   "revision": "7fd15f0689c79d79e38b1c2e2e2370a7bf2761ed",
+   "license": "Apache-2.0",
+   "layers": 11,
+   "trainedFrom": 5
+  },
+  "trained": {
+   "script": "scripts/nitrogen/nitrogen_light_expert.py",
+   "sha256": "d4675ce1ef488a868455baf9aef6e404f506e6e411093f06cc949145ac083eac",
+   "license": "trained from NitroGen's outputs: NVIDIA License, non-commercial"
+  },
+  "gate": {
+   "heavyShare": 0.1,
+   "threshold": -1.2949066519737245,
+   "quantiles": {
+    "0.50": -2.5202298164367676,
+    "0.75": -2.143035411834717,
+    "0.90": -1.2949066519737245,
+    "0.95": -1.0279431670904169
+   },
+   "frames": 180
+  }
  }
 }

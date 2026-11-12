@@ -89,65 +89,102 @@ The **🤖 AI Player** widget lets NVIDIA's [NitroGen](https://huggingface.co/nv
 play for you: a 493M-parameter model (a SigLIP2 vision encoder and a flow-matching
 transformer) trained on 40,000 hours of gameplay video to predict gamepad actions from game
 frames. It looks at the top screen and holds the keys a controller would, through the page's
-keymap, so your own keys and controller keep working alongside it. It sees one frame at a
-time and reacts; it does not plan, so expect it to wander, swing the camera and press
-through dialogue rather than finish a game.
+keymap, so your own keys and controller keep working alongside it. On its own it sees one
+frame at a time and reacts; the optional planner below gives it a direction.
 
 - **Nothing is fetched until you ask.** *Download model* streams NVIDIA's `ng.pt` (1.97 GB)
   straight from huggingface.co at a pinned revision (584c8dd), checks every tensor it uses
   against the CRC32 in `web/vendor/nitrogen/q8/manifest.json`, quantizes it to 8 bits on
   your device and keeps only the result (603 MB) in the browser's Cache Storage; that result
   must match the reference conversion's SHA-256 byte for byte. ng.pt itself is not kept
-  (it is fetched with `cache: 'no-store'`). *Delete model* removes it. This repository
-  ships the ONNX graphs, never NVIDIA's weights.
+  (it is fetched with `cache: 'no-store'`). With it come the light expert's own weights
+  (122 MB, from this site, checked against the manifest's SHA-256s). *Delete model* removes
+  it all. This repository ships the ONNX graphs, never NVIDIA's weights.
 - **Let the AI play** loads ONNX Runtime Web 1.31.1 from cdn.jsdelivr.net and runs the model
   in a worker on WebGPU (else WebAssembly). Each decision takes the frame just drawn and
-  returns 18 actions, one per 1/60 s of game time: about 8 decisions a second on an Apple
-  M4 in Chrome (122-125 ms each). The game runs on while the AI decides the next ones, skipping
-  actions that come too late; on a device too slow for that, tick *Pause the game while the
-  AI thinks*, as NVIDIA's own player pauses its games. A screen that has not changed (a
-  still menu) reuses what the model saw in it. Start and Select are off unless you allow
-  them (NVIDIA's player also keeps the model off menus by default), HOME always.
+  returns 18 actions, one per 1/60 s of game time. The game runs on while the AI decides the
+  next ones, skipping actions that come too late; on a device too slow for that, tick *Pause
+  the game while the AI thinks*, as NVIDIA's own player pauses its games. A screen that has
+  not changed (a still menu) reuses what the model saw in it. Start and Select are off unless
+  you allow them (NVIDIA's player also keeps the model off menus by default), HOME always.
+- **Image encoder** (most of a decision's time):
+  - *Mixture* (the default): a light expert reads every frame, and its gate hands the frames
+    it is unsure of (about one in ten) to NitroGen's own encoder, so most decisions never use
+    the heavy encoder's weights.
+  - *Light expert only*: the fastest.
+  - *NitroGen only*: NVIDIA's SigLIP2-large on every frame, NitroGen exactly as published.
+- **Planner (System 2)**, off until you choose a model: a small vision-language model
+  (Qwen3.5-0.8B or LFM2.5-VL-450M from huggingface.co, pinned revisions, run with
+  Transformers.js 4.3.2 from cdn.jsdelivr.net) looks at both screens every 5 seconds of game
+  time, with your notes (quest log, the task at hand, manual pages), and steers NitroGen:
+  NitroGen makes 4 action chunks per decision in one batched run and the one that best goes
+  the planner's way (its heading, the buttons it favours) is played, and buttons it wants
+  avoided are never pressed. In menus, dialogues and on the bottom screen it presses buttons
+  and touches the screen itself while NitroGen waits. It shows its goal in the widget.
 - NitroGen is under the [NVIDIA License](web/vendor/nitrogen/LICENSE): non-commercial
-  research use only.
+  research use only. The light expert learned from NitroGen, so the same terms apply to it;
+  its tower is Google's [SigLIP-base/16](https://huggingface.co/google/siglip-base-patch16-224)
+  (Apache 2.0).
 
 How it is made fast, and checked. `scripts/nitrogen/nitrogen_onnx.py` writes the graphs:
 NVIDIA's inference code as ONNX operators, its linear layers in 8-bit `MatMulNBits` blocks of
-32, the image encoder computing in float16, each residual add folded into ONNX Runtime's
+32, the image encoders computing in float16, each residual add folded into ONNX Runtime's
 `SkipLayerNormalization`, attention as MatMul and Softmax (ONNX Runtime's
 `MultiHeadAttention` kernel is several times slower on WebGPU here), everything that depends
 only on the denoising step folded into constants when the session is created, and the
-denoiser's steps unrolled into one graph. It samples the actions with 4 flow-matching steps
-rather than NVIDIA's 16, as GR00T, whose action head NitroGen's is, does. On an Apple M4 that
-takes a decision from 329 ms to 125 ms (the encoder 95 ms, the denoiser 30 ms).
+denoiser's steps unrolled into one graph that takes a batch of noises. It samples the
+actions with 4 flow-matching steps rather than NVIDIA's 16, as GR00T, whose action head
+NitroGen's is, does. On an Apple M4 that takes a decision with NitroGen's own encoder from
+329 ms to 122 ms (the encoder 95 ms, the denoiser 27 ms).
 
-- The same graphs in float32 with 16 steps reproduce NVIDIA's own code to within 1e-5 on
-  emulator framebuffers (`nitrogen_validate.py`, NVIDIA's model on the GPU).
-- `tests/ai_player.test.cjs` (and `tests/ai_bench.cjs` for any variant) compares the page's
-  model with them as policies, in the browser on WebGPU: 12 noise draws per framebuffer,
-  saved ones (`tests/ai_frames.cjs`) and ones taken from the running game. How often it
-  holds each 3DS key, and where it puts the sticks, must be within 1.25 times the float32
-  model's own difference between two sets of draws, and its draws as varied (0.8-1.25
-  times as often two draws hold different keys). The page's model, on 48 framebuffers:
-  key frequencies 0.60 apart (float32 against itself 0.72), sticks 0.038 (0.059), variety
-  0.89 and 0.88 times. Playing Pokémon X in real time, the game kept its pace (0.99 of it
-  without the AI) with a new decision every 139 ms of game time.
-- What failed these checks: 2 denoising steps (variety 0.64 times: the actions fall back on
-  their average), 1 step (0.03 times), and smaller images (224 pixels: key frequencies 0.84
-  apart). Plain 4-bit weights also failed (85% of actions with the same keys as float32
-  from the same noise). So did a mixture of experts in the encoder's feed-forward layers
-  (16 experts per layer from co-activation clustering, as in MoEfication): even routed by
-  an oracle, half the neurons active moved the key frequencies 1.46 times as far as float32
-  against itself, and it would at best have taken a decision from 122 to about 95 ms (the
-  encoder's feed-forward layers at half width on WebGPU). And so did fusing in
-  [Laya-Vision](https://huggingface.co/ZeraG07/laya-vision)'s front end as a light expert
-  (`scripts/nitrogen/nitrogen_light_expert.py`): its frozen SigLIP-base/16 tower with an
-  adapter trained on emulator frames to give NitroGen's image features, 2.1 times as fast as
-  NitroGen's encoder on WebGPU (46 against 97 ms), and a gate that sends the frames it
-  trusts least to NitroGen's own encoder. The gate predicts the light expert's error well
-  (correlation 0.94), but trained on 390 frames of two games the light expert's features
-  reach only cosine 0.82 to NitroGen's: with NitroGen's encoder on half the frames, key
-  frequencies still moved 1.46 times as far as float32 against itself (1.74 times on none).
+The light expert (`scripts/nitrogen/nitrogen_light_expert.py`) fuses
+[Laya-Vision](https://huggingface.co/ZeraG07/laya-vision)'s front end into NitroGen as a second
+expert of a mixture: SigLIP-base/16 at 256 pixels to its layer -2 and an adapter (Laya-Vision's
+projector, then 2 transformer layers) into NitroGen's image feature space; NitroGen's VL layers
+and denoiser are shared. A graph of its size runs in 46 ms on WebGPU against NitroGen's
+encoder's 97. With the tower frozen and the adapter trained to copy NitroGen's features it
+failed: features only cosine 0.82, and its actions further from NitroGen's than if it had been
+shown a random other frame. What made it pass: training the tower's layers 5-10 too, and a loss
+on what NitroGen does with the features (its frozen VL layers' output and the action velocities
+its denoiser predicts at the 4 Euler steps' states), on 1,890 frames recorded from Pokémon X,
+Mario Kart 7 and Craftus with augmentations. Its action error on held-out frames fell from 1.53
+to 0.39 (1 = a random frame's). The gate predicts each frame's action error from the tower's
+pooled tokens; its threshold sends 10% of fresh frames (`tmp_test/ai_frames/gatecal`) to
+NitroGen's encoder. `nitrogen_onnx.py light` writes its graph, which reads NitroGen's VL weights
+from the encoder's own weights file, so nothing more is converted from ng.pt.
+`scripts/nitrogen/nitrogen_dataset_frames.py` cuts active-play frames (idle frames dropped, as
+the dataset card asks; overlays blacked out) from the videos of NVIDIA's
+[NitroGen dataset](https://huggingface.co/datasets/nvidia/NitroGen) for training on many more
+games.
+
+- The NitroGen graphs in float32 with 16 steps reproduce NVIDIA's own code to within 1e-5 on
+  emulator framebuffers (`nitrogen_validate.py`, NVIDIA's model on the GPU); the light
+  expert's float32 graph reproduces its PyTorch modules to within 5e-5.
+- `tests/ai_player.test.cjs` (and `tests/ai_bench.cjs --expert gate|light|heavy` for any
+  variant) compares the page's model with float32 NitroGen as policies, in the browser on
+  WebGPU: 12 noise draws per framebuffer, saved ones (`tests/ai_frames.cjs`) and ones taken
+  from the running game. How often it holds each 3DS key, and where it puts the sticks, must
+  be within 1.25 times the float32 model's own difference between two sets of draws, and its
+  draws as varied (0.8-1.25 times as often two draws hold different keys). NitroGen's own
+  encoder at 8 bits, on 48 framebuffers: key frequencies 0.60 apart (float32 against itself
+  0.72), sticks 0.038 (0.059), variety 0.89 and 0.88 times. The light expert alone at 8 bits:
+  keys 0.54 (float32 against itself 0.55), sticks 0.032 (0.034), variety 0.85 and 0.81 times.
+  The page's mixture, on 32 saved framebuffers and 16 from Pokémon X running: keys 0.77
+  (0.77), sticks 0.056 (0.065), variety 0.86 and 0.83 times.
+- It also checks the planner's steering, with a plan to head left, favour A and avoid B: B
+  was never pressed (NitroGen alone pressed it on 18 of 384 actions) and A twice as often
+  (0.10 to 0.19 of actions), but left only 0.02 to 0.07: picking among NitroGen's own draws
+  cannot head somewhere NitroGen rarely goes, and the check asks for 0.1 more. And it checks
+  that a planner's touch reaches the bottom screen (it opens Pokémon X's Friends list).
+- `tests/ai_planner_bench.cjs` times the planner models in the browser and records what they
+  read and plan on both-screen frames (`tests/ai_frames.cjs --screens`).
+- What failed the checks: 2 denoising steps (variety 0.64 times: the actions fall back on
+  their average), 1 step (0.03 times), smaller images (224 pixels: key frequencies 0.84
+  apart), plain 4-bit weights (85% of actions with the same keys as float32 from the same
+  noise), a mixture of experts in the encoder's feed-forward layers (16 experts per layer from
+  co-activation clustering, as in MoEfication: even routed by an oracle, half the neurons
+  active moved the key frequencies 1.46 times as far as float32 against itself), and the
+  frozen-tower light expert above.
 
 ### Play on Other Devices and Share Saves (LAN)
 

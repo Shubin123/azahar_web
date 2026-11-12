@@ -1,11 +1,12 @@
 'use strict';
 // Saves what the AI player's model sees while a game runs: AzaharAIPlayer's 256x256 input
 // (input_NNNN.png) and the top screen it was made from (raw_NNNN.png), read from the
-// canvas right after a frame. scripts/nitrogen/nitrogen_validate.py checks the model on
+// canvas right after a frame; with --screens also both screens as the planner sees them
+// (screens_NNNN.png, 400x480). scripts/nitrogen/nitrogen_validate.py checks the model on
 // them. Random keys are held between captures so the scenes change.
 //
 //   node tests/ai_frames.cjs --rom ROM --out DIR [--state STATE.cst] [--frames 40]
-//        [--every-ms 1500] [--boot-seconds 20] [--seed 1]
+//        [--every-ms 1500] [--boot-seconds 20] [--seed 1] [--screens]
 //
 // Captures hold game images: keep them under the ignored tmp_test, never publish them.
 const fs = require('node:fs');
@@ -37,9 +38,10 @@ async function bootGame(page, rom, state, bootSeconds) {
 }
 
 // One frame's input and top screen as PNGs (base64).
-function captureFrame(page) {
-    return page.evaluate(async () => {
-        const seen = await window.AzaharAIPlayer.nextFrameInput();
+function captureFrame(page, withScreens) {
+    return page.evaluate(async withScreens => {
+        const [seen, screens] = await Promise.all([window.AzaharAIPlayer.nextFrameInput(),
+            withScreens ? window.AzaharAIPlayer.nextFrameScreens() : null]);
         if (!seen) return null;
         const png = async (width, height, rgba) => {
             const canvas = new OffscreenCanvas(width, height);
@@ -55,8 +57,9 @@ function captureFrame(page) {
         }
         return {input: await png(256, 256, rgba),
             raw: await png(seen.raw.width, seen.raw.height, seen.raw.data),
+            screens: screens ? await png(screens.width, screens.height, screens.data) : null,
             width: seen.raw.width, height: seen.raw.height, guestUs: seen.guestUs};
-    });
+    }, withScreens);
 }
 
 async function main() {
@@ -84,11 +87,12 @@ async function main() {
             await page.evaluate(codes => window.AzaharInput.setSourceCodes('test', codes), held);
             await sleep(everyMs * (0.5 + random()));
             await page.evaluate(() => window.AzaharInput.setSourceCodes('test', []));
-            const frame = await captureFrame(page);
+            const frame = await captureFrame(page, process.argv.includes('--screens'));
             if (!frame) throw new Error('No frame to capture');
             const name = String(index).padStart(4, '0');
             fs.writeFileSync(path.join(out, `input_${name}.png`), Buffer.from(frame.input, 'base64'));
             fs.writeFileSync(path.join(out, `raw_${name}.png`), Buffer.from(frame.raw, 'base64'));
+            if (frame.screens) fs.writeFileSync(path.join(out, `screens_${name}.png`), Buffer.from(frame.screens, 'base64'));
             saved.push({name, held, width: frame.width, height: frame.height, guestUs: frame.guestUs});
         }
         fs.writeFileSync(path.join(out, 'frames.json'), JSON.stringify({rom: path.basename(rom),

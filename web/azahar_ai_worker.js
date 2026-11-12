@@ -7,10 +7,16 @@
  *          and lays it out as the manifest says (scripts/nitrogen/nitrogen_onnx.py does the
  *          same, and the result must match its SHA-256), then keeps the two weights files in
  *          Cache Storage. ng.pt itself is never stored: it is read once and dropped.
+ *          With a light expert in the manifest (scripts/nitrogen/nitrogen_light_expert.py), its
+ *          own weights come from this site (checked against the manifest's SHA-256s) and are
+ *          kept with the rest.
  * load     ONNX Runtime Web (from cdn.jsdelivr.net) with WebGPU, else WebAssembly.
- * act      one decision: the 256x256 input to 18 actions of 25 values (the encoder, then
+ * act      one decision: the 256x256 input to 18 actions of 25 values (an encoder, then
  *          the denoiser's flow-matching steps in one run; an unchanged image skips the
- *          encoder).
+ *          encoder). With a light expert, a mixture of two encoders: the light one (SigLIP-
+ *          base and an adapter into NitroGen's image features) runs on every image, and
+ *          NitroGen's own (SigLIP2-large) only on those whose actions its gate predicts the
+ *          light one gets wrong; most decisions never use the heavy encoder's weights.
  * remove   deletes the cached model.
  *
  * With `store: false` (the tests' float32 reference and model variants, see
@@ -32,6 +38,8 @@ let ort = null;
 let sessions = null;
 let backend = null;
 let memoryWeights = null;
+// Which encoder decides: 'gate' (the mixture), 'light' or 'heavy' (NitroGen's own) alone.
+let routing = 'gate';
 // The last image the encoder saw and what it made of it: an identical next image (a still
 // menu, a dialogue box) skips the encoder.
 let lastImage = null;
@@ -56,6 +64,7 @@ self.onmessage = async ({data}) => {
         else if (type === 'cancel') result = cancel();
         else if (type === 'load') result = await load(data);
         else if (type === 'act') result = await act(data);
+        else if (type === 'route') result = route(data);
         else if (type === 'remove') result = await remove();
         else throw new Error(`Unknown request ${type}`);
         const transfer = result?.actions ? [result.actions.buffer] : [];
@@ -238,16 +247,19 @@ async function prepare({modelUrl: url, sourceUrl, store = true}) {
             throw new Error(`The converted ${name} weights differ from the reference conversion`);
         }
     }
+    const light = model.light ? await fetchLightExpert(model.light) : null;
+    if (light) digests.light = model.light.weights.map(file => file.sha256).join(',');
     const meta = {
         variant: model.variant,
         weightsSha256: digests,
-        bytes: graphs.reduce((sum, [, graph]) => sum + graph.weightsSize, 0),
+        bytes: graphs.reduce((sum, [, graph]) => sum + graph.weightsSize, 0) + (light ? model.light.weightsSize : 0),
         source: {repo: model.source.repo, revision: model.source.revision, url: source},
         preparedAt: new Date().toISOString(),
         downloadSeconds: (performance.now() - started) / 1000,
     };
     if (!store) {
         memoryWeights = Object.fromEntries(graphs.map(([name, graph]) => [graph.weights, out[name]]));
+        if (light) Object.assign(memoryWeights, light);
         return meta;
     }
     const cache = await caches.open(CACHE_NAME);
@@ -255,10 +267,31 @@ async function prepare({modelUrl: url, sourceUrl, store = true}) {
         await cache.put(cacheKey(graph.weights), new Response(out[name],
             {headers: {'content-type': 'application/octet-stream'}}));
     }
+    if (light) await storeLightExpert(cache, light);
     // Written last: a model is cached once its description is.
     await cache.put(cacheKey('meta.json'), new Response(JSON.stringify(meta),
         {headers: {'content-type': 'application/json'}}));
     return meta;
+}
+
+// The light expert's own weights, from this site (they are trained here, not NVIDIA's), by
+// file name.
+async function fetchLightExpert(description) {
+    post({type: 'progress', phase: 'light', received: 0, total: description.weightsSize});
+    const files = {};
+    for (const {file, sha256: digest} of description.weights) {
+        const response = await fetch(modelFile(file));
+        if (!response.ok) throw new Error(`The light expert's weights are missing (${response.status})`);
+        files[file] = new Uint8Array(await response.arrayBuffer());
+        if (await sha256(files[file]) !== digest) throw new Error('The light expert\'s weights are damaged');
+    }
+    return files;
+}
+
+async function storeLightExpert(cache, files) {
+    for (const [file, bytes] of Object.entries(files)) {
+        await cache.put(cacheKey(file), new Response(bytes, {headers: {'content-type': 'application/octet-stream'}}));
+    }
 }
 
 function cancel() {
@@ -275,9 +308,10 @@ async function readCached(cache, name) {
     return new Uint8Array(await response.arrayBuffer());
 }
 
-async function load({modelUrl: url, preferred}) {
+async function load({modelUrl: url, preferred, expert}) {
     const model = await fetchManifest(url);
-    if (sessions) return {backend};
+    if (expert) routing = expert;
+    if (sessions) return {backend, light: Boolean(sessions.light), routing: sessions.light ? routing : 'heavy'};
     const cache = memoryWeights ? null : await caches.open(CACHE_NAME);
     if (cache) {
         const metaResponse = await cache.match(cacheKey('meta.json'));
@@ -303,31 +337,53 @@ async function load({modelUrl: url, preferred}) {
     }
     // The emulator's own threads need the processor; the GPU does the work when it can.
     ort.env.wasm.numThreads = useGpu ? 1 : Math.max(1, Math.min(4, (self.navigator.hardwareConcurrency || 4) / 2));
-    const create = async (name, graph, extra) => {
+    const weightFiles = {};
+    const weightsOf = async name => (weightFiles[name] = weightFiles[name] || await readCached(cache, name));
+    const create = async (graph, files, extra) => {
         const response = await fetch(modelFile(graph.onnx));
         if (!response.ok) throw new Error(`Model graph missing (${response.status})`);
         const bytes = new Uint8Array(await response.arrayBuffer());
-        const weights = await readCached(cache, graph.weights);
+        const externalData = [];
+        for (const file of files) externalData.push({path: file, data: await weightsOf(file)});
         return ort.InferenceSession.create(bytes, {
             executionProviders: [useGpu ? 'webgpu' : 'wasm'],
-            externalData: [{path: graph.weights, data: weights}],
+            externalData,
             graphOptimizationLevel: 'all',
             ...extra,
         });
     };
     const kv = model.model.crossBlocks.flatMap(block => [`k${block}`, `v${block}`]);
-    // The encoder's keys and values stay on the GPU for the denoiser.
+    // The encoders' keys and values stay on the GPU for the denoiser.
+    const onGpu = useGpu ? {preferredOutputLocation: Object.fromEntries(kv.map(name => [name, 'gpu-buffer']))} : {};
+    if (model.light && cache) {
+        const stored = await Promise.all(model.light.weights.map(({file}) => cache.match(cacheKey(file))));
+        // Downloaded before this page had the light expert: fetch its weights now.
+        if (stored.some(response => !response)) await storeLightExpert(cache, await fetchLightExpert(model.light));
+    }
     sessions = {
-        encoder: await create('encoder', model.graphs.encoder,
-            useGpu ? {preferredOutputLocation: Object.fromEntries(kv.map(name => [name, 'gpu-buffer']))} : {}),
-        denoise: await create('denoise', model.graphs.denoise, {}),
+        encoder: await create(model.graphs.encoder, [model.graphs.encoder.weights], onGpu),
+        // The light expert reads NitroGen's VL blocks from the encoder's weights file.
+        light: model.light
+            ? await create(model.light, [model.light.shares, ...model.light.weights.map(({file}) => file)], onGpu) : null,
+        denoise: await create(model.graphs.denoise, [model.graphs.denoise.weights], {}),
         kv,
     };
     backend = useGpu ? 'webgpu' : 'wasm';
     const loadSeconds = (performance.now() - started) / 1000;
     // The first run compiles the GPU's programs; do it before the game waits on one.
-    const warm = await act({pixels: new Uint8Array(256 * 256 * 3)});
-    return {backend, loadSeconds, warmupMs: warm.encodeMs + warm.denoiseMs};
+    const warm = await act({pixels: new Uint8Array(256 * 256 * 3), expert: 'heavy'});
+    if (sessions.light) {
+        forgetImage();
+        await act({pixels: new Uint8Array(256 * 256 * 3), expert: 'light'});
+    }
+    return {backend, loadSeconds, warmupMs: warm.encodeMs + warm.denoiseMs, light: Boolean(sessions.light),
+            routing: sessions.light ? routing : 'heavy'};
+}
+
+// The player's choice of encoder, from the next decision on.
+function route({expert}) {
+    routing = expert;
+    return {routing: sessions?.light ? routing : 'heavy'};
 }
 
 // RGB / 127.5 - 1 in float32, as nitrogen_validate.py's pixel_values.
@@ -347,8 +403,10 @@ function gaussianNoise(count) {
     return values;
 }
 
-// `noises` (tests): several noise draws for the same frame, the encoder run once.
-async function act({pixels, noise, noises, profile}) {
+// `draws`: several action chunks for the image from independent noises (the planner picks
+// among them), or `noises` (tests) given. The encoder runs once, the denoiser once on the
+// whole batch. `expert` (tests): which encoder, instead of the player's choice.
+async function act({pixels, noise, noises, draws = 1, profile, expert = routing}) {
     if (!sessions) throw new Error('The model is not loaded.');
     const {imageSize, actionHorizon, actionDim} = manifest.model;
     // The page sends 256x256; a model made for smaller images gets them area-averaged.
@@ -362,29 +420,42 @@ async function act({pixels, noise, noises, profile}) {
         input[2 * plane + i] = PIXEL_VALUES[pixels[i * 3 + 2]];
     }
     const started = performance.now();
-    const reused = Boolean(lastImage) && sameBytes(lastImage.pixels, pixels);
+    const reused = Boolean(lastImage) && lastImage.requested === expert && sameBytes(lastImage.pixels, pixels);
     if (!reused) {
         forgetImage();
-        const encoded = await sessions.encoder.run(
-            {pixel_values: new ort.Tensor('float32', input, [1, 3, imageSize, imageSize])}, sessions.kv);
-        lastImage = {pixels: new Uint8Array(pixels), encoded};
+        const feeds = {pixel_values: new ort.Tensor('float32', input, [1, 3, imageSize, imageSize])};
+        let encoded = null, gate = null, used = 'heavy';
+        if (sessions.light && expert !== 'heavy') {
+            const out = await sessions.light.run(feeds, [...sessions.kv, 'gate']);
+            // The gate's predicted error of the light expert's actions (log, in units of
+            // a random other frame's): above the threshold, NitroGen's encoder decides.
+            gate = out.gate.data[0];
+            if (expert === 'light' || gate <= manifest.light.gate.threshold) {
+                encoded = out;
+                used = 'light';
+            } else {
+                for (const name of sessions.kv) out[name].dispose?.();
+            }
+        }
+        if (!encoded) encoded = await sessions.encoder.run(feeds, sessions.kv);
+        lastImage = {pixels: new Uint8Array(pixels), encoded, requested: expert, expert: used, gate};
     }
     const {encoded} = lastImage;
     // The GPU may still be working on the encoder; profiling waits for it (a 1 MB download).
     if (profile && !reused) await encoded[sessions.kv[0]].getData();
     const encodeMs = performance.now() - started;
     const count = actionHorizon * actionDim;
-    const draws = noises || [noise || gaussianNoise(count)];
-    const actions = new Float32Array(draws.length * count);
-    for (const [index, draw] of draws.entries()) {
-        // The denoiser takes all the Euler steps from this noise to the actions.
-        const feeds = {noise: new ort.Tensor('float32', Float32Array.from(draw), [1, actionHorizon, actionDim])};
-        for (const name of sessions.kv) feeds[name] = encoded[name];
-        const result = await sessions.denoise.run(feeds);
-        actions.set(result.actions.data, index * count);
-        result.actions.dispose?.();
-    }
-    return {actions, encodeMs, denoiseMs: performance.now() - started - encodeMs, reused, backend};
+    const starts = noises || (noise ? [noise] : Array.from({length: draws}, () => gaussianNoise(count)));
+    const batch = new Float32Array(starts.length * count);
+    starts.forEach((start, index) => batch.set(start, index * count));
+    // The denoiser takes all the Euler steps from each noise to its actions.
+    const feeds = {noise: new ort.Tensor('float32', batch, [starts.length, actionHorizon, actionDim])};
+    for (const name of sessions.kv) feeds[name] = encoded[name];
+    const result = await sessions.denoise.run(feeds);
+    const actions = new Float32Array(result.actions.data);
+    result.actions.dispose?.();
+    return {actions, encodeMs, denoiseMs: performance.now() - started - encodeMs, reused, backend,
+            expert: lastImage.expert, gate: lastImage.gate};
 }
 
 function shrink(rgb, from, to) {
@@ -430,7 +501,7 @@ function forgetImage() {
 
 async function releaseSessions() {
     forgetImage();
-    for (const session of [sessions?.encoder, sessions?.denoise]) await session?.release?.();
+    for (const session of [sessions?.encoder, sessions?.light, sessions?.denoise]) await session?.release?.();
     sessions = null;
 }
 

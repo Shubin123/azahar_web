@@ -7,29 +7,38 @@ decision takes. Laya-Vision (huggingface.co/ZeraG07/laya-vision) puts a frozen S
 tower (google/siglip-base-patch16-224, layer -2) and a small trained projector in front of
 Laya. This fuses the same front end into NitroGen as a second, light expert of a mixture:
 
-  light expert   the frozen SigLIP-base/16 tower, run at 256 px (its 16x16 grid then lines
-                 up with SigLIP2-large's), layer -2, and an adapter (an input LayerNorm and a
+  light expert   the SigLIP-base/16 tower, run at 256 px (its 16x16 grid then lines up with
+                 SigLIP2-large's), layer -2, and an adapter (an input LayerNorm and a
                  projection to 1024, as Laya-Vision's projector, then 2 transformer layers and
                  a LayerNorm) trained to give the features NitroGen's encoder gives
   heavy expert   NitroGen's own SigLIP2-large
   gate           per frame, from the light expert's pooled tower features, the predicted
-                 error of the light expert's features; frames above a threshold also run the
+                 error of the light expert's actions; frames above a threshold also run the
                  heavy expert, so most decisions run only the light expert's weights
 
 Everything after the image features (NitroGen's VL layers and action denoiser) is
-unchanged. Training runs on the GPU (MPS or CUDA): the adapter learns on augmented emulator
-frames (crops, colour shifts, flips, frame mixes) with NVIDIA's encoder as the teacher; the
-gate learns from frames the adapter did not train on. Then NitroGen with the mixture is
-compared with NitroGen as a policy on held-out frames, as tests/ai_common.cjs's
+unchanged. Training runs on the GPU (MPS or CUDA) on augmented emulator frames (crops,
+colour shifts, flips, frame mixes) with NVIDIA's encoder as the teacher. First the adapter
+learns on the frozen tower (--stage adapter). Then (--stage tune, from --init) the tower's
+layers from TUNED_FROM on learn too, and the loss also takes in NitroGen's frozen VL layers
+and the action velocities its denoiser predicts at the states the page's 4 Euler steps
+visit, so the light expert learns what changes the actions rather than every feature. The
+gate learns from frames the light expert did not train on. Then NitroGen with the mixture
+is compared with NitroGen as a policy on held-out frames, as tests/ai_common.cjs's
 distributionChecks do.
 
   python3 scripts/nitrogen/nitrogen_light_expert.py --ckpt ng.pt --nitrogen-src NitroGen \\
       --tower SIGLIP_BASE_DIR --train tmp_test/ai_frames/train --train tmp_test/ai_frames/calib \\
-      --valid tmp_test/ai_frames/valid --out light_expert.pt
+      --valid tmp_test/ai_frames/valid --pool POOL_DIR --out light_expert.pt
+  python3 scripts/nitrogen/nitrogen_light_expert.py ... --stage tune --init light_expert.pt \\
+      --out light_expert_tuned.pt
 """
 
 import argparse
+import copy
 import glob
+import hashlib
+import json
 import math
 import os
 import sys
@@ -45,6 +54,8 @@ import nitrogen_validate as nv  # noqa: E402
 
 HIDDEN = 1024
 TOWER_WIDTH = 768
+TUNED_FROM = 5          # the tower's layers before this one stay frozen (their output is pooled)
+TOWER_LAYERS = 11       # layer -2 of SigLIP-base's 12
 
 
 class Block(torch.nn.Module):
@@ -106,10 +117,36 @@ def load_tower(path, device):
     return tower
 
 
+def tower_front(tower, pixels):
+    """SigLIP-base/16 at 256 px (position embeddings interpolated), its frozen layers."""
+    x = tower.vision_model.embeddings(pixels, interpolate_pos_encoding=True)
+    for layer in tower.vision_model.encoder.layers[:TUNED_FROM]:
+        x = layer(x, None)
+    return x
+
+
 def tower_features(tower, pixels):
-    """SigLIP-base/16 at 256 px (position embeddings interpolated), layer -2, as Laya-Vision reads it."""
-    out = tower(pixel_values=pixels, output_hidden_states=True, interpolate_pos_encoding=True)
-    return out.hidden_states[-2]
+    """SigLIP-base/16 at 256 px, layer -2, as Laya-Vision reads it."""
+    x = tower_front(tower, pixels)
+    for layer in tower.vision_model.encoder.layers[TUNED_FROM:TOWER_LAYERS]:
+        x = layer(x, None)
+    return x
+
+
+class LightExpert(torch.nn.Module):
+    """The tower's layers from TUNED_FROM to layer -2 (trained in --stage tune), then the adapter."""
+
+    def __init__(self, tower):
+        super().__init__()
+        self.layers = copy.deepcopy(tower.vision_model.encoder.layers[TUNED_FROM:TOWER_LAYERS])
+        self.adapter = Adapter()
+
+    def forward(self, front):
+        """Image features and layer -2's tokens (the gate's input) from the frozen layers' output."""
+        x = front
+        for layer in self.layers:
+            x = layer(x, None)
+        return self.adapter(x), x
 
 
 def teacher_features(official, pixels):
@@ -157,19 +194,42 @@ def pixel_batch(images, device):
     return torch.from_numpy(np.stack([nv.pixel_values(img)[0] for img in images])).to(device)
 
 
-@torch.no_grad()
-def build_pool(official, tower, images, copies, seed, device, batch=16):
-    """Tower and teacher features of `copies` augmentations of every image (the first copy
-    the image itself), in float16."""
+def build_pool(official, tower, images, copies, seed, device, directory, batch=16):
+    """The frozen tower layers' output and the teacher's features for `copies` augmentations
+    of every image (the first copy the image itself), float16 files in `directory`, reused
+    when they were made from the same images."""
+    meta = {'images': hashlib.sha256(images.tobytes()).hexdigest(), 'copies': copies, 'seed': seed,
+            'tuned_from': TUNED_FROM}
+    n = copies * len(images)
+    shapes = {'front': (n, 256, TOWER_WIDTH), 'teacher': (n, 256, HIDDEN)}
+    meta_path = os.path.join(directory, 'pool.json')
+    if os.path.exists(meta_path):
+        with open(meta_path) as f:
+            if json.load(f) == meta:
+                return tuple(np.memmap(os.path.join(directory, f'{name}.f16'), np.float16, 'r', shape=shape)
+                             for name, shape in shapes.items())
+    os.makedirs(directory, exist_ok=True)
+    pool = {name: np.memmap(os.path.join(directory, f'{name}.f16'), np.float16, 'w+', shape=shape)
+            for name, shape in shapes.items()}
     rng = np.random.default_rng(seed)
-    pool_tower, pool_teacher = [], []
-    for copy in range(copies):
-        batch_images = images if copy == 0 else augment(images, rng)
-        for start in range(0, len(batch_images), batch):
-            pixels = pixel_batch(batch_images[start:start + batch], device)
-            pool_tower.append(tower_features(tower, pixels).half().cpu())
-            pool_teacher.append(teacher_features(official, pixels).half().cpu())
-    return torch.cat(pool_tower), torch.cat(pool_teacher)
+    row = 0
+    with torch.no_grad():
+        for copy_index in range(copies):
+            batch_images = images if copy_index == 0 else augment(images, rng)
+            for start in range(0, len(batch_images), batch):
+                pixels = pixel_batch(batch_images[start:start + batch], device)
+                pool['front'][row:row + len(pixels)] = tower_front(tower, pixels).half().cpu().numpy()
+                pool['teacher'][row:row + len(pixels)] = teacher_features(official, pixels).half().cpu().numpy()
+                row += len(pixels)
+    for array in pool.values():
+        array.flush()
+    with open(meta_path, 'w') as f:
+        json.dump(meta, f)
+    return pool['front'], pool['teacher']
+
+
+def rows(array, pick, device):
+    return torch.from_numpy(array[np.sort(pick)]).to(device).float()
 
 
 def feature_loss(student, teacher, scale):
@@ -177,44 +237,97 @@ def feature_loss(student, teacher, scale):
     return (((student - teacher) / scale) ** 2).mean() + (1 - F.cosine_similarity(student, teacher, dim=-1)).mean()
 
 
-def train_adapter(tower_pool, teacher_pool, device, epochs, batch=32):
-    adapter = Adapter().to(device)
-    scale = teacher_pool.float().reshape(-1, HIDDEN).std(0).to(device) + 1e-3
-    steps = epochs * math.ceil(len(tower_pool) / batch)
-    optimizer = torch.optim.AdamW(adapter.parameters(), lr=4e-4, weight_decay=0.01)
-    schedule = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=4e-4, total_steps=steps, pct_start=0.05)
-    started = time.time()
+class PolicyLoss:
+    """How far the light expert's features move NitroGen's actions: its frozen VL layers'
+    output, and the velocities its denoiser predicts at the states NitroGen's own Euler steps
+    visit from `draws` noises, against the teacher's. The velocity error is in units of how
+    much the velocity changes when another frame is shown (1: as wrong as a random frame)."""
+
+    def __init__(self, policy, reference, draws):
+        """`reference`: teacher features of some frames, for the scales of the losses."""
+        self.policy, self.draws = policy, draws
+        with torch.no_grad():
+            vl = policy.vl(reference)
+            self.vl_scale = vl.reshape(-1, vl.shape[-1]).std(0) + 1e-3
+            states, velocities = policy.trajectory(vl, draws)
+            other = vl.roll(1, 0).repeat_interleave(draws, 0)
+            self.velocity_scale = torch.stack([(policy.velocity(other, state, t) - v).pow(2).mean()
+                                               for state, t, v in zip(states, policy.times, velocities)])
+
+    def __call__(self, features, teacher_features, steps=None):
+        """The VL loss, and each frame's velocity error at Euler steps `steps` (all by default)."""
+        policy = self.policy
+        steps = range(len(policy.times)) if steps is None else steps
+        vl = policy.vl(features)
+        with torch.no_grad():
+            target_vl = policy.vl(teacher_features)
+            states, targets = policy.trajectory(target_vl, self.draws, max(steps) + 1)
+        vl_loss = (((vl - target_vl) / self.vl_scale) ** 2).mean()
+        repeated = vl.repeat_interleave(self.draws, 0)
+        velocity_loss = sum((policy.velocity(repeated, states[k], policy.times[k]) - targets[k]).pow(2).mean((1, 2))
+                            / self.velocity_scale[k] for k in steps) / len(steps)
+        return vl_loss, velocity_loss.reshape(-1, self.draws).mean(1)
+
+
+def train_light(light, policy_loss, front, teacher, scale, device, epochs, tune, batch, feature_weight=1.0,
+                lr=4e-4, tower_lr=4e-5):
+    """--stage adapter: the adapter alone, on features; --stage tune: also the tower's layers
+    from TUNED_FROM, on features (times `feature_weight`), VL output and action velocities."""
+    light.layers.requires_grad_(tune)
+    groups = [{'params': light.adapter.parameters(), 'lr': lr}]
+    if tune:
+        groups.append({'params': light.layers.parameters(), 'lr': tower_lr})
+    steps = epochs * math.ceil(len(front) / batch)
+    optimizer = torch.optim.AdamW(groups, weight_decay=0.01)
+    schedule = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=[g['lr'] for g in groups], total_steps=steps,
+                                                   pct_start=0.05)
+    light.train()
+    started, step = time.time(), 0
     for epoch in range(epochs):
-        order = torch.randperm(len(tower_pool))
-        total = 0.0
+        order = np.random.default_rng(epoch).permutation(len(front))
+        totals = np.zeros(3)
         for start in range(0, len(order), batch):
-            pick = order[start:start + batch]
-            x, y = tower_pool[pick].to(device).float(), teacher_pool[pick].to(device).float()
-            loss = feature_loss(adapter(x), y, scale)
+            pick = np.sort(order[start:start + batch])
+            x, y = rows(front, pick, device), rows(teacher, pick, device)
+            features, _ = light(x)
+            losses = [feature_loss(features, y, scale)]
+            if tune:                                            # one Euler step per batch, in turn
+                vl_loss, velocity_loss = policy_loss(features, y, [step % len(policy_loss.policy.times)])
+                losses += [vl_loss, velocity_loss.mean()]
+            loss = sum(losses) if not tune else feature_weight * losses[0] + losses[1] + losses[2]
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             schedule.step()
-            total += loss.item() * len(pick)
-        if epoch % 5 == 0 or epoch == epochs - 1:
-            print(f'  epoch {epoch + 1}/{epochs}: loss {total / len(order):.4f} ({time.time() - started:.0f} s)', flush=True)
-    return adapter, scale
+            totals[:len(losses)] += [l.item() * len(pick) for l in losses]
+            step += 1
+            if step % 100 == 0:
+                print(f'  step {step}/{steps}: features {losses[0].item():.4f}'
+                      + (f' vl {losses[1].item():.4f} velocity {losses[2].item():.4f}' if tune else '')
+                      + f' ({time.time() - started:.0f} s)', flush=True)
+        print(f'  epoch {epoch + 1}/{epochs}: features {totals[0] / len(order):.4f}'
+              + (f' vl {totals[1] / len(order):.4f} velocity {totals[2] / len(order):.4f}' if tune else '')
+              + f' ({time.time() - started:.0f} s)', flush=True)
+    light.eval()
 
 
 @torch.no_grad()
-def frame_errors(adapter, tower_pool, teacher_pool, scale, device, batch=32):
-    errors = []
-    for start in range(0, len(tower_pool), batch):
-        x, y = tower_pool[start:start + batch].to(device).float(), teacher_pool[start:start + batch].to(device).float()
-        errors.append((((adapter(x) - y) / scale) ** 2).mean((1, 2)).cpu())
-    return torch.cat(errors)
+def frame_errors(light, policy_loss, front, teacher, device, batch=16):
+    """Each sample's action velocity error (the gate's target) and layer -2 tokens."""
+    errors, tokens = [], []
+    for start in range(0, len(front), batch):
+        pick = np.arange(start, min(start + batch, len(front)))
+        features, t = light(rows(front, pick, device))
+        errors.append(policy_loss(features, rows(teacher, pick, device))[1].cpu())
+        tokens.append(t.half().cpu())
+    return torch.cat(errors), torch.cat(tokens)
 
 
-def train_gate(tower_pool, errors, device, epochs=300):
+def train_gate(tokens, errors, device, epochs=300):
     gate = Gate().to(device)
     target = torch.log(errors).to(device)
     optimizer = torch.optim.AdamW(gate.parameters(), lr=1e-3, weight_decay=0.01)
-    x = tower_pool.to(device).float()
+    x = tokens.to(device).float()
     for _ in range(epochs):
         loss = F.mse_loss(gate(x), target)
         optimizer.zero_grad()
@@ -246,25 +359,47 @@ def keys(step):
 
 
 class Policy:
-    """NitroGen's VL layers and denoiser on given image features."""
+    """NitroGen's VL layers and denoiser on given image features (gradients pass to the
+    features; NitroGen's weights stay frozen)."""
 
     def __init__(self, official, steps):
         self.model, self.device, self.steps = official.model, official.device, steps
+        self.model.requires_grad_(False)
+        self.times = ng.timesteps(steps)
+        self.position = self.model.position_embedding(torch.arange(ng.ACTION_HORIZON, device=self.device))
+
+    def vl(self, features):
+        return self.model.vl_self_attention_model(features)
+
+    def velocity(self, vl, actions, t):
+        m, n = self.model, len(actions)
+        embodiment = torch.zeros(n, dtype=torch.long, device=self.device)
+        a = m.action_encoder(actions, torch.full((n,), float(t), device=self.device), embodiment) + self.position
+        out = m.model(hidden_states=a, encoder_hidden_states=vl,
+                      timestep=torch.full((n,), t, dtype=torch.long, device=self.device))
+        return m.action_decoder(out, embodiment)
+
+    @torch.no_grad()
+    def trajectory(self, vl, draws, steps=None):
+        """The states and velocities of `draws` Euler trajectories per frame from fresh noise,
+        over the first `steps` steps."""
+        vl = vl.repeat_interleave(draws, 0)
+        actions = torch.randn(len(vl), ng.ACTION_HORIZON, ng.ACTION_DIM, device=self.device)
+        states, velocities = [], []
+        for t in self.times[:steps]:
+            states.append(actions)
+            velocities.append(self.velocity(vl, actions, t))
+            actions = actions + velocities[-1] / self.steps
+        return states, velocities
 
     @torch.no_grad()
     def act(self, features, draws, seed):
         """`draws` action chunks for one frame's features [1, 256, 1024], Euler steps from noise."""
-        m = self.model
-        vl = m.vl_self_attention_model(features.expand(draws, -1, -1))
+        vl = self.vl(features.expand(draws, -1, -1))
         gen = torch.Generator().manual_seed(seed)
         actions = torch.randn(draws, ng.ACTION_HORIZON, ng.ACTION_DIM, generator=gen).to(self.device)
-        embodiment = torch.zeros(draws, dtype=torch.long, device=self.device)
-        position = m.position_embedding(torch.arange(ng.ACTION_HORIZON, device=self.device))
-        for t in ng.timesteps(self.steps):
-            a = m.action_encoder(actions, torch.full((draws,), float(t), device=self.device), embodiment) + position
-            out = m.model(hidden_states=a, encoder_hidden_states=vl,
-                          timestep=torch.full((draws,), t, dtype=torch.long, device=self.device))
-            actions = actions + m.action_decoder(out, embodiment) / self.steps
+        for t in self.times:
+            actions = actions + self.velocity(vl, actions, t) / self.steps
         return actions.float().cpu().numpy()
 
 
@@ -308,8 +443,15 @@ def main():
     parser.add_argument('--tower', required=True, help='google/siglip-base-patch16-224 (Laya-Vision\'s tower)')
     parser.add_argument('--train', action='append', required=True)
     parser.add_argument('--valid', required=True)
+    parser.add_argument('--pool', required=True, help='directory for the training features (float16 files)')
+    parser.add_argument('--stage', choices=('adapter', 'tune'), default='adapter')
+    parser.add_argument('--init', help='start from the light expert in this file')
     parser.add_argument('--copies', type=int, default=10, help='augmented copies of each training frame')
     parser.add_argument('--epochs', type=int, default=30)
+    parser.add_argument('--batch', type=int, default=16)
+    parser.add_argument('--train-draws', type=int, default=2, help='noises per frame in the policy loss')
+    parser.add_argument('--feature-weight', type=float, default=1.0,
+                        help='--stage tune: weight of the feature loss against the VL and velocity losses')
     parser.add_argument('--draws', type=int, default=8)
     parser.add_argument('--steps', type=int, default=4, help='denoising steps of the policies compared')
     parser.add_argument('--valid-frames', type=int, default=48)
@@ -322,46 +464,63 @@ def main():
     tower = load_tower(args.tower, nv.device())
     official = nv.Official(args.nitrogen_src, args.ckpt)
     device = official.device
-
-    if args.load:
-        saved = torch.load(args.out, map_location='cpu', weights_only=True)
-        adapter, gate = Adapter().to(device).eval(), Gate().to(device).eval()
-        adapter.load_state_dict(saved['adapter'])
+    policy = Policy(official, args.steps)
+    light, gate = LightExpert(tower).to(device), Gate().to(device)
+    scale = None
+    if args.load or args.init:
+        saved = torch.load(args.out if args.load else args.init, map_location='cpu', weights_only=True)
+        if 'light' in saved:
+            light.load_state_dict(saved['light'])
+        else:                                                   # an adapter trained on the frozen tower
+            light.adapter.load_state_dict(saved['adapter'])
         gate.load_state_dict(saved['gate'])
         scale = saved['scale'].to(device)
-    else:
+
+    if not args.load:
         images = frames_in(args.train)
         rng = np.random.default_rng(0)
         order = rng.permutation(len(images))
-        gate_images, adapter_images = images[order[:len(images) // 5]], images[order[len(images) // 5:]]
-        print(f'{len(adapter_images)} frames for the adapter, {len(gate_images)} for the gate', flush=True)
+        gate_images, light_images = images[order[:len(images) // 5]], images[order[len(images) // 5:]]
+        print(f'{len(light_images)} frames for the light expert, {len(gate_images)} for the gate', flush=True)
         started = time.time()
-        tower_pool, teacher_pool = build_pool(official, tower, adapter_images, args.copies, 1, device)
-        print(f'{len(tower_pool)} training samples ({time.time() - started:.0f} s)', flush=True)
-        adapter, scale = train_adapter(tower_pool, teacher_pool, device, args.epochs)
-        del tower_pool, teacher_pool
-        gate_tower, gate_teacher = build_pool(official, tower, gate_images, 3, 2, device)
-        gate = train_gate(gate_tower, frame_errors(adapter, gate_tower, gate_teacher, scale, device), device)
-        torch.save({'adapter': adapter.state_dict(), 'gate': gate.state_dict(), 'scale': scale.cpu(),
+        front, teacher = build_pool(official, tower, light_images, args.copies, 1, device,
+                                    os.path.join(args.pool, 'light'))
+        gate_front, gate_teacher = build_pool(official, tower, gate_images, 3, 2, device,
+                                              os.path.join(args.pool, 'gate'))
+        print(f'{len(front)} training samples, {len(gate_front)} for the gate ({time.time() - started:.0f} s)',
+              flush=True)
+        if scale is None:
+            scale = rows(teacher, np.arange(0, len(teacher), max(1, len(teacher) // 256)), device)
+            scale = scale.reshape(-1, HIDDEN).std(0) + 1e-3
+        policy_loss = PolicyLoss(policy, rows(teacher, np.arange(0, len(teacher), max(1, len(teacher) // 64)),
+                                              device), args.train_draws)
+        train_light(light, policy_loss, front, teacher, scale, device, args.epochs, args.stage == 'tune', args.batch,
+                    args.feature_weight)
+        errors, tokens = frame_errors(light, policy_loss, gate_front, gate_teacher, device)
+        gate = train_gate(tokens, errors, device)
+        torch.save({'light': light.state_dict(), 'gate': gate.state_dict(), 'scale': scale.cpu(),
+                    'tuned_from': TUNED_FROM, 'stage': args.stage,
                     'tower': 'google/siglip-base-patch16-224@7fd15f0689c79d79e38b1c2e2e2370a7bf2761ed'}, args.out)
-    adapter.eval()
+    light.eval()
+    gate.eval()
 
-    # Held-out frames: NitroGen's features, the light expert's, and the gate's prediction.
+    # Held-out frames: NitroGen's features, the light expert's, the gate's prediction and
+    # the light expert's actual action error.
     valid = [img for _, img in nv.load_frames(args.valid, args.valid_frames)]
-    heavy, light, predicted, actual = [], [], [], []
+    heavy, light_features, predicted = [], [], []
     with torch.no_grad():
         for img in valid:
             pixels = pixel_batch([img], device)
-            t = tower_features(tower, pixels)
+            features, tokens = light(tower_front(tower, pixels))
             heavy.append(teacher_features(official, pixels))
-            light.append(adapter(t))
-            predicted.append(gate(t).item())
-            actual.append((((light[-1] - heavy[-1]) / scale) ** 2).mean().item())
-    cosine = np.mean([F.cosine_similarity(l, h, dim=-1).mean().item() for l, h in zip(light, heavy)])
-    print(f'held-out features: cosine {cosine:.4f}; gate vs actual error correlation '
-          f'{np.corrcoef(predicted, actual)[0, 1]:.3f}', flush=True)
+            light_features.append(features)
+            predicted.append(gate(tokens).item())
+        valid_loss = PolicyLoss(policy, torch.cat(heavy), 8)
+        actual = [valid_loss(l, h)[1].item() for l, h in zip(light_features, heavy)]
+    cosine = np.mean([F.cosine_similarity(l, h, dim=-1).mean().item() for l, h in zip(light_features, heavy)])
+    print(f'held-out features: cosine {cosine:.4f}; action error {np.mean(actual):.4f}; gate vs actual error '
+          f'correlation {np.corrcoef(predicted, actual)[0, 1]:.3f}', flush=True)
 
-    policy = Policy(official, args.steps)
     def sample(features_for, base):
         return [policy.act(features_for(i), args.draws, base + i) for i in range(len(valid))]
     reference_a = sample(lambda i: heavy[i], 10_000)
@@ -370,15 +529,19 @@ def main():
     reference_variety = variety([np.concatenate([a, b]) for a, b in zip(reference_a, reference_b)])
     print(f'NitroGen against itself (other seeds): keys {self_keys:.4f} sticks {self_sticks:.4f}, variety '
           f'{reference_variety:.4f}', flush=True)
-    order = np.argsort(predicted)
-    for heavy_share in (0.0, 0.25, 0.5):
-        use_heavy = set(order[len(order) - int(round(heavy_share * len(order))):].tolist()) if heavy_share else set()
-        mixture = sample(lambda i: heavy[i] if i in use_heavy else light[i], 30_000)
-        k, s = distance(reference_a, mixture)
-        v = variety(mixture) / reference_variety
-        ok = k <= 1.25 * self_keys and s <= 1.25 * self_sticks and 0.8 <= v <= 1.25
-        print(f'mixture, heavy expert on {int(heavy_share * 100)}% of frames: keys {k:.4f} ({k / self_keys:.2f}x) '
-              f'sticks {s:.4f} ({s / self_sticks:.2f}x) variety {v:.3f}x -> {"PASS" if ok else "FAIL"}', flush=True)
+    for routing, error in (('gate', predicted), ('oracle', actual)):
+        order = np.argsort(error)
+        for heavy_share in (0.0, 0.1, 0.25, 0.5):
+            if routing == 'oracle' and heavy_share == 0:
+                continue
+            use_heavy = set(order[len(order) - int(round(heavy_share * len(order))):].tolist()) if heavy_share else set()
+            mixture = sample(lambda i: heavy[i] if i in use_heavy else light_features[i], 30_000)
+            k, s = distance(reference_a, mixture)
+            v = variety(mixture) / reference_variety
+            ok = k <= 1.25 * self_keys and s <= 1.25 * self_sticks and 0.8 <= v <= 1.25
+            print(f'mixture ({routing}), heavy expert on {int(heavy_share * 100)}% of frames: keys {k:.4f} '
+                  f'({k / self_keys:.2f}x) sticks {s:.4f} ({s / self_sticks:.2f}x) variety {v:.3f}x -> '
+                  f'{"PASS" if ok else "FAIL"}', flush=True)
 
 
 if __name__ == '__main__':

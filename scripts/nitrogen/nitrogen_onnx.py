@@ -94,6 +94,11 @@ BLOCK = 32
 ATTENTION_SCALE = HEAD_DIM ** -0.5
 VARIANTS = {'f32': None, 'q8': 8, 'q4': 4}
 WEIGHT_ALIGN = 64
+# The light expert (nitrogen_light_expert.py): SigLIP-base/16's width and its layers to -2.
+LIGHT_WIDTH = 768
+LIGHT_LAYERS = 11
+LIGHT_TOWER = {'repo': 'google/siglip-base-patch16-224', 'revision': '7fd15f0689c79d79e38b1c2e2e2370a7bf2761ed',
+               'license': 'Apache-2.0'}
 
 
 # ── ng.pt ─────────────────────────────────────────────────────────────
@@ -242,6 +247,9 @@ class Graph:
         self.weight_names = set()
         self.count = 0
         self.const_cache = {}
+        # Reshapes keep the first dimension as it is (0) rather than 1: the denoiser takes a
+        # batch of noises (several draws for one image).
+        self.batch = 1
 
     def tmp(self, base):
         self.count += 1
@@ -337,46 +345,46 @@ class Graph:
     def linear(self, x, prefix, k, n, transposed=False, group=None, scale=None):
         return self.matmul(x, prefix, k, n, transposed, group, bias=True, scale=scale)
 
-    def norm_params(self, prefix):
+    def norm_params(self, prefix, width=HIDDEN):
         """A LayerNorm's scale and shift: a module's, (scale, shift) tensors, or none."""
         if isinstance(prefix, tuple):
             return prefix
         if prefix:
-            return self.f32(f'{prefix}.weight', [HIDDEN]), self.f32(f'{prefix}.bias', [HIDDEN])
-        return self.fconst(np.ones(HIDDEN), 'ones_1024'), self.fconst(np.zeros(HIDDEN), 'zeros_1024')
+            return self.f32(f'{prefix}.weight', [width]), self.f32(f'{prefix}.bias', [width])
+        return self.fconst(np.ones(width), f'ones_{width}'), self.fconst(np.zeros(width), f'zeros_{width}')
 
-    def layer_norm(self, x, eps, prefix=None):
-        return self.op('LayerNormalization', [x, *self.norm_params(prefix)], axis=-1, epsilon=eps)
+    def layer_norm(self, x, eps, prefix=None, width=HIDDEN):
+        return self.op('LayerNormalization', [x, *self.norm_params(prefix, width)], axis=-1, epsilon=eps)
 
-    def skip_layer_norm(self, x, skip, bias, eps, prefix=None):
+    def skip_layer_norm(self, x, skip, bias, eps, prefix=None, width=HIDDEN):
         """LayerNorm(x + skip + bias) and that sum (the residual stream), in one kernel."""
-        gamma, beta = self.norm_params(prefix)
+        gamma, beta = self.norm_params(prefix, width)
         return self.ms('SkipLayerNormalization', [x, skip, gamma, beta, bias], outputs=[True, False, False, True],
                        epsilon=eps)
 
-    def attention(self, q, k_t, v):
-        """Multi-head attention of q [1, S, 1024] (already multiplied by 1/sqrt(64), see
-        ATTENTION_SCALE) over keys k_t [1, 16, 64, L] and values v [1, 16, L, 64]. (As MatMul
-        and Softmax it is several times faster on WebGPU than ONNX Runtime's
+    def attention(self, q, k_t, v, width=HIDDEN):
+        """Multi-head attention of q [1, S, width] (already multiplied by 1/sqrt(64), see
+        ATTENTION_SCALE) over keys k_t [1, heads, 64, L] and values v [1, heads, L, 64]. (As
+        MatMul and Softmax it is several times faster on WebGPU than ONNX Runtime's
         MultiHeadAttention kernel.)"""
-        probs = self.op('Softmax', [self.op('MatMul', [self.heads(q), k_t])], axis=-1)
+        probs = self.op('Softmax', [self.op('MatMul', [self.heads(q, width=width), k_t])], axis=-1)
         out = self.op('Transpose', [self.op('MatMul', [probs, v])], perm=[0, 2, 1, 3])
-        return self.op('Reshape', [out, self.const(np.array([1, -1, HIDDEN], np.int64))])
+        return self.op('Reshape', [out, self.const(np.array([self.batch, -1, width], np.int64))])
 
-    def self_attention(self, h, prefix, names, group):
+    def self_attention(self, h, prefix, names, group, width=HIDDEN):
         """Attention of h over itself, with the q, k and v projections `names` under `prefix`."""
-        q, k, v = (self.linear(h, f'{prefix}.{name}', HIDDEN, HIDDEN, group=group, scale=scale)
+        q, k, v = (self.linear(h, f'{prefix}.{name}', width, width, group=group, scale=scale)
                    for name, scale in zip(names, (ATTENTION_SCALE, None, None)))
-        return self.attention(q, self.keys_t(k), self.heads(v))
+        return self.attention(q, self.keys_t(k, width=width), self.heads(v, width=width), width)
 
-    def heads(self, x, out=None):
-        """[1, S, 1024] -> [1, 16, S, 64]"""
-        x = self.op('Reshape', [x, self.const(np.array([1, -1, HEADS, HEAD_DIM], np.int64))])
+    def heads(self, x, out=None, width=HIDDEN):
+        """[1, S, width] -> [1, width / 64, S, 64]"""
+        x = self.op('Reshape', [x, self.const(np.array([self.batch, -1, width // HEAD_DIM, HEAD_DIM], np.int64))])
         return self.op('Transpose', [x], perm=[0, 2, 1, 3], out=out)
 
-    def keys_t(self, x, out=None):
-        """[1, S, 1024] -> [1, 16, 64, S]"""
-        x = self.op('Reshape', [x, self.const(np.array([1, -1, HEADS, HEAD_DIM], np.int64))])
+    def keys_t(self, x, out=None, width=HIDDEN):
+        """[1, S, width] -> [1, width / 64, 64, S]"""
+        x = self.op('Reshape', [x, self.const(np.array([self.batch, -1, width // HEAD_DIM, HEAD_DIM], np.int64))])
         return self.op('Transpose', [x], perm=[0, 2, 3, 1], out=out)
 
     def silu(self, x):
@@ -391,24 +399,24 @@ class Graph:
         return model
 
 
-def transformer_blocks(g, x, blocks, eps, attend, last):
+def transformer_blocks(g, x, blocks, eps, attend, last, width=HIDDEN):
     """Pre-norm transformer blocks (SigLIP's encoder layers, diffusers' BasicTransformerBlock)
     with each residual add folded into the next LayerNorm. blocks: per block, its norms
     (norm1, norm2: module names, (scale, shift) tensors, or None) and the module names of
     its attention output (out) and feed-forward (fc1, fc2). `attend(h, block)` gives the
     attention's output before its output projection. `last(down, sum, bias)` turns the
     final residual stream (as SkipLayerNorm's operands) into the result."""
-    h = g.layer_norm(x, eps, blocks[0]['norm1'])
+    h = g.layer_norm(x, eps, blocks[0]['norm1'], width)
     for index, block in enumerate(blocks):
         out = block['out']
-        attended = g.matmul(attend(h, index), out, HIDDEN, HIDDEN)
-        h, x = g.skip_layer_norm(attended, x, g.bias(out, HIDDEN), eps, block['norm2'])
-        h = g.ms('FastGelu', [g.matmul(h, block['fc1'], HIDDEN, 4 * HIDDEN), g.bias(block['fc1'], 4 * HIDDEN)])
-        down = g.matmul(h, block['fc2'], 4 * HIDDEN, HIDDEN)
+        attended = g.matmul(attend(h, index), out, width, width)
+        h, x = g.skip_layer_norm(attended, x, g.bias(out, width), eps, block['norm2'], width)
+        h = g.ms('FastGelu', [g.matmul(h, block['fc1'], width, 4 * width), g.bias(block['fc1'], 4 * width)])
+        down = g.matmul(h, block['fc2'], 4 * width, width)
         if index + 1 < len(blocks):
-            h, x = g.skip_layer_norm(down, x, g.bias(block['fc2'], HIDDEN), eps, blocks[index + 1]['norm1'])
+            h, x = g.skip_layer_norm(down, x, g.bias(block['fc2'], width), eps, blocks[index + 1]['norm1'], width)
         else:
-            return last(down, x, g.bias(block['fc2'], HIDDEN))
+            return last(down, x, g.bias(block['fc2'], width))
 
 
 def build_encoder(bits, smooth=None, rules=(), half=False, image_size=256):
@@ -438,27 +446,38 @@ def build_encoder(bits, smooth=None, rules=(), half=False, image_size=256):
                                      g.const(np.array([tokens, HIDDEN], np.int64))])
     x = g.op('Add', [x, g.param(positions)])
 
-    def self_attention(names):
-        def attend(h, index):
-            p, qkv = names[index]
-            return g.self_attention(h, p, qkv, f'{p}.qkv')
-        return attend
-
     # SigLIP2's 24 encoder layers, then its post-LayerNorm (eps 1e-6).
     siglip = [f'vision_encoder.encoder.layers.{layer}' for layer in range(SIGLIP_LAYERS)]
     blocks = [{'norm1': f'{p}.layer_norm1', 'out': f'{p}.self_attn.out_proj', 'norm2': f'{p}.layer_norm2',
                'fc1': f'{p}.mlp.fc1', 'fc2': f'{p}.mlp.fc2'} for p in siglip]
     vision = transformer_blocks(
         g, x, blocks, 1e-6,
-        self_attention([(f'{p}.self_attn', ('q_proj', 'k_proj', 'v_proj')) for p in siglip]),
+        attending(g, [(f'{p}.self_attn', ('q_proj', 'k_proj', 'v_proj')) for p in siglip]),
         lambda down, x, bias: g.skip_layer_norm(down, x, bias, 1e-6, 'vision_encoder.post_layernorm')[0])
+    outputs = encoder_tail(g, vision, tokens, half)
+    inputs = [helper.make_tensor_value_info(pixels, TensorProto.FLOAT, [1, 3, image_size, image_size])]
+    return g, g.model(inputs, outputs)
+
+
+def attending(g, names, width=HIDDEN):
+    """transformer_blocks' `attend` for self-attention blocks: per block, (module, its q, k
+    and v projections' names)."""
+    def attend(h, index):
+        p, qkv = names[index]
+        return g.self_attention(h, p, qkv, f'{p}.qkv', width)
+    return attend
+
+
+def encoder_tail(g, vision, tokens, half):
+    """From image features [1, tokens, 1024]: NitroGen's 4 VL self-attention blocks, then the
+    keys and values its DiT's cross-attention blocks read (the encoder graphs' outputs)."""
     # The 4 VL self-attention blocks (diffusers BasicTransformerBlock, affine LayerNorms).
     mixing = [f'vl_self_attention_model.transformer_blocks.{layer}' for layer in range(VL_LAYERS)]
     blocks = [{'norm1': f'{p}.norm1', 'out': f'{p}.attn1.to_out.0', 'norm2': f'{p}.norm3',
                'fc1': f'{p}.ff.net.0.proj', 'fc2': f'{p}.ff.net.2'} for p in mixing]
     vl = transformer_blocks(
         g, vision, blocks, 1e-5,
-        self_attention([(f'{p}.attn1', ('to_q', 'to_k', 'to_v')) for p in mixing]),
+        attending(g, [(f'{p}.attn1', ('to_q', 'to_k', 'to_v')) for p in mixing]),
         lambda down, x, bias: g.op('Add', [g.op('Add', [down, bias]), x]))
     outputs = []
     # What the DiT's cross-attention blocks read from vl, already split into heads (the keys
@@ -471,7 +490,60 @@ def build_encoder(bits, smooth=None, rules=(), half=False, image_size=256):
         to_float(g.heads(g.linear(vl, f'{p}.to_v', HIDDEN, HIDDEN, group='vl.cross_kv')), f'v{block}')
         outputs += [helper.make_tensor_value_info(f'k{block}', TensorProto.FLOAT, [1, HEADS, HEAD_DIM, tokens]),
                     helper.make_tensor_value_info(f'v{block}', TensorProto.FLOAT, [1, HEADS, tokens, HEAD_DIM])]
-    inputs = [helper.make_tensor_value_info(pixels, TensorProto.FLOAT, [1, 3, image_size, image_size])]
+    return outputs
+
+
+def build_light(bits, half):
+    """The light expert (nitrogen_light_expert.py): SigLIP-base/16 at 256 px to layer -2,
+    the adapter into NitroGen's image feature space, then NitroGen's own VL blocks and cross
+    keys and values (encoder_tail), and the gate: the predicted error of these actions, from
+    the tower's tokens. Its own weights are named light:... (light_tensors)."""
+    g = Graph('nitrogen_light_encoder', bits, half=half)
+    width = LIGHT_WIDTH
+    pixels = 'pixel_values'
+    conv_w = g.f32('light:tower.patch_embedding.weight', [width, 3, 16, 16])
+    conv_b = g.f32('light:tower.patch_embedding.bias', [width])
+    x = g.op('Cast', [pixels], to=TensorProto.FLOAT16) if half else pixels
+    x = g.op('Conv', [x, conv_w, conv_b], kernel_shape=[16, 16], strides=[16, 16])
+    x = g.op('Transpose', [g.op('Reshape', [x, g.const(np.array([1, width, IMAGE_TOKENS], np.int64))])],
+             perm=[0, 2, 1])
+    x = g.op('Add', [x, g.f32('light:tower.position_embedding.256', [IMAGE_TOKENS, width])])
+    layers = [f'light:tower.layers.{layer}' for layer in range(LIGHT_LAYERS)]
+    blocks = [{'norm1': f'{p}.layer_norm1', 'out': f'{p}.self_attn.out_proj', 'norm2': f'{p}.layer_norm2',
+               'fc1': f'{p}.mlp.fc1', 'fc2': f'{p}.mlp.fc2'} for p in layers]
+    tokens = transformer_blocks(
+        g, x, blocks, 1e-6, attending(g, [(f'{p}.self_attn', ('q_proj', 'k_proj', 'v_proj')) for p in layers], width),
+        lambda down, x, bias: g.op('Add', [g.op('Add', [down, bias]), x]), width)
+    # The adapter: Laya-Vision's projector (LayerNorm, Linear), 2 pre-norm blocks, a LayerNorm.
+    h = g.linear(g.layer_norm(tokens, 1e-5, 'light:adapter.norm_in', width), 'light:adapter.proj', width, HIDDEN)
+    adapter = [f'light:adapter.blocks.{block}' for block in range(2)]
+    blocks = [{'norm1': f'{p}.norm1', 'out': f'{p}.out', 'norm2': f'{p}.norm2', 'fc1': f'{p}.fc1', 'fc2': f'{p}.fc2'}
+              for p in adapter]
+    vision = transformer_blocks(
+        g, h, blocks, 1e-6, attending(g, [(p, ('q', 'k', 'v')) for p in adapter]),
+        lambda down, x, bias: g.skip_layer_norm(down, x, bias, 1e-6, 'light:adapter.norm_out')[0])
+    outputs = encoder_tail(g, vision, IMAGE_TOKENS, half)
+
+    # The gate, in float32 throughout: the tokens' mean and (unbiased) spread over the image,
+    # a LayerNorm, Linear, exact GELU, Linear.
+    raw = lambda src, shape, op='f32': g.weight(src if op == 'f32' else f'{src}.kn', src, op, shape, 'float32')
+    t = g.op('Cast', [tokens], to=TensorProto.FLOAT) if half else tokens
+    mean = g.op('ReduceMean', [t], axes=[1], keepdims=1)
+    spread = g.op('ReduceSum', [g.op('Mul', [g.op('Sub', [t, mean])] * 2), g.const(np.array([1], np.int64))],
+                  keepdims=0)
+    spread = g.op('Sqrt', [g.op('Mul', [spread, g.const(np.float32(1 / (IMAGE_TOKENS - 1)))])])
+    pooled = g.op('Concat', [g.op('Squeeze', [mean, g.const(np.array([1], np.int64))]), spread], axis=-1)
+    h = g.op('LayerNormalization', [pooled, raw('light:gate.norm.weight', [2 * width]),
+                                    raw('light:gate.norm.bias', [2 * width])], axis=-1, epsilon=1e-5)
+    h = g.op('Add', [g.op('MatMul', [h, raw('light:gate.fc1.weight', [2 * width, 256], 'f32T')]),
+                     raw('light:gate.fc1.bias', [256])])
+    h = g.op('Mul', [g.op('Mul', [h, g.const(np.float32(0.5))]),
+                     g.op('Add', [g.op('Erf', [g.op('Mul', [h, g.const(np.float32(2 ** -0.5))])]),
+                                  g.const(np.float32(1))])])
+    g.op('Add', [g.op('MatMul', [h, raw('light:gate.fc2.weight', [256, 1], 'f32T')]),
+                 raw('light:gate.fc2.bias', [1])], out='gate')
+    outputs.append(helper.make_tensor_value_info('gate', TensorProto.FLOAT, [1, 1]))
+    inputs = [helper.make_tensor_value_info(pixels, TensorProto.FLOAT, [1, 3, 256, 256])]
     return g, g.model(inputs, outputs)
 
 
@@ -507,8 +579,10 @@ def build_denoise(bits, smooth=None, rules=(), steps=INFERENCE_STEPS, image_size
     config takes 16; GR00T's flow-matching action head, which NitroGen's follows, takes 4).
     Everything that depends only on the step's timestep (its encodings, the DiT's timestep
     embedding and each block's AdaLayerNorm scale and shift) has constant inputs, so ONNX
-    Runtime computes it once when the session is created."""
+    Runtime computes it once when the session is created. `noise` is a batch: several draws
+    for the same image (their actions differ), in one run."""
     g = Graph('nitrogen_denoise', bits, smooth, TIMESTEP_ONLY + list(rules))
+    g.batch = 0
     actions = 'noise'
     one = g.fconst(1.0, 'one')
 
@@ -530,7 +604,7 @@ def build_denoise(bits, smooth=None, rules=(), steps=INFERENCE_STEPS, image_size
         # MultiEmbodimentActionEncoder (embodiment 0)
         a = g.linear(actions, 'action_encoder.W1', ACTION_DIM, HIDDEN, transposed=True)
         tau = g.const(np.broadcast_to(tau[:, None, :], (1, ACTION_HORIZON, HIDDEN)).copy(), f'tau.{step}')
-        x = g.op('Concat', [a, tau], axis=-1)
+        x = g.op('Concat', [a, g.op('Expand', [tau, g.op('Shape', [a])])], axis=-1)
         x = g.silu(g.linear(x, 'action_encoder.W2', 2 * HIDDEN, HIDDEN, transposed=True))
         x = g.linear(x, 'action_encoder.W3', HIDDEN, HIDDEN, transposed=True)
         # The 18 action tokens' learned positions (the table has 1024 rows).
@@ -568,12 +642,12 @@ def build_denoise(bits, smooth=None, rules=(), steps=INFERENCE_STEPS, image_size
                                  scale=1.0 / steps)
         last = step == steps - 1
         actions = g.op('Add', [actions, step_velocity], out='actions' if last else None)
-    inputs = [helper.make_tensor_value_info('noise', TensorProto.FLOAT, [1, ACTION_HORIZON, ACTION_DIM])]
+    inputs = [helper.make_tensor_value_info('noise', TensorProto.FLOAT, ['draws', ACTION_HORIZON, ACTION_DIM])]
     for block in CROSS_BLOCKS:
         tokens = (image_size // 16) ** 2
         inputs += [helper.make_tensor_value_info(f'k{block}', TensorProto.FLOAT, [1, HEADS, HEAD_DIM, tokens]),
                    helper.make_tensor_value_info(f'v{block}', TensorProto.FLOAT, [1, HEADS, tokens, HEAD_DIM])]
-    outputs = [helper.make_tensor_value_info('actions', TensorProto.FLOAT, [1, ACTION_HORIZON, ACTION_DIM])]
+    outputs = [helper.make_tensor_value_info('actions', TensorProto.FLOAT, ['draws', ACTION_HORIZON, ACTION_DIM])]
     return g, g.model(inputs, outputs)
 
 
@@ -686,6 +760,155 @@ def convert(ckpt, model_dir, out_dir):
     return digests
 
 
+def light_tensors(light_ckpt, tower_dir):
+    """The light expert's weights as float32 arrays, by their light:... names: the frozen
+    tower layers from google/siglip-base-patch16-224, the trained ones, adapter and gate from
+    nitrogen_light_expert.py's file."""
+    import torch
+    from safetensors.numpy import load_file
+    tower = {k[len('vision_model.'):]: v.astype(np.float32) for k, v in
+             load_file(os.path.join(tower_dir, 'model.safetensors')).items() if k.startswith('vision_model.')}
+    saved = torch.load(light_ckpt, map_location='cpu', weights_only=True)
+    trained = {k: v.float().numpy() for k, v in saved['light'].items()}
+    tuned_from = saved.get('tuned_from', LIGHT_LAYERS)
+    out = {'light:tower.patch_embedding.weight': tower['embeddings.patch_embedding.weight'],
+           'light:tower.patch_embedding.bias': tower['embeddings.patch_embedding.bias']}
+    # Hugging Face's interpolate_pos_encoding: the 14x14 grid, bicubic, to 16x16.
+    grid = torch.from_numpy(tower['embeddings.position_embedding.weight']).reshape(1, 14, 14, LIGHT_WIDTH)
+    grid = torch.nn.functional.interpolate(grid.permute(0, 3, 1, 2), size=(16, 16), mode='bicubic',
+                                           align_corners=False)
+    out['light:tower.position_embedding.256'] = grid.permute(0, 2, 3, 1).reshape(IMAGE_TOKENS, LIGHT_WIDTH).numpy()
+    for layer in range(LIGHT_LAYERS):
+        if layer >= tuned_from:
+            prefix, source = f'layers.{layer - tuned_from}.', trained
+        else:
+            prefix, source = f'encoder.layers.{layer}.', tower
+        for key, value in source.items():
+            if key.startswith(prefix):
+                out[f'light:tower.layers.{layer}.{key[len(prefix):]}'] = value
+    for key, value in trained.items():
+        if key.startswith('adapter.') and '.qkv.' not in key:
+            out[f'light:{key}'] = value
+        elif '.qkv.' in key:
+            # Block's fused projection: queries, keys, then values (all heads each).
+            block, kind = key.split('.qkv.')
+            for index, name in enumerate(('q', 'k', 'v')):
+                out[f'light:{block}.{name}.{kind}'] = value[index * HIDDEN:(index + 1) * HIDDEN]
+    for name, index in (('norm', 0), ('fc1', 1), ('fc2', 3)):
+        for kind in ('weight', 'bias'):
+            out[f'light:gate.{name}.{kind}'] = saved['gate'][f'net.{index}.{kind}'].float().numpy()
+    return out, saved
+
+
+def gate_predictions(light_ckpt, tower_dir, frames_dir):
+    """The gate's predictions on a set of frames (nitrogen_light_expert.py's modules)."""
+    import torch
+    sys.path.insert(0, SCRIPT_DIR)
+    import nitrogen_light_expert as le
+    import nitrogen_validate as nv
+    device = nv.device()
+    tower = le.load_tower(tower_dir, device)
+    light, gate = le.LightExpert(tower).to(device).eval(), le.Gate().to(device).eval()
+    saved = torch.load(light_ckpt, map_location='cpu', weights_only=True)
+    light.load_state_dict(saved['light'])
+    gate.load_state_dict(saved['gate'])
+    predicted = []
+    with torch.no_grad():
+        images = le.frames_in([frames_dir])
+        for start in range(0, len(images), 16):
+            _, tokens = light(le.tower_front(tower, le.pixel_batch(images[start:start + 16], device)))
+            predicted += gate(tokens).float().cpu().tolist()
+    return np.array(predicted)
+
+
+def add_light(model_dir, light_ckpt, tower_dir, gate_frames, heavy_share):
+    """Writes the light expert's graph and weights next to a variant's NitroGen graphs and
+    describes them in its manifest. Its NitroGen weights (the VL blocks and cross keys and
+    values) are the encoder's: the graph reads them from encoder.weights, where the
+    encoder's own graph does, so nothing more is converted from ng.pt."""
+    with open(os.path.join(model_dir, 'manifest.json')) as f:
+        manifest = json.load(f)
+    assert manifest['model']['imageSize'] == 256
+    bits = manifest['quantization']['bits'] if manifest['quantization'] else None
+    graph, model = build_light(bits, manifest['encoderFloat'] == 'float16')
+    shared = {}
+    for spec in manifest['graphs']['encoder']['tensors']:
+        shared[spec['name']] = spec['data']
+        if 'scalesName' in spec:
+            shared[spec['scalesName']] = spec['scales']
+    tensors, saved = light_tensors(light_ckpt, tower_dir)
+    # Two files, each under GitHub's 100 MB limit: the tower's, then the adapter's and gate's.
+    files = {'light_tower.weights': bytearray(), 'light_adapter.weights': bytearray()}
+    externals = []
+
+    def external(name, location, placed, dims, dtype):
+        tensor = TensorProto(name=name, data_type=dtype, dims=dims)
+        tensor.data_location = TensorProto.EXTERNAL
+        for key, value in (('location', location), ('offset', str(placed['offset'])),
+                           ('length', str(placed['length']))):
+            entry = tensor.external_data.add()
+            entry.key, entry.value = key, value
+        externals.append(tensor)
+
+    def place(blob, data):
+        blob.extend(b'\0' * (-len(blob) % WEIGHT_ALIGN))
+        placed = {'offset': len(blob), 'length': len(data)}
+        blob.extend(data)
+        return placed
+
+    for w in graph.weights:
+        quantized = w['op'] in ('q4', 'q8')
+        if not w['src'].startswith('light:'):
+            external(w['name'], manifest['graphs']['encoder']['weights'], shared[w['name']], w['shape'],
+                     TensorProto.UINT8 if quantized else TensorProto.FLOAT)
+            if quantized:
+                external(w['scales'], manifest['graphs']['encoder']['weights'], shared[w['scales']],
+                         w['scalesShape'], TensorProto.FLOAT)
+            continue
+        file = 'light_tower.weights' if w['src'].startswith('light:tower.') else 'light_adapter.weights'
+        value = tensors[w['src']]
+        spec = {'name': w['name'], 'op': w['op'], 'shape': w['shape']}
+        if quantized:
+            n, k = w['n'], w['k']
+            assert value.shape == (n, k), (w['src'], value.shape)
+            spec.update({'k': k, 'n': n, 'transpose': False, 'bits': int(w['op'][1]), 'block': BLOCK,
+                         'data': {}, 'scales': {}})
+        else:
+            spec['data'] = {}
+        (data, packed), *scales = convert_tensor(spec, value)
+        external(w['name'], file, place(files[file], packed), w['shape'],
+                 TensorProto.UINT8 if quantized else TensorProto.FLOAT)
+        for _, values in scales:
+            external(w['scales'], file, place(files[file], values), w['scalesShape'], TensorProto.FLOAT)
+    model.graph.initializer.extend(externals)
+    with open(os.path.join(model_dir, 'light.onnx'), 'wb') as f:
+        f.write(model.SerializeToString())
+    for file, blob in files.items():
+        assert len(blob) < 100e6, (file, len(blob))
+        with open(os.path.join(model_dir, file), 'wb') as f:
+            f.write(blob)
+    predicted = gate_predictions(light_ckpt, tower_dir, gate_frames)
+    quantiles = {f'{q:.2f}': float(np.quantile(predicted, q)) for q in (0.5, 0.75, 0.9, 0.95)}
+    with open(light_ckpt, 'rb') as f:
+        trained_sha = hashlib.sha256(f.read()).hexdigest()
+    manifest['light'] = {
+        'onnx': 'light.onnx', 'shares': manifest['graphs']['encoder']['weights'],
+        'weights': [{'file': file, 'size': len(blob), 'sha256': hashlib.sha256(blob).hexdigest()}
+                    for file, blob in files.items()],
+        'weightsSize': sum(len(blob) for blob in files.values()),
+        'tower': {**LIGHT_TOWER, 'layers': LIGHT_LAYERS, 'trainedFrom': saved.get('tuned_from')},
+        'trained': {'script': 'scripts/nitrogen/nitrogen_light_expert.py', 'sha256': trained_sha,
+                    'license': 'trained from NitroGen\'s outputs: NVIDIA License, non-commercial'},
+        # Frames whose predicted error is above the threshold also run NitroGen's encoder.
+        'gate': {'heavyShare': heavy_share, 'threshold': float(np.quantile(predicted, 1 - heavy_share)),
+                 'quantiles': quantiles, 'frames': len(predicted)},
+    }
+    with open(os.path.join(model_dir, 'manifest.json'), 'w') as f:
+        json.dump(manifest, f, indent=1)
+    print(f'light expert: {manifest["light"]["weightsSize"] / 1e6:.1f} MB of its own weights, gate threshold '
+          f'{manifest["light"]["gate"]["threshold"]:.3f} (heavy expert on {heavy_share:.0%} of {len(predicted)} frames)')
+
+
 def build(ckpt, out_root, variants, smooth_path=None, rules=(), name=None, half=False, steps=INFERENCE_STEPS,
           image_size=256):
     index = index_checkpoint(ckpt)
@@ -769,6 +992,12 @@ def main():
     p.add_argument('--half', action='store_true', help='compute the encoder in float16')
     p.add_argument('--steps', type=int, default=INFERENCE_STEPS, help='Euler steps in the denoiser')
     p.add_argument('--image-size', type=int, default=256, help='the input image\'s side (a multiple of 16)')
+    p = sub.add_parser('light', help="add nitrogen_light_expert.py's light expert to a built variant")
+    p.add_argument('--model', required=True, help='the variant\'s folder (its manifest.json)')
+    p.add_argument('--light', required=True, help='nitrogen_light_expert.py\'s output')
+    p.add_argument('--tower', required=True, help='google/siglip-base-patch16-224 (its model.safetensors)')
+    p.add_argument('--gate-frames', required=True, help='frames (input_*.png) that set the gate\'s threshold')
+    p.add_argument('--heavy-share', type=float, default=0.1, help='share of such frames the heavy expert sees')
     p = sub.add_parser('convert', help="write the weights files from ng.pt as the browser does")
     p.add_argument('--ckpt', required=True)
     p.add_argument('--model', default=DEFAULT_OUT)
@@ -779,6 +1008,8 @@ def main():
         rules = [(rule.rsplit('=', 1)[0], int(rule.rsplit('=', 1)[1])) for rule in args.rule]
         build(args.ckpt, args.out, args.variants.split(','), args.smooth, rules, args.name, args.half, args.steps,
               args.image_size)
+    elif args.command == 'light':
+        add_light(args.model, args.light, args.tower, args.gate_frames, args.heavy_share)
     else:
         print(json.dumps(convert(args.ckpt, os.path.join(args.model, args.variant), args.out), indent=1))
 

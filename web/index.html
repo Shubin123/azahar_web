@@ -1320,6 +1320,37 @@
                     <canvas id="ai-view" width="256" height="256" hidden aria-label="What the AI sees"></canvas>
                     <div id="ai-keys" class="mode-help" hidden></div>
                 </div>
+                <label for="ai-expert" class="mode-help" style="display:block;margin-top:12px;margin-bottom:4px;">
+                    Image encoder
+                </label>
+                <select id="ai-expert" class="renderer-select" aria-label="Image encoder">
+                    <option value="gate">Mixture — light expert, NitroGen's when unsure</option>
+                    <option value="light">Light expert only — fastest</option>
+                    <option value="heavy">NitroGen only — slowest</option>
+                </select>
+                <div id="ai-expert-help" class="mode-help"></div>
+                <label for="ai-planner-model" class="mode-help" style="display:block;margin-top:12px;margin-bottom:4px;">
+                    Planner (System 2)
+                </label>
+                <select id="ai-planner-model" class="renderer-select" aria-label="Planner model">
+                    <option value="off">Off — NitroGen plays on its own</option>
+                    <option value="qwen3.5-0.8b">Qwen3.5-0.8B — 850 MB download</option>
+                    <option value="lfm2.5-vl-450m">LFM2.5-VL-450M — 490 MB download</option>
+                </select>
+                <progress id="ai-planner-progress" max="100" value="0" hidden></progress>
+                <div id="ai-planner-status" class="mode-help"></div>
+                <textarea id="ai-planner-notes" class="library-input" rows="3" style="width:100%;margin-top:6px;box-sizing:border-box;"
+                          aria-label="Notes for the planner"
+                          placeholder="Notes for the planner: quest log, the task at hand, manual pages…"></textarea>
+                <div class="mode-help">
+                    A small vision-language model looks at both screens every few seconds, with these notes, and steers NitroGen:
+                    where to head and which buttons to favour or avoid. In menus, dialogues and on the bottom screen it presses and
+                    touches by itself. Models from huggingface.co (onnx-community, pinned revisions; Qwen3.5: Apache 2.0,
+                    LFM2.5-VL: LFM Open License v1.0), run with Transformers.js from cdn.jsdelivr.net; fetched only when you choose
+                    one, then kept in this browser.
+                    <button type="button" class="btn btn-secondary" id="btn-ai-planner-delete" hidden
+                            style="margin-top:6px;padding:4px 8px;font-size:0.7rem;">🗑 Delete planner models</button>
+                </div>
                 <label class="mode-help audio-toggle">
                     <input type="checkbox" id="ai-wait">
                     Pause the game while the AI thinks, as NVIDIA's own player does: for devices too slow for real time (off: the game runs on while the AI decides, and actions that come too late are skipped)
@@ -1336,6 +1367,12 @@
                         non-commercial research use only. Download fetches NVIDIA's <code>ng.pt</code> straight from huggingface.co (nothing passes through this site),
                         checks it, and quantizes it to 8 bits on this device; only that result (603 MB) is kept, in this browser's storage, until you delete it.
                         The AI runs on this device with ONNX Runtime Web, fetched from cdn.jsdelivr.net the first time it starts.
+                    </div>
+                    <div class="mode-help" style="margin-top:6px;">
+                        <b>Light expert</b>: Google's <a href="https://huggingface.co/google/siglip-base-patch16-224" target="_blank" rel="noopener">SigLIP-base/16</a>
+                        (Apache 2.0) with a projector after <a href="https://huggingface.co/ZeraG07/laya-vision" target="_blank" rel="noopener">Laya-Vision</a>'s,
+                        trained here to stand in for NitroGen's image encoder (<code>scripts/nitrogen/nitrogen_light_expert.py</code>).
+                        As it learned from NitroGen, the NVIDIA License applies to it too. Its weights (122 MB, 8 bits) come from this site with the download and are kept and deleted with the rest.
                     </div>
                     <div id="ai-stored" class="mode-help" style="margin-top:6px;"></div>
                     <button type="button" class="btn btn-secondary" id="btn-ai-download" style="margin-top:8px;">⬇ Download model</button>
@@ -1605,6 +1642,7 @@
     <script src="azahar_ui.js"></script>
     <script src="azahar_input.js"></script>
     <script src="azahar_ai_player.js"></script>
+    <script src="azahar_ai_planner.js"></script>
     <script src="azahar_fullscreen.js"></script>
     <script src="azahar_touch_controls.js"></script>
     <script src="azahar_library.js"></script>

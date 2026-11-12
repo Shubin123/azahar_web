@@ -31,6 +31,15 @@
     const ACTION_DIM = 25;
     const FRAME_US = 1e6 / 60;
     const SOURCE_BYTES = 1974723762;
+    // Which image encoder decides (the worker's routing), kept in this browser.
+    const EXPERT_KEY = 'azahar-ai-expert';
+    const EXPERT_HELP = {
+        gate: 'A light expert reads every frame; its gate hands the frames it is unsure of (about one in ten) ' +
+            'to NitroGen\'s own encoder. Nearly as fast as the light expert, and closest to NitroGen.',
+        light: 'The light expert alone: the fastest. It plays within NitroGen\'s own variation on our tests, ' +
+            'a little less like NitroGen than the mixture.',
+        heavy: 'NVIDIA\'s own SigLIP2-large encoder on every frame: NitroGen exactly as published, and the slowest.',
+    };
     // nitrogen/shared.py's button order.
     const BUTTONS = ['BACK', 'DPAD_DOWN', 'DPAD_LEFT', 'DPAD_RIGHT', 'DPAD_UP', 'EAST', 'GUIDE',
         'LEFT_SHOULDER', 'LEFT_THUMB', 'LEFT_TRIGGER', 'NORTH', 'RIGHT_BOTTOM', 'RIGHT_LEFT',
@@ -60,6 +69,7 @@
         step: -1,
         decisions: 0,
         unchanged: 0,
+        light: 0,               // decisions the light expert's encoder made alone
         lastMs: 0,
         heldMs: 0,
         startedAt: 0,
@@ -216,6 +226,27 @@
         return {input: resizeToInput(raw.data, rect.w, rect.h), raw};
     }
 
+    // Both screens at their native size, laid out as on the 3DS: the top one (400x240) over
+    // the bottom one (320x240, centred). The planner's view.
+    const SCREENS = {width: 400, height: 480, top: {x: 0, y: 0, w: 400, h: 240}, bottom: {x: 40, y: 240, w: 320, h: 240}};
+    let screensCanvas = null;
+
+    function captureScreens() {
+        const canvas = window.AzaharUI?.getCanvas?.();
+        if (!canvas || !window.AzaharUI.getBottomScreenRect) return null;
+        screensCanvas = screensCanvas || Object.assign(document.createElement('canvas'),
+            {width: SCREENS.width, height: SCREENS.height});
+        const context = screensCanvas.getContext('2d', {willReadFrequently: true});
+        context.fillStyle = '#000';
+        context.fillRect(0, 0, SCREENS.width, SCREENS.height);
+        for (const which of ['top', 'bottom']) {
+            const from = which === 'top' ? window.AzaharUI.getTopScreenRect() : window.AzaharUI.getBottomScreenRect();
+            const to = SCREENS[which];
+            if (from.w > 0 && from.h > 0) context.drawImage(canvas, from.x, from.y, from.w, from.h, to.x, to.y, to.w, to.h);
+        }
+        return context.getImageData(0, 0, SCREENS.width, SCREENS.height);
+    }
+
     // ── Acting ───────────────────────────────────────────────────
 
     // The virtual gamepad for action `step` of a decision.
@@ -226,8 +257,10 @@
             const index = PAD_BUTTON[name];
             if (index === undefined) return;
             // HOME would leave the game; Start and Select only when allowed (NVIDIA's
-            // player also keeps the model off its menus by default).
+            // player also keeps the model off its menus by default); nothing the planner
+            // wants avoided.
             if (name === 'GUIDE' || ((name === 'START' || name === 'BACK') && !agent.allowMenu)) return;
+            if (window.AzaharAIPlanner?.avoids(name)) return;
             const on = actions[base + i] > BUTTON_THRESHOLD;
             buttons[index] = {pressed: on, value: on ? 1 : 0};
         });
@@ -268,18 +301,24 @@
     function decide(now) {
         const seen = captureInput();
         if (!seen) return;
+        // Steered by the planner: several chunks from one batched run, the planner picks.
+        const draws = window.AzaharAIPlanner?.draws() || 1;
         const thinking = {t0: now, startedAt: performance.now()};
         agent.thinking = thinking;
         drawView(seen.input);
         // A decision that never comes back must not leave the game waiting.
         const timeout = new Promise((_, reject) => setTimeout(
             () => reject(new Error('the model took over a minute to answer')), 60000));
-        Promise.race([request('act', {pixels: seen.input}, [seen.input.buffer]), timeout]).then(result => {
+        Promise.race([request('act', {pixels: seen.input, draws}, [seen.input.buffer]), timeout]).then(result => {
             if (agent.thinking !== thinking) return;
             agent.thinking = null;
-            agent.chunk = {t0: thinking.t0, actions: result.actions};
+            const size = HORIZON * ACTION_DIM;
+            const count = result.actions.length / size;
+            const chosen = count > 1 ? window.AzaharAIPlanner.pick(result.actions, count, BUTTONS) : 0;
+            agent.chunk = {t0: thinking.t0, actions: result.actions.subarray(chosen * size, (chosen + 1) * size)};
             agent.decisions++;
             if (result.reused) agent.unchanged++;
+            if (result.expert === 'light') agent.light++;
             agent.lastMs = performance.now() - thinking.startedAt;
             if (agent.waitForModel) agent.heldMs += agent.lastMs;
             agent.timing = result;
@@ -297,9 +336,14 @@
     // Captures waiting for the next frame (tests): the canvas holds a WebGL frame only
     // until the browser shows it, so it is read here, right after the frame is drawn.
     const frameWaiters = [];
+    const screenWaiters = [];
 
     // Called by azahar_ui.js after every frame the emulator presents.
     function afterFrame() {
+        if (screenWaiters.length) {
+            const screens = captureScreens();
+            for (const resolve of screenWaiters.splice(0)) resolve(screens);
+        }
         if (frameWaiters.length) {
             const seen = captureInput();
             for (const resolve of frameWaiters.splice(0)) {
@@ -309,6 +353,14 @@
         if (!agent.playing || !agent.loaded) return;
         const now = window.AzaharUI.getGuestTimeUs();
         if (now === null || now === undefined) return;
+        const planner = window.AzaharAIPlanner;
+        planner?.afterFrame(now);
+        if (planner?.driving(now)) {
+            // The planner is working a menu itself: NitroGen waits, holding nothing.
+            agent.chunk = null;
+            applyStep(now);
+            return;
+        }
         applyStep(now);
         // Waiting: decide once the last decision's actions are used up. Real time: keep
         // a decision under way, so new actions arrive as soon as the model can make them.
@@ -331,7 +383,8 @@
             render();
             setStatus('Starting the model: ONNX Runtime Web from cdn.jsdelivr.net, then compiling it for this device…', '');
             try {
-                agent.loaded = await request('load', {});
+                agent.loaded = await request('load', {expert: agent.expert});
+                renderExpert();
             } catch (error) {
                 setStatus(error.message, 'error');
                 stopWorker();
@@ -344,6 +397,7 @@
         agent.playing = true;
         agent.decisions = 0;
         agent.unchanged = 0;
+        agent.light = 0;
         agent.heldMs = 0;
         agent.startedAt = performance.now();
         agent.chunk = null;
@@ -356,6 +410,7 @@
     function stop() {
         if (!agent.playing) return;
         agent.playing = false;
+        window.AzaharAIPlanner?.reset();
         agent.thinking = null;
         agent.chunk = null;
         hold([]);
@@ -380,6 +435,8 @@
         els.progress.value = total ? (received / total) * 100 : 0;
         if (phase === 'verify') {
             setStatus('Checking the quantized model against the reference conversion…', '');
+        } else if (phase === 'light') {
+            setStatus(`Fetching the light expert's weights from this site: ${megabytes(total)}…`, '');
         } else {
             const rate = seconds > 0 ? ` · ${(received / 1e6 / seconds).toFixed(0)} MB/s` : '';
             setStatus(`Downloading ng.pt from huggingface.co and quantizing it: ` +
@@ -406,6 +463,9 @@
         const backend = agent.loaded?.backend === 'webgpu' ? 'WebGPU' : 'WebAssembly';
         const elapsed = performance.now() - agent.startedAt;
         const unchanged = agent.unchanged ? ` (${agent.unchanged} on an unchanged screen)` : '';
+        // The mixture: how many decisions the light expert's encoder made alone.
+        const light = agent.loaded?.light && agent.decisions
+            ? ` · light expert alone on ${Math.round(100 * agent.light / agent.decisions)}%` : '';
         let mode = '';
         if (agent.waitForModel) {
             if (elapsed > 0) mode = ` · the game waited ${Math.round(100 * agent.heldMs / elapsed)}% of the time`;
@@ -414,7 +474,7 @@
             mode = ' · too slow for real time here: tick “Pause the game while the AI thinks”';
         }
         setStatus(agent.decisions
-            ? `Playing on ${backend} · ${Math.round(agent.lastMs)} ms per decision · ${agent.decisions} decisions${unchanged}${mode}`
+            ? `Playing on ${backend} · ${Math.round(agent.lastMs)} ms per decision · ${agent.decisions} decisions${unchanged}${light}${mode}`
             : `Playing on ${backend} · first decision…`, 'ok');
     }
 
@@ -437,12 +497,20 @@
             : 'Not downloaded. Nothing is fetched until you press Download.';
     }
 
+    function renderExpert() {
+        const noLight = agent.loaded && !agent.loaded.light;
+        els.expert.disabled = Boolean(noLight);
+        els.expertHelp.textContent = noLight ? 'This model has no light expert: NitroGen\'s encoder decides.'
+            : EXPERT_HELP[agent.expert];
+    }
+
     async function init() {
         els.card = $('ai-player-card');
         if (!els.card) return;
         Object.assign(els, {
             play: $('btn-ai-play'), status: $('ai-status'), progress: $('ai-progress'),
             view: $('ai-view'), keys: $('ai-keys'), wait: $('ai-wait'), menu: $('ai-menu'),
+            expert: $('ai-expert'), expertHelp: $('ai-expert-help'),
             download: $('btn-ai-download'), cancel: $('btn-ai-cancel'), remove: $('btn-ai-delete'),
             stored: $('ai-stored'),
         });
@@ -459,6 +527,18 @@
         });
         agent.waitForModel = els.wait.checked;
         agent.allowMenu = els.menu.checked;
+        try {
+            const saved = localStorage.getItem(EXPERT_KEY);
+            if (EXPERT_HELP[saved]) els.expert.value = saved;
+        } catch (_) {}
+        agent.expert = els.expert.value;
+        els.expert.addEventListener('change', () => {
+            agent.expert = els.expert.value;
+            try { localStorage.setItem(EXPERT_KEY, agent.expert); } catch (_) {}
+            renderExpert();
+            if (worker && agent.loaded) void request('route', {expert: agent.expert}).catch(() => {});
+        });
+        renderExpert();
         setInterval(() => {
             if (agent.playing && !document.hidden) renderPlaying();
         }, 1000);
@@ -479,13 +559,22 @@
         // the keys an action would hold.
         captureInput,
         nextFrameInput: () => new Promise(resolve => frameWaiters.push(resolve)),
+        nextFrameScreens: () => new Promise(resolve => screenWaiters.push(resolve)),
+        // Only right after a frame (afterFrame): the canvas holds the frame until it is shown.
+        captureScreens,
         act: (pixels, noise, noises) => request('act', {pixels, noise, noises}),
-        load: preferred => request('load', {preferred}).then(loaded => (agent.loaded = loaded)),
+        load: preferred => request('load', {preferred, expert: agent.expert}).then(loaded => {
+            agent.loaded = loaded;
+            renderExpert();
+            return loaded;
+        }),
         keysFor: (actions, step) => window.AzaharInput.padCodes(padFor(actions, step)),
-        stats: () => ({playing: agent.playing, decisions: agent.decisions, unchanged: agent.unchanged, lastMs: agent.lastMs,
+        stats: () => ({playing: agent.playing, decisions: agent.decisions, unchanged: agent.unchanged, light: agent.light,
+            lastMs: agent.lastMs,
             heldMs: agent.heldMs, step: agent.step, codes: [...agent.codes], loaded: agent.loaded,
             timing: agent.timing || null, cached: Boolean(meta), meta}),
         readMeta,
+        BUTTONS,
         MODEL_URL,
         CACHE_NAME,
     };
