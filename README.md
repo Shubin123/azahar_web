@@ -139,7 +139,15 @@ takes a decision from 329 ms to 125 ms (the encoder 95 ms, the denoiser 30 ms).
   (16 experts per layer from co-activation clustering, as in MoEfication): even routed by
   an oracle, half the neurons active moved the key frequencies 1.46 times as far as float32
   against itself, and it would at best have taken a decision from 122 to about 95 ms (the
-  encoder's feed-forward layers at half width on WebGPU).
+  encoder's feed-forward layers at half width on WebGPU). And so did fusing in
+  [Laya-Vision](https://huggingface.co/ZeraG07/laya-vision)'s front end as a light expert
+  (`scripts/nitrogen/nitrogen_light_expert.py`): its frozen SigLIP-base/16 tower with an
+  adapter trained on emulator frames to give NitroGen's image features, 2.1 times as fast as
+  NitroGen's encoder on WebGPU (46 against 97 ms), and a gate that sends the frames it
+  trusts least to NitroGen's own encoder. The gate predicts the light expert's error well
+  (correlation 0.94), but trained on 390 frames of two games the light expert's features
+  reach only cosine 0.82 to NitroGen's: with NitroGen's encoder on half the frames, key
+  frequencies still moved 1.46 times as far as float32 against itself (1.74 times on none).
 
 ### Play on Other Devices and Share Saves (LAN)
 
