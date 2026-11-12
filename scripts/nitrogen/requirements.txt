@@ -1,0 +1,15 @@
+# scripts/nitrogen: making and validating the AI player's NitroGen (Python 3.12).
+# nitrogen_validate.py and nitrogen_calibrate.py also need a checkout of
+# https://github.com/MineDojo/NitroGen (--nitrogen-src), whose code wants these versions.
+numpy==2.5.4
+onnx==1.23.2
+onnxruntime==1.31.1
+torch==2.15.0
+transformers==4.57.1
+diffusers==0.35.2
+huggingface_hub==0.36.2
+einops==0.8.2
+pydantic==2.14.3
+polars==2.1.0
+pillow==13.0.0
+PyYAML==6.0.3

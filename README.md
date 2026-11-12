@@ -83,6 +83,64 @@ some sessions after the room closes, on one device and between devices alike,
 and its rooms take two players on one device for now: a third console finds
 the room but the game does not list it (see `tests/PERFORMANCE.md`).
 
+### Let an AI Play (NitroGen)
+
+The **🤖 AI Player** widget lets NVIDIA's [NitroGen](https://huggingface.co/nvidia/NitroGen)
+play for you: a 493M-parameter model (a SigLIP2 vision encoder and a flow-matching
+transformer) trained on 40,000 hours of gameplay video to predict gamepad actions from game
+frames. It looks at the top screen and holds the keys a controller would, through the page's
+keymap, so your own keys and controller keep working alongside it. It sees one frame at a
+time and reacts; it does not plan, so expect it to wander, swing the camera and press
+through dialogue rather than finish a game.
+
+- **Nothing is fetched until you ask.** *Download model* streams NVIDIA's `ng.pt` (1.97 GB)
+  straight from huggingface.co at a pinned revision (584c8dd), checks every tensor it uses
+  against the CRC32 in `web/vendor/nitrogen/q8/manifest.json`, quantizes it to 8 bits on
+  your device and keeps only the result (603 MB) in the browser's Cache Storage; that result
+  must match the reference conversion's SHA-256 byte for byte. ng.pt itself is not kept
+  (it is fetched with `cache: 'no-store'`). *Delete model* removes it. This repository
+  ships the ONNX graphs, never NVIDIA's weights.
+- **Let the AI play** loads ONNX Runtime Web 1.31.1 from cdn.jsdelivr.net and runs the model
+  in a worker on WebGPU (else WebAssembly). Each decision takes the frame just drawn and
+  returns 18 actions, one per 1/60 s of game time: about 8 decisions a second on an Apple
+  M4 in Chrome (122-125 ms each). The game runs on while the AI decides the next ones, skipping
+  actions that come too late; on a device too slow for that, tick *Pause the game while the
+  AI thinks*, as NVIDIA's own player pauses its games. A screen that has not changed (a
+  still menu) reuses what the model saw in it. Start and Select are off unless you allow
+  them (NVIDIA's player also keeps the model off menus by default), HOME always.
+- NitroGen is under the [NVIDIA License](web/vendor/nitrogen/LICENSE): non-commercial
+  research use only.
+
+How it is made fast, and checked. `scripts/nitrogen/nitrogen_onnx.py` writes the graphs:
+NVIDIA's inference code as ONNX operators, its linear layers in 8-bit `MatMulNBits` blocks of
+32, the image encoder computing in float16, each residual add folded into ONNX Runtime's
+`SkipLayerNormalization`, attention as MatMul and Softmax (ONNX Runtime's
+`MultiHeadAttention` kernel is several times slower on WebGPU here), everything that depends
+only on the denoising step folded into constants when the session is created, and the
+denoiser's steps unrolled into one graph. It samples the actions with 4 flow-matching steps
+rather than NVIDIA's 16, as GR00T, whose action head NitroGen's is, does. On an Apple M4 that
+takes a decision from 329 ms to 125 ms (the encoder 95 ms, the denoiser 30 ms).
+
+- The same graphs in float32 with 16 steps reproduce NVIDIA's own code to within 1e-5 on
+  emulator framebuffers (`nitrogen_validate.py`, NVIDIA's model on the GPU).
+- `tests/ai_player.test.cjs` (and `tests/ai_bench.cjs` for any variant) compares the page's
+  model with them as policies, in the browser on WebGPU: 12 noise draws per framebuffer,
+  saved ones (`tests/ai_frames.cjs`) and ones taken from the running game. How often it
+  holds each 3DS key, and where it puts the sticks, must be within 1.25 times the float32
+  model's own difference between two sets of draws, and its draws as varied (0.8-1.25
+  times as often two draws hold different keys). The page's model, on 48 framebuffers:
+  key frequencies 0.60 apart (float32 against itself 0.72), sticks 0.038 (0.059), variety
+  0.89 and 0.88 times. Playing Pokémon X in real time, the game kept its pace (0.99 of it
+  without the AI) with a new decision every 139 ms of game time.
+- What failed these checks: 2 denoising steps (variety 0.64 times: the actions fall back on
+  their average), 1 step (0.03 times), and smaller images (224 pixels: key frequencies 0.84
+  apart). Plain 4-bit weights also failed (85% of actions with the same keys as float32
+  from the same noise). So did a mixture of experts in the encoder's feed-forward layers
+  (16 experts per layer from co-activation clustering, as in MoEfication): even routed by
+  an oracle, half the neurons active moved the key frequencies 1.46 times as far as float32
+  against itself, and it would at best have taken a decision from 122 to about 95 ms (the
+  encoder's feed-forward layers at half width on WebGPU).
+
 ### Play on Other Devices and Share Saves (LAN)
 
 ```bash
@@ -142,6 +200,9 @@ web/                    # Ready-to-serve web application
   azahar_shared_link.js # Shared-memory rings that link consoles on one device
   azahar_cpu_jit.js     # CPU watchdog: switches a stuck game from compiled code to the interpreter
   azahar_fullscreen.js  # Fullscreen view: screen layout within the user's size bounds
+  azahar_ai_player.js   # AI Player widget: NitroGen sees the top screen and holds keys
+  azahar_ai_worker.js   # Downloads, checks, quantizes, caches and runs NitroGen (worker)
+  vendor/nitrogen/      # NitroGen's ONNX graphs, manifest and scales (no weights) + LICENSE
   coi-serviceworker.js  # COOP/COEP header injection for static hosts
   server.cjs            # Local dev server with isolation headers
   azahar.js             # Emscripten glue (software renderer)
@@ -154,6 +215,11 @@ tests/                  # Test suite
   browser_regression.cjs  # E2E rendering regression test
   title_transition_regression.cjs # Cold-boot title-to-game regression
   config.cjs              # Shared test configuration
+  ai_frames.cjs           # Saves the AI player's model inputs from a running game
+  ai_player.test.cjs      # AI player: lazy download, conversion, speed, fidelity, play, delete
+  ai_bench.cjs            # AI player: any model variant's speed and fidelity in the browser
+  ai_common.cjs           # Shared by both: model workers, framebuffers, policy comparison
+scripts/nitrogen/       # Makes and validates the AI player's quantized NitroGen
 build_web.bat           # Windows build script (requires Emscripten SDK)
 serve_web.bat           # Windows shortcut to start local server
 PROJECT.md              # Detailed architecture and optimization history
@@ -246,6 +312,20 @@ npm run test:renderer-recovery -- --rom path/to/your_rom.3ds
 # Safari/iOS engine: WebKit with iPhone emulation (optional Playwright install)
 npm install --no-save playwright && npx playwright install webkit
 node tests/webkit_mobile.test.cjs --rom test_games/your_rom.3ds
+
+# AI player (needs ng.pt: `hf download nvidia/NitroGen ng.pt --revision 584c8dded734d032f07a4bcc0ccb330e703298c4`).
+# Save the model's inputs from games, build the float32 graphs the quantized model is
+# compared with, check those against NVIDIA's code (a NitroGen checkout and
+# scripts/nitrogen/requirements.txt; NVIDIA's model runs on the GPU), then the widget in
+# Chrome: lazy download, byte-exact conversion, speed, the page's model vs float32 as
+# policies on WebGPU over saved and live framebuffers, playing, and deleting
+node tests/ai_frames.cjs --rom ROM [--state STATE.cst] --out tmp_test/ai_frames/valid/NAME
+python3 scripts/nitrogen/nitrogen_onnx.py build --ckpt ng.pt --variants f32 --out tmp_test/ai_reference
+python3 scripts/nitrogen/nitrogen_validate.py --ckpt ng.pt --nitrogen-src NitroGen \
+    --graphs tmp_test/ai_reference/f32 --frames tmp_test/ai_frames/valid
+node tests/ai_player.test.cjs --ckpt ng.pt --rom ROM --state STATE.cst
+# Speed and fidelity of any variant nitrogen_onnx.py builds (e.g. --steps 2, --image-size 224)
+node tests/ai_bench.cjs --ckpt ng.pt --model DIR [--rom ROM --state STATE.cst] --no-fidelity --distribution
 ```
 
 ## Architecture

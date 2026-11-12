@@ -1405,6 +1405,41 @@ void main() { frag_color = vec4(1.0); }`);
         }
     }
 
+    // ── Screen layout ────────────────────────────────────────────
+    // Where the top screen is drawn, for the AI player: the native layout (top screen over
+    // the upper half) until fullscreen or a split-screen seat sets one of its own.
+    let screenLayout = null;
+
+    function trackScreenLayout() {
+        const setLayout = wasmModule._azahar_set_screen_layout;
+        if (!setLayout) return;
+        wasmModule._azahar_set_screen_layout = (width, height, topX, topY, topW, topH, ...bottom) => {
+            const result = setLayout(width, height, topX, topY, topW, topH, ...bottom);
+            if (result === 0) {
+                screenLayout = width > 0 && height > 0 ?
+                    {width, height, top: {x: topX, y: topY, w: topW, h: topH}} : null;
+            }
+            return result;
+        };
+    }
+
+    // The top screen's rectangle in the canvas's pixels.
+    function topScreenRect() {
+        const layout = screenLayout || {width: 400, height: 480, top: {x: 0, y: 0, w: 400, h: 240}};
+        const sx = canvas.width / layout.width, sy = canvas.height / layout.height;
+        const {x, y, w, h} = layout.top;
+        return {x: Math.round(x * sx), y: Math.round(y * sy), w: Math.round(w * sx), h: Math.round(h * sy)};
+    }
+
+    // Emulated time since the title started, in microseconds.
+    let perfStatsBuffer = 0;
+    function guestTimeUs() {
+        if (!romLoaded || !wasmModule?._azahar_get_perf_stats) return null;
+        if (!perfStatsBuffer) perfStatsBuffer = wasmModule._malloc(11 * 8);
+        if (wasmModule._azahar_get_perf_stats(perfStatsBuffer, 11) !== 0) return null;
+        return new Float64Array(wasmModule.HEAPU8.buffer, perfStatsBuffer, 11)[10];
+    }
+
     // ── Initialize Emulator ──────────────────────────────────────
     function initializeEmulator() {
         if (initialized) return Promise.resolve();
@@ -1438,6 +1473,7 @@ void main() { frag_color = vec4(1.0); }`);
                 return;
             }
             initialized = true;
+            trackScreenLayout();
             applyResolutionScale();
             applySoftwarePixelScale();
             applyFastForward();
@@ -1915,8 +1951,9 @@ void main() { frag_color = vec4(1.0); }`);
             // Frames other consoles on this device sent during their own steps.
             window.AzaharNetplay?.pump?.();
             // Local Play keeps linked consoles' game clocks together; a console that
-            // has run ahead waits here for the others.
-            if (window.AzaharNetplay?.shouldHold?.()) {
+            // has run ahead waits here for the others. The AI player can hold the game
+            // while its model decides what to press.
+            if (window.AzaharNetplay?.shouldHold?.() || window.AzaharAIPlayer?.shouldHold?.()) {
                 runAnimationFrame = AzaharScheduler.request(tick);
                 return;
             }
@@ -1933,6 +1970,8 @@ void main() { frag_color = vec4(1.0); }`);
                 if (result === 0) {
                     updateCanvasFromWasm();
                     updateBootStatus(now);
+                    // The frame is still on the canvas: the AI player looks at it here.
+                    window.AzaharAIPlayer?.afterFrame?.();
                     // Update FPS meter every ~500 ms
                     if (now - lastFpsAt >= 500) {
                         if (lastFpsAt > 0) {
@@ -2257,6 +2296,10 @@ void main() { frag_color = vec4(1.0); }`);
         },
         getCanvas: () => canvas,
         getModule: () => (initialized ? wasmModule : null),
+        getTopScreenRect: topScreenRect,
+        getGuestTimeUs: guestTimeUs,
+        // Whether frames run: a title is loaded and the run loop is going.
+        isPlaying: () => romLoaded && running,
         // The title that runs (a Download Play child after joining a room), as 16 hex digits.
         getProgramId: () => (romLoaded ? readCurrentProgramId() : ''),
         captureState,
