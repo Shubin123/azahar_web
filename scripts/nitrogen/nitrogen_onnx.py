@@ -580,7 +580,10 @@ def build_denoise(bits, smooth=None, rules=(), steps=INFERENCE_STEPS, image_size
     Everything that depends only on the step's timestep (its encodings, the DiT's timestep
     embedding and each block's AdaLayerNorm scale and shift) has constant inputs, so ONNX
     Runtime computes it once when the session is created. `noise` is a batch: several draws
-    for the same image (their actions differ), in one run."""
+    for the same image (their actions differ), in one run. `guide` and `guide_weight` steer
+    the flow (azahar_ai_planner.js): after each Euler step the actions move guide_weight /
+    steps of the way to `guide`, value by value, and the next steps' velocities follow from
+    there; a weight of 0 changes nothing."""
     g = Graph('nitrogen_denoise', bits, smooth, TIMESTEP_ONLY + list(rules))
     g.batch = 0
     actions = 'noise'
@@ -641,8 +644,12 @@ def build_denoise(bits, smooth=None, rules=(), steps=INFERENCE_STEPS, image_size
         step_velocity = g.linear(x, 'action_decoder.layer2', HIDDEN, ACTION_DIM, transposed=True,
                                  scale=1.0 / steps)
         last = step == steps - 1
-        actions = g.op('Add', [actions, step_velocity], out='actions' if last else None)
-    inputs = [helper.make_tensor_value_info('noise', TensorProto.FLOAT, ['draws', ACTION_HORIZON, ACTION_DIM])]
+        actions = g.op('Add', [actions, step_velocity])
+        pull = g.op('Mul', [g.op('Sub', ['guide', actions]), g.op('Mul', ['guide_weight', g.fconst(1.0 / steps)])])
+        actions = g.op('Add', [actions, pull], out='actions' if last else None)
+    inputs = [helper.make_tensor_value_info('noise', TensorProto.FLOAT, ['draws', ACTION_HORIZON, ACTION_DIM]),
+              helper.make_tensor_value_info('guide', TensorProto.FLOAT, ['draws', ACTION_HORIZON, ACTION_DIM]),
+              helper.make_tensor_value_info('guide_weight', TensorProto.FLOAT, ['draws', 1, ACTION_DIM])]
     for block in CROSS_BLOCKS:
         tokens = (image_size // 16) ** 2
         inputs += [helper.make_tensor_value_info(f'k{block}', TensorProto.FLOAT, [1, HEADS, HEAD_DIM, tokens]),

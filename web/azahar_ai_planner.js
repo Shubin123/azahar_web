@@ -5,9 +5,10 @@
  * seconds, with the player's notes (quest log, task at hand, manual pages), and decides the
  * bigger picture. It steers NitroGen rather than replacing it:
  *
- *   play   NitroGen makes several action chunks per decision (one batched run) and the one
- *          that best goes the planner's way (its heading, the buttons it favours) is played;
- *          buttons the planner wants avoided are never pressed.
+ *   play   NitroGen's actions are pulled the planner's way as they are denoised (its
+ *          heading on the Circle Pad, the buttons it favours), NitroGen makes several such
+ *          chunks per decision (one batched run) and the one that goes the planner's way
+ *          the most is played; buttons the planner wants avoided are never pressed.
  *   menu   NitroGen waits while the planner works a menu, a dialogue or the bottom screen
  *          itself: one button press or one touch per look, looking again soon after.
  *
@@ -25,6 +26,11 @@
     const PRESS_MS = 120;
     const STEER_DRAWS = 4;           // NitroGen's candidate chunks per decision while steered
     const STEER_STEPS = 8;           // the actions of a chunk that play before the next decision
+    // How hard the denoising flow is pulled (azahar_ai_worker.js's guide): the heading fully
+    // (the stick goes that way), favoured buttons halfway (NitroGen still decides when).
+    const PULL = {heading: 1, press: 0.5};
+    // NitroGen's stick values (0-1, 0.5 at rest; y grows downwards) for each heading.
+    const STICK = {up: [22, 0], down: [22, 1], left: [21, 0], right: [21, 1]};
     const SCREENS = {width: 400, height: 480, bottom: {x: 40, y: 240, w: 320, h: 240}};
     // The planner's buttons as NitroGen names them (azahar_input.js's pad mapping) and as
     // azahar_input.js's KEYMAP does.
@@ -191,6 +197,21 @@
         return steering() ? STEER_DRAWS : 1;
     }
 
+    // The pull on NitroGen's actions for the plan: target values (18 x 25) and weights (25),
+    // `buttons` naming its 21 button outputs; null when not steering.
+    function guidance(buttons) {
+        if (!steering()) return null;
+        const plan = state.plan;
+        const guide = new Float32Array(18 * 25), weight = new Float32Array(25);
+        const set = (index, value, pull) => {
+            weight[index] = pull;
+            for (let step = 0; step < 18; step++) guide[step * 25 + index] = value;
+        };
+        if (STICK[plan.move]) set(STICK[plan.move][0], STICK[plan.move][1], PULL.heading);
+        for (const name of plan.press) set(buttons.indexOf(NITROGEN[name]), 1, PULL.press);
+        return {guide, weight};
+    }
+
     // Of `count` chunks (18 actions of 25 values each, `buttons` naming the 21 button
     // outputs), the one whose first actions go the planner's way the most.
     function pick(actions, count, buttons) {
@@ -303,7 +324,7 @@
     }
 
     window.AzaharAIPlanner = {
-        afterFrame, draws, pick, avoids, driving, reset, choose, tap, steer,
+        afterFrame, draws, guidance, pick, avoids, driving, reset, choose, tap, steer,
         state: () => ({...state, plan: state.plan && {...state.plan}}),
         STEER_DRAWS,
     };

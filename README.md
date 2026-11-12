@@ -117,9 +117,10 @@ frame at a time and reacts; the optional planner below gives it a direction.
   (Qwen3.5-0.8B or LFM2.5-VL-450M from huggingface.co, pinned revisions, run with
   Transformers.js 4.3.2 from cdn.jsdelivr.net) looks at both screens every 5 seconds of game
   time, with your notes (quest log, the task at hand, manual pages), and steers NitroGen:
-  NitroGen makes 4 action chunks per decision in one batched run and the one that best goes
-  the planner's way (its heading, the buttons it favours) is played, and buttons it wants
-  avoided are never pressed. In menus, dialogues and on the bottom screen it presses buttons
+  NitroGen's actions are pulled the planner's way as they are denoised (its heading on the
+  Circle Pad, the buttons it favours), with NitroGen filling in the rest; it makes 4 such
+  chunks per decision in one batched run and the one that goes the planner's way the most
+  is played, and buttons the planner wants avoided are never pressed. In menus, dialogues and on the bottom screen it presses buttons
   and touches the screen itself while NitroGen waits. It shows its goal in the widget.
 - NitroGen is under the [NVIDIA License](web/vendor/nitrogen/LICENSE): non-commercial
   research use only. The light expert learned from NitroGen, so the same terms apply to it;
@@ -132,7 +133,8 @@ NVIDIA's inference code as ONNX operators, its linear layers in 8-bit `MatMulNBi
 `SkipLayerNormalization`, attention as MatMul and Softmax (ONNX Runtime's
 `MultiHeadAttention` kernel is several times slower on WebGPU here), everything that depends
 only on the denoising step folded into constants when the session is created, and the
-denoiser's steps unrolled into one graph that takes a batch of noises. It samples the
+denoiser's steps unrolled into one graph that takes a batch of noises (and, for the planner,
+a target and weights the actions are pulled toward after each step). It samples the
 actions with 4 flow-matching steps rather than NVIDIA's 16, as GR00T, whose action head
 NitroGen's is, does. On an Apple M4 that takes a decision with NitroGen's own encoder from
 329 ms to 122 ms (the encoder 95 ms, the denoiser 27 ms).
@@ -171,11 +173,11 @@ games.
   keys 0.54 (float32 against itself 0.55), sticks 0.032 (0.034), variety 0.85 and 0.81 times.
   The page's mixture, on 32 saved framebuffers and 16 from Pokémon X running: keys 0.77
   (0.77), sticks 0.056 (0.065), variety 0.86 and 0.83 times.
-- It also checks the planner's steering, with a plan to head left, favour A and avoid B: B
-  was never pressed (NitroGen alone pressed it on 18 of 384 actions) and A twice as often
-  (0.10 to 0.19 of actions), but left only 0.02 to 0.07: picking among NitroGen's own draws
-  cannot head somewhere NitroGen rarely goes, and the check asks for 0.1 more. And it checks
-  that a planner's touch reaches the bottom screen (it opens Pokémon X's Friends list).
+- It also checks the planner's steering, with a plan to head left, favour A and avoid B:
+  left held on 0.46 of the actions that play (NitroGen alone: 0.02), A on 0.53 (0.10), B
+  never (18 of 384). Picking among NitroGen's own draws alone gave only 0.07 left: it cannot
+  head somewhere NitroGen rarely goes, so the flow is pulled too. And it checks that a
+  planner's touch reaches the bottom screen (it opens Pokémon X's Friends list).
 - `tests/ai_planner_bench.cjs` times the planner models in the browser and records what they
   read and plan on both-screen frames (`tests/ai_frames.cjs --screens`).
 - What failed the checks: 2 denoising steps (variety 0.64 times: the actions fall back on

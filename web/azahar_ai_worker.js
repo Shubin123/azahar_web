@@ -405,8 +405,10 @@ function gaussianNoise(count) {
 
 // `draws`: several action chunks for the image from independent noises (the planner picks
 // among them), or `noises` (tests) given. The encoder runs once, the denoiser once on the
-// whole batch. `expert` (tests): which encoder, instead of the player's choice.
-async function act({pixels, noise, noises, draws = 1, profile, expert = routing}) {
+// whole batch. `guide` (18 x 25 values) and `guideWeight` (25): the planner's pull on the
+// actions as they are denoised (none by default). `expert` (tests): which encoder, instead
+// of the player's choice.
+async function act({pixels, noise, noises, draws = 1, guide, guideWeight, profile, expert = routing}) {
     if (!sessions) throw new Error('The model is not loaded.');
     const {imageSize, actionHorizon, actionDim} = manifest.model;
     // The page sends 256x256; a model made for smaller images gets them area-averaged.
@@ -451,6 +453,15 @@ async function act({pixels, noise, noises, draws = 1, profile, expert = routing}
     // The denoiser takes all the Euler steps from each noise to its actions.
     const feeds = {noise: new ort.Tensor('float32', batch, [starts.length, actionHorizon, actionDim])};
     for (const name of sessions.kv) feeds[name] = encoded[name];
+    if (sessions.denoise.inputNames.includes('guide')) {
+        const guides = new Float32Array(starts.length * count), weights = new Float32Array(starts.length * actionDim);
+        for (let index = 0; index < starts.length; index++) {
+            if (guide) guides.set(guide, index * count);
+            if (guideWeight) weights.set(guideWeight, index * actionDim);
+        }
+        feeds.guide = new ort.Tensor('float32', guides, [starts.length, actionHorizon, actionDim]);
+        feeds.guide_weight = new ort.Tensor('float32', weights, [starts.length, 1, actionDim]);
+    }
     const result = await sessions.denoise.run(feeds);
     const actions = new Float32Array(result.actions.data);
     result.actions.dispose?.();

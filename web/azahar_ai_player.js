@@ -301,15 +301,18 @@
     function decide(now) {
         const seen = captureInput();
         if (!seen) return;
-        // Steered by the planner: several chunks from one batched run, the planner picks.
+        // Steered by the planner: several chunks from one batched run, pulled its way as they
+        // are denoised, and the planner picks.
         const draws = window.AzaharAIPlanner?.draws() || 1;
+        const pull = window.AzaharAIPlanner?.guidance(BUTTONS);
         const thinking = {t0: now, startedAt: performance.now()};
         agent.thinking = thinking;
         drawView(seen.input);
         // A decision that never comes back must not leave the game waiting.
         const timeout = new Promise((_, reject) => setTimeout(
             () => reject(new Error('the model took over a minute to answer')), 60000));
-        Promise.race([request('act', {pixels: seen.input, draws}, [seen.input.buffer]), timeout]).then(result => {
+        Promise.race([request('act', {pixels: seen.input, draws, guide: pull?.guide, guideWeight: pull?.weight},
+            [seen.input.buffer]), timeout]).then(result => {
             if (agent.thinking !== thinking) return;
             agent.thinking = null;
             const size = HORIZON * ACTION_DIM;
@@ -562,7 +565,8 @@
         nextFrameScreens: () => new Promise(resolve => screenWaiters.push(resolve)),
         // Only right after a frame (afterFrame): the canvas holds the frame until it is shown.
         captureScreens,
-        act: (pixels, noise, noises) => request('act', {pixels, noise, noises}),
+        act: (pixels, noise, noises, guide) => request('act', {pixels, noise, noises, guide: guide?.guide,
+            guideWeight: guide?.weight}),
         load: preferred => request('load', {preferred, expert: agent.expert}).then(loaded => {
             agent.loaded = loaded;
             renderExpert();

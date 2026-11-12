@@ -63,9 +63,10 @@ function check(name, ok, detail = '') {
     console.log(`${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`);
 }
 
-// The planner steering NitroGen on the frames: for each, the same batch of draws, played as
-// NitroGen alone would (the first draw) and as the planner picks with a fixed plan. Counted
-// over each chunk's first 8 actions (what plays before the next decision).
+// The planner steering NitroGen on the frames: for each, the same noises, played as NitroGen
+// alone would (the first draw, unguided) and as the planner steers with a fixed plan (the
+// draws pulled its way as they are denoised, the best one picked). Counted over each
+// chunk's first 8 actions (what plays before the next decision).
 async function steeringChecks(page, frames) {
     const counts = await page.evaluate(async (frames, seeds) => {
         const player = window.AzaharAIPlayer, planner = window.AzaharAIPlanner;
@@ -84,10 +85,11 @@ async function steeringChecks(page, frames) {
         };
         for (const [index, frame] of frames.entries()) {
             const noises = Array.from({length: planner.STEER_DRAWS}, (_, i) => window.__noise(seeds + 100 * index + i));
-            const out = await player.act(Uint8Array.from(frame.rgb), null, noises);
             planner.steer(null);
-            count(tally.alone, out.actions.subarray(0, 450));
+            const alone = await player.act(Uint8Array.from(frame.rgb), null, noises);
+            count(tally.alone, alone.actions.subarray(0, 450));
             planner.steer(plan);
+            const out = await player.act(Uint8Array.from(frame.rgb), null, noises, planner.guidance(player.BUTTONS));
             const chosen = planner.pick(out.actions, noises.length, player.BUTTONS);
             count(tally.steered, out.actions.subarray(chosen * 450, (chosen + 1) * 450));
             tally.steps += 8;
