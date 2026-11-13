@@ -131,7 +131,70 @@ frame at a time and reacts; the optional planner below gives it a direction.
   Circle Pad, the buttons it favours), with NitroGen filling in the rest; it makes 4 such
   chunks per decision in one batched run and the one that goes the planner's way the most
   is played, and buttons the planner wants avoided are never pressed. In menus, dialogues and on the bottom screen it presses buttons
-  and touches the screen itself while NitroGen waits. It shows its goal in the widget.
+  and touches the screen itself while NitroGen waits. It shows its goal in the widget. The
+  game's name (from the ROM's file name) goes before your notes.
+- **LFM2.5-VL-450M · games**, a planner model fine-tuned in this project for game
+  instructions (`scripts/nitrogen/system2_dataset.py`, `system2_finetune.py`, on an NVIDIA
+  P100): LoRA on the language model's linear layers, trained on 14,126 moments of human play
+  from NVIDIA's NitroGen dataset (the frame as the planner sees a 3DS game, with the game's
+  name and, a quarter of the time, a task for the next seconds in the notes; moments where the
+  player moved twice; on a fifth of the frames an instruction drawn as a game shows one, a
+  tip on the bottom screen or a dialogue box, "Press B to jump", "Head left to the exit",
+  which the answer then follows) to answer the planner's own questions as the player then
+  acted: which way they headed and which face button they pressed most over the next 3
+  seconds, and that no menu waits (the dataset is gameplay). On 1,603 moments of games and
+  videos it never saw (Mario and Pokémon among them):
+
+  | | original LFM2.5-VL-450M | fine-tuned |
+  |---|---|---|
+  | follows a task in the notes (heading, button) | 44%, 30% | 100%, 100% |
+  | follows an instruction on the screen | 65% | 100% |
+  | ... in wordings, colours, sizes and places it never trained on | 53% | 90% |
+  | picks the player's button from the screen and the game's name | 16% | 72% (always "none": 59%) |
+  | says no menu waits during play | 38% | 100% |
+  | heading right where the player moved, from the screen alone | 38% | 36% |
+
+  The original says a menu waits 62% of the time during play, which hands the buttons to the
+  planner and stops NitroGen; heading from the screen alone it learned no better than the
+  original. Fine-tuning without the drawn instructions taught it to stop reading the screen
+  (17% on the new wordings), and without the menu answer it kept the original's habit, which
+  froze lockstep play (fixed: the game now moves on while the planner works a menu). Its
+  download is the original model from huggingface.co and this site's 12 MB decoder graph
+  (`web/vendor/system2/`): the original's, with each fine-tuned layer's LoRA branch beside it
+  in float16, so its 4-bit weights stay the original's (folding the LoRA into them and
+  quantizing again lost it: its changes are finer than 4-bit steps). Built this way it
+  answers in the browser as in PyTorch (an earlier run: heading 20, button 21 of 24 frames
+  alike; the original model 23 of 24), and the shipped one follows instructions drawn in new
+  wordings on 21 of 24 held-out frames there (the original: 14, and it claimed a menu on all
+  24), in 0.9 s a look on an Apple M4 (0.7 s the original). The LFM planners get both
+  screens at 384x480, the grid Liquid AI's own processor uses (Transformers.js would squash
+  them to 512x512 first). Steering NitroGen by itself through World 1-1 of New Super Mario Bros. 2 it
+  got 8% of the way on average, 13% at best (NitroGen alone: 5%, the first Goomba): steering
+  cannot time a jump; looking ahead can (below).
+- **Look ahead (System 2)**, off until ticked: the game pauses every 45 frames and is saved;
+  from there NitroGen plays the next 90 frames several times, steered several ways (run on,
+  run and jump, dash and jump, unsteered, and the planner's own choice of button when it names
+  one; the heading is the planner's when one runs, otherwise right), and the game goes back
+  to the saved state and replays the best future's first 45 frames: the same stops of game
+  time with the same keys, which the emulator plays the same way (while the game is held at
+  a stop, the engine saves and loads as a step of their own and keeps the game where a load
+  put it; otherwise it runs on after a load for as long as its time budget allows). A future is judged the same way in any game, by what the screen shows: whether it
+  lived (the screen did not go black), whether it kept moving and how far the top screen
+  scrolled the heading's way. When no future lives on, it thinks harder: a held jump (the
+  heading and jump held for a moment, then NitroGen on), a short hop, another draw, backing
+  off. The chosen future is first played on another 60 frames (a death shows only a while
+  after it starts), and the next best takes its place if it then dies. On New Super Mario
+  Bros. 2's World 1-1 (`tests/ai_mario_bench.cjs --setups search`), where NitroGen alone got
+  at most 56% of the way (and lost a life at the first Goomba in its last 3 tries), looking
+  ahead cleared the level from its start in 5 of 7 tries, 4 of the last 5 ("COURSE CLEAR", no
+  life lost, the next level open on the map; 35-38 s of game time at 17-20 times slower than
+  real time), past the Goomba at the ledge, the pit a third of the way in (once by backing
+  off and coming back) and the stack of Goombas before the flag. One try lost a life at that
+  stack, and one (before each step also tried the last choice's own checked continuation) at
+  the first Goomba. With the fine-tuned planner choosing the heading and a button of its own
+  (`--setups search-planner`) it cleared the level in 1 of 2 tries (the other lost a life at
+  the stack): at one step every other future got stuck and only its own, run and press A,
+  went on.
 - NitroGen is under the [NVIDIA License](web/vendor/nitrogen/LICENSE): non-commercial
   research use only. The light expert learned from NitroGen, so the same terms apply to it;
   its tower is Google's [SigLIP-base/16](https://huggingface.co/google/siglip-base-patch16-224)
@@ -191,13 +254,38 @@ games.
   variety 0.83 and 0.82 times, the light expert deciding alone 85% of the time; on 48 of New
   Super Mario Bros. 2, where its check hands the game to NitroGen's encoder: keys 0.41 (0.45),
   sticks 0.0050 (0.0059), variety 0.86 and 0.97 times.
-- It also checks the planner's steering, with a plan to head left, favour A and avoid B:
-  left held on 0.46 of the actions that play (NitroGen alone: 0.02), A on 0.53 (0.10), B
-  never (18 of 384). Picking among NitroGen's own draws alone gave only 0.07 left: it cannot
-  head somewhere NitroGen rarely goes, so the flow is pulled too. And it checks that a
-  planner's touch reaches the bottom screen (it opens Pokémon X's Friends list).
+- With `--planner-checks` (on games other than Pokémon) it also checks the planner's
+  steering, with a plan to head left, favour A and avoid B: on New Super Mario Bros. 2, left
+  is held on 0.19 of the actions that play (NitroGen alone: 0.04), A on 0.31 (0.07), B never.
+  Picking among NitroGen's own draws alone moved left only from 0.02 to 0.07: it cannot head
+  somewhere NitroGen rarely goes, so the flow is pulled too. With `--tap X,Y` it checks that
+  a planner's touch reaches the bottom screen.
+- `tests/ai_lockstep_bench.cjs` plays in lockstep (`AzaharAIPlayer.setLockstep`): the game
+  runs as fast as the machine can, waits for each decision and stops at the end of each
+  action's frame (the engine's `azahar_set_guest_stop_us`), so the model's speed is what
+  limits how fast the game is played, and every action is held for exactly its frame, as
+  NVIDIA's own evaluation pauses its games (pausing does not change their physics). Waiting
+  for each decision with the game fast-forwarded instead left 553 of 1,080 actions never
+  held: the game ran several frames between the page's looks at it. On an Apple M4, NitroGen
+  in lockstep plays New Super Mario Bros. 2 at 1.74 times real time, 5.8 decisions a second.
+- The tests also run on a Linux machine with an NVIDIA card: under `xvfb-run -a`, with
+  `AZAHAR_HEADLESS=0`, `CHROME_PATH` at the distribution's Chromium and
+  `AZAHAR_CHROME_ARGS="--ozone-platform=x11 --enable-unsafe-webgpu --enable-features=Vulkan
+  --ignore-gpu-blocklist --use-angle=vulkan"`, both WebGPU and WebGL2 run on its GPU.
 - `tests/ai_planner_bench.cjs` times the planner models in the browser and records what they
   read and plan on both-screen frames (`tests/ai_frames.cjs --screens`).
+- `scripts/nitrogen/nitrogen_lean.py` works on a leaner NitroGen that keeps NVIDIA's own
+  weights (the light expert's weakness was learning a few games instead): image tokens
+  pooled 2x2 or merged (ToMe) partway through the encoder, a student distilled from NitroGen
+  on the pooled tokens, and a one-step action head. Without training, every token cut
+  failed on New Super Mario Bros. 2 (pooling from layer 6-16: keys 2.5-3.0 times; ToMe:
+  1.1-1.5 times, sticks 1.4-2.3 times). Distilled for 4,000 steps, pooling from layer 8 (the
+  encoder 1.7 times as fast: 21.6 ms against 37.1 on the P100) passes on the 3DS frames (keys
+  1.12, sticks 1.11 times) but not on New Super Mario Bros. 2 (1.97, 4.41 times). A one-step
+  action head (distilled on an NVIDIA P100 for 3,000 steps to land where NitroGen's 4
+  denoising steps land from the same noise; 4 times fewer denoiser runs) passes on the 3DS
+  frames (keys 0.96, sticks 0.92 times) and on New Super Mario Bros. 2's keys (1.03 times)
+  but not its sticks (1.49 times).
 - What failed the checks: 2 denoising steps (variety 0.64 times: the actions fall back on
   their average), 1 step (0.03 times), smaller images (224 pixels: key frequencies 0.84
   apart), plain 4-bit weights (85% of actions with the same keys as float32 from the same

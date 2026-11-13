@@ -31,6 +31,19 @@
     const ACTION_DIM = 25;
     const FRAME_US = 1e6 / 60;
     const SOURCE_BYTES = 1974723762;
+    // What a download keeps: the quantized NitroGen and the light expert's weights.
+    const NITROGEN_KEPT_BYTES = 602.5e6 + 122.1e6;
+    const NITROGEN_INFO = '<b>NitroGen</b> by NVIDIA, from <a href="https://huggingface.co/nvidia/NitroGen" target="_blank" ' +
+        'rel="noopener">huggingface.co/nvidia/NitroGen</a> (revision 584c8dd), under the <a href="https://huggingface.co/' +
+        'nvidia/NitroGen/blob/main/LICENSE" target="_blank" rel="noopener">NVIDIA License</a>: non-commercial research use ' +
+        'only. Download fetches NVIDIA\'s <code>ng.pt</code> straight from huggingface.co (nothing passes through this ' +
+        'site), checks it, and quantizes it to 8 bits on this device; only that result (603 MB) is kept, in this browser\'s ' +
+        'storage, until you delete it. It runs on this device with ONNX Runtime Web, fetched from cdn.jsdelivr.net the ' +
+        'first time it starts.<br><b>Light expert</b>, downloaded with it: Google\'s <a href="https://huggingface.co/google/' +
+        'siglip-base-patch16-224" target="_blank" rel="noopener">SigLIP-base/16</a> (Apache 2.0) with a projector after ' +
+        '<a href="https://huggingface.co/ZeraG07/laya-vision" target="_blank" rel="noopener">Laya-Vision</a>\'s, trained ' +
+        'here to stand in for NitroGen\'s image encoder (<code>scripts/nitrogen/nitrogen_light_expert.py</code>); as it ' +
+        'learned from NitroGen, the NVIDIA License applies to it too. Its weights (122 MB, 8 bits) come from this site.';
     // Which image encoder decides (the worker's routing), kept in this browser.
     const EXPERT_KEY = 'azahar-ai-expert';
     const EXPERT_HELP = {
@@ -40,6 +53,16 @@
         light: 'The light expert alone: the fastest, but only in games like the ones it learned from does it act ' +
             'like NitroGen; elsewhere it plays worse.',
         heavy: 'NVIDIA\'s own SigLIP2-large encoder on every frame: NitroGen exactly as published.',
+    };
+    // How the game and the AI keep time together (the widget's Timing), kept in this browser.
+    const TIMING_KEY = 'azahar-ai-timing';
+    const TIMING_HELP = {
+        realtime: 'The game runs at its own speed; NitroGen decides as fast as it can, and actions that come too late ' +
+            'are skipped.',
+        wait: 'The game pauses while NitroGen thinks, as NVIDIA\'s own player pauses its games: for devices too slow ' +
+            'for real time.',
+        lockstep: 'The game runs only as fast as the AI decides (faster than real time on a quick GPU, slower on a slow ' +
+            'one), and every action is held for exactly its frame.',
     };
     // nitrogen/shared.py's button order.
     const BUTTONS = ['BACK', 'DPAD_DOWN', 'DPAD_LEFT', 'DPAD_RIGHT', 'DPAD_UP', 'EAST', 'GUIDE',
@@ -72,6 +95,10 @@
         unchanged: 0,
         light: 0,               // decisions the light expert's encoder made alone
         lockstep: false,        // the game stops at each action's frame (setLockstep)
+        execute: HORIZON,       // actions played from each decision before the next (setExecute)
+        recording: null,        // {steps: [[stop, keys]]} during a look-ahead future
+        lookahead: false,       // the look-ahead plays (azahar_ai_lookahead.js) …
+        idle: false,            // … and NitroGen waits between its futures
         skipped: 0,             // actions that never had a frame of their own
         lastMs: 0,
         heldMs: 0,
@@ -144,7 +171,7 @@
             throw error;
         } finally {
             busy = '';
-            els.progress.hidden = true;
+            els.modelProgress.hidden = true;
             render();
         }
     }
@@ -161,6 +188,70 @@
         meta = null;
         setStatus('Model deleted from this browser.', '');
         render();
+    }
+
+    // ── The widget's models: NitroGen's and the planner's ────────
+
+    // NitroGen's entry; the planner's come from azahar_ai_planner.js.
+    function nitrogenEntry() {
+        return {id: 'nitrogen', label: 'NitroGen', role: 'System 1', stored: Boolean(meta), busy: busy === 'download',
+            size: meta ? `${megabytes(meta.bytes)} kept` : `${(SOURCE_BYTES / 1e9).toFixed(2)} GB download, ` +
+                `${megabytes(NITROGEN_KEPT_BYTES)} kept`};
+    }
+
+    function modelEntries() {
+        return [nitrogenEntry(), ...(window.AzaharAIPlanner?.models() || [])];
+    }
+
+    function renderModels() {
+        if (!els.models) return;
+        const entries = modelEntries();
+        const selected = els.models.value || 'nitrogen';
+        els.models.replaceChildren(...entries.map(entry => {
+            const option = document.createElement('option');
+            option.value = entry.id;
+            option.textContent = `${entry.label} · ${entry.role} — ` + (entry.busy ? 'downloading…'
+                : entry.stored ? `✓ downloaded (${entry.size})` : `not downloaded (${entry.size})`);
+            return option;
+        }));
+        els.models.value = entries.some(entry => entry.id === selected) ? selected : 'nitrogen';
+        const entry = entries.find(item => item.id === els.models.value);
+        const nitrogen = entry.id === 'nitrogen';
+        els.modelInfo.innerHTML = nitrogen ? NITROGEN_INFO : window.AzaharAIPlanner.info(entry.id);
+        els.stored.textContent = nitrogen ? (meta
+            ? `Downloaded ${new Date(meta.preparedAt).toLocaleDateString()} from revision ` +
+              `${meta.source.revision.slice(0, 7)}: ${megabytes(meta.bytes)} kept in this browser.`
+            : 'Not downloaded. Nothing is fetched until you press Download.')
+            : (entry.busy ? entry.status || 'Downloading…'
+                : entry.stored ? 'Downloaded: kept in this browser until you delete it.'
+                : 'Not downloaded. Nothing is fetched until you press Download.');
+        els.download.hidden = entry.stored || entry.busy;
+        els.download.textContent = nitrogen ? `⬇ Download NitroGen (${(SOURCE_BYTES / 1e9).toFixed(2)} GB from huggingface.co)`
+            : `⬇ Download ${entry.label} (${entry.size.replace(' download', '')} from ${entry.from})`;
+        els.cancel.hidden = !entry.busy;
+        els.remove.hidden = !entry.stored || entry.busy;
+        els.remove.textContent = `🗑 Delete ${entry.label}`;
+    }
+
+    function selectedModel() {
+        return els.models?.value || 'nitrogen';
+    }
+
+    function downloadSelected() {
+        const id = selectedModel();
+        if (id === 'nitrogen') return void download().catch(() => {});
+        void window.AzaharAIPlanner.download(id).catch(() => {});
+    }
+
+    function cancelSelected() {
+        if (selectedModel() === 'nitrogen') cancelDownload();
+        else window.AzaharAIPlanner.cancelDownload();
+    }
+
+    function removeSelected() {
+        const id = selectedModel();
+        if (id === 'nitrogen') return void removeModel();
+        void window.AzaharAIPlanner.remove(id);
     }
 
     // ── Seeing the top screen ────────────────────────────────────
@@ -294,7 +385,9 @@
             // (Lockstep stops the game exactly on a frame's boundary; rounding must not put
             // it a hair before.)
             step = Math.floor((now - chunk.t0) / FRAME_US + 1e-6);
-            if (step >= HORIZON) {
+            // Waiting for decisions, only the first `execute` actions play: the next decision
+            // sees the game sooner (receding horizon), reacting faster.
+            if (step >= HORIZON || (agent.waitForModel && step >= agent.execute)) {
                 agent.chunk = null;
                 step = -1;
             }
@@ -347,14 +440,22 @@
 
     // Captures waiting for the next frame (tests): the canvas holds a WebGL frame only
     // until the browser shows it, so it is read here, right after the frame is drawn.
+    // A frame shown while the game is held (no game time passed) can come back blank, so
+    // screen waiters can ask for a frame the game moved on.
     const frameWaiters = [];
-    const screenWaiters = [];
+    let screenWaiters = [];
+    let lastFrameUs = null;
 
     // Called by azahar_ui.js after every frame the emulator presents.
     function afterFrame() {
-        if (screenWaiters.length) {
+        const frameUs = window.AzaharUI?.getGuestTimeUs?.();
+        const moved = frameUs !== lastFrameUs;
+        lastFrameUs = frameUs;
+        const ready = screenWaiters.filter(waiter => moved || !waiter.moved);
+        if (ready.length) {
+            screenWaiters = screenWaiters.filter(waiter => !ready.includes(waiter));
             const screens = captureScreens();
-            for (const resolve of screenWaiters.splice(0)) resolve(screens);
+            for (const waiter of ready) waiter.resolve(screens);
         }
         if (frameWaiters.length) {
             const seen = captureInput();
@@ -365,19 +466,32 @@
         if (!agent.playing || !agent.loaded) return;
         const now = window.AzaharUI.getGuestTimeUs();
         if (now === null || now === undefined) return;
+        // Looking ahead, it watches its futures and replays, and the planner looks at the
+        // committed game only (the look-ahead asks it).
+        if (agent.lookahead) window.AzaharAILookahead.onFrame(now);
+        if (agent.idle) return;
         const planner = window.AzaharAIPlanner;
-        planner?.afterFrame(now);
+        if (!agent.lookahead) planner?.afterFrame(now);
         if (planner?.driving(now)) {
-            // The planner is working a menu itself: NitroGen waits, holding nothing.
+            // The planner is working a menu itself: NitroGen waits, holding nothing (in
+            // lockstep the game moves on a frame at a time meanwhile).
             agent.chunk = null;
             applyStep(now);
+            if (agent.lockstep) window.AzaharUI.setGuestStopUs(now + FRAME_US);
             return;
         }
         applyStep(now);
+        // A look-ahead future may hold some keys itself for its first moments (a held jump).
+        const forced = agent.recording?.force;
+        if (forced && now < forced.until) hold(forced.codes);
         // Lockstep: the game runs to the end of this action's frame and no further, however
         // fast it can run; without actions to play, it waits where it is.
         if (agent.lockstep) {
-            window.AzaharUI.setGuestStopUs(agent.chunk ? Math.max(agent.chunk.t0 + (agent.step + 1) * FRAME_US, now + 1) : now);
+            const stop = agent.chunk ? Math.max(agent.chunk.t0 + (agent.step + 1) * FRAME_US, now + 1) : now;
+            window.AzaharUI.setGuestStopUs(stop);
+            // A look-ahead future: each stop with the keys held on the way to it, to replay
+            // exactly (the same stops and keys from the same state make the same game).
+            if (agent.recording) agent.recording.steps.push([stop, [...agent.codes]]);
         }
         // Waiting: decide once the last decision's actions are used up. Real time: keep
         // a decision under way, so new actions arrive as soon as the model can make them.
@@ -389,13 +503,21 @@
     // frame, so every action is held for exactly one frame of game time at any speed.
     function setLockstep(on) {
         agent.lockstep = Boolean(on);
-        agent.waitForModel = agent.lockstep || Boolean(els.wait?.checked);
+        agent.waitForModel = agent.lockstep || els.timing?.value === 'wait';
         window.AzaharUI?.setUncapped?.(agent.lockstep);
         if (!agent.lockstep) window.AzaharUI?.setGuestStopUs?.(0);
     }
 
+    // How many of a decision's 18 actions play before the next one, when the game waits
+    // for decisions (Wait and Lockstep timing).
+    function setExecute(count) {
+        agent.execute = Math.max(1, Math.min(HORIZON, Math.round(count) || HORIZON));
+    }
+
     function shouldHold() {
-        return agent.playing && agent.waitForModel && agent.thinking !== null;
+        // NitroGen deciding (Wait and Lockstep timing), or the planner looking (its own option).
+        return (agent.playing && agent.waitForModel && agent.thinking !== null) ||
+            Boolean(agent.playing && window.AzaharAIPlanner?.holds());
     }
 
     async function start() {
@@ -425,7 +547,10 @@
         agent.unchanged = 0;
         agent.light = 0;
         agent.skipped = 0;
-        if (agent.lockstep) setLockstep(true);
+        // Looking ahead, NitroGen plays each future in lockstep (whatever the Timing).
+        agent.lookahead = Boolean(window.AzaharAILookahead?.enabled());
+        agent.idle = agent.lookahead;
+        if (agent.lockstep || agent.lookahead) setLockstep(true);
         // A new game, or the same one again: the mixture checks itself from scratch.
         await request('reset').catch(() => {});
         agent.playing = true;
@@ -435,12 +560,52 @@
         agent.thinking = null;
         renderPlaying();
         render();
-        if (!window.AzaharUI?.isPlaying?.()) setStatus('The AI plays as soon as a game is running.', '');
+        if (!window.AzaharUI?.isPlaying?.()) {
+            setStatus('The AI plays as soon as a game is running.', '');
+            if (agent.lookahead) {
+                await new Promise(resolve => {
+                    const wait = setInterval(() => {
+                        if (window.AzaharUI?.isPlaying?.() || !agent.playing) resolve(clearInterval(wait));
+                    }, 250);
+                });
+            }
+        }
+        if (agent.lookahead && agent.playing) {
+            // It plays until stopped (or until it fails, which it says itself).
+            void window.AzaharAILookahead.run().then(() => stop());
+        }
+    }
+
+    // A look-ahead future: NitroGen plays on from here in lockstep, recording its stops and
+    // keys, until stopped; `force` ({codes, frames}): keys held instead for its first frames.
+    function rollout(force = null) {
+        agent.recording = {steps: [], force: force && {codes: force.codes,
+            until: window.AzaharUI.getGuestTimeUs() + force.frames * FRAME_US}};
+        agent.chunk = null;
+        agent.thinking = null;
+        agent.idle = false;
+        return {
+            take: () => [...(agent.recording?.steps || [])],
+            stop: () => {
+                agent.idle = true;
+                agent.recording = null;
+                agent.chunk = null;
+                agent.thinking = null;
+                hold([]);
+            },
+        };
     }
 
     function stop() {
         if (!agent.playing) return;
         agent.playing = false;
+        if (agent.lookahead) {
+            window.AzaharAILookahead.stop();
+            agent.lookahead = false;
+            agent.idle = false;
+            agent.recording = null;
+            setLockstep(els.timing?.value === 'lockstep');
+        }
         // The game goes on by itself again (lockstep stays chosen for the next start).
         window.AzaharUI?.setGuestStopUs?.(0);
         window.AzaharUI?.setUncapped?.(false);
@@ -465,8 +630,8 @@
     }
 
     function showDownloadProgress({phase, received, total, seconds}) {
-        els.progress.hidden = false;
-        els.progress.value = total ? (received / total) * 100 : 0;
+        els.modelProgress.hidden = false;
+        els.modelProgress.value = total ? (received / total) * 100 : 0;
         if (phase === 'verify') {
             setStatus('Checking the quantized model against the reference conversion…', '');
         } else if (phase === 'light') {
@@ -508,7 +673,9 @@
                 : ` (checked against NitroGen: acts alike, ${verify.disagreement.toFixed(3)})`;
         }
         let mode = '';
-        if (agent.waitForModel) {
+        if (agent.lookahead) {
+            mode = ' · looking ahead (System 2)';
+        } else if (agent.waitForModel) {
             if (elapsed > 0) mode = ` · the game waited ${Math.round(100 * agent.heldMs / elapsed)}% of the time`;
         } else if (agent.lastMs > HORIZON * FRAME_US / 1000) {
             // A decision covers 18 frames (0.3 s); slower ones leave the game without input.
@@ -522,20 +689,13 @@
     function render() {
         if (!els.card) return;
         const cached = Boolean(meta);
-        els.download.hidden = cached || busy === 'download';
-        els.cancel.hidden = busy !== 'download';
-        els.remove.hidden = !cached && busy !== 'download';
-        els.remove.disabled = busy === 'download';
+        renderModels();
         els.play.disabled = !cached || Boolean(busy);
         els.play.textContent = agent.playing ? '✋ Take back control' : '🤖 Let the AI play';
         els.play.classList.toggle('btn-primary', !agent.playing);
         els.play.classList.toggle('btn-secondary', agent.playing);
         els.keys.hidden = !agent.playing;
         if (!agent.playing && els.view) els.view.hidden = true;
-        els.stored.textContent = cached
-            ? `Downloaded ${new Date(meta.preparedAt).toLocaleDateString()} from revision ` +
-              `${meta.source.revision.slice(0, 7)}: ${megabytes(meta.bytes)} kept in this browser.`
-            : 'Not downloaded. Nothing is fetched until you press Download.';
     }
 
     function renderExpert() {
@@ -550,23 +710,35 @@
         if (!els.card) return;
         Object.assign(els, {
             play: $('btn-ai-play'), status: $('ai-status'), progress: $('ai-progress'),
-            view: $('ai-view'), keys: $('ai-keys'), wait: $('ai-wait'), menu: $('ai-menu'),
-            expert: $('ai-expert'), expertHelp: $('ai-expert-help'),
+            view: $('ai-view'), keys: $('ai-keys'), timing: $('ai-timing'), timingHelp: $('ai-timing-help'),
+            menu: $('ai-menu'), expert: $('ai-expert'), expertHelp: $('ai-expert-help'),
+            models: $('ai-models'), modelInfo: $('ai-model-info'), modelProgress: $('ai-model-progress'),
             download: $('btn-ai-download'), cancel: $('btn-ai-cancel'), remove: $('btn-ai-delete'),
             stored: $('ai-stored'),
         });
-        els.download.textContent = `⬇ Download model (${(SOURCE_BYTES / 1e9).toFixed(2)} GB from huggingface.co)`;
         els.play.addEventListener('click', () => (agent.playing ? stop() : void start()));
-        els.download.addEventListener('click', () => void download().catch(() => {}));
-        els.cancel.addEventListener('click', cancelDownload);
-        els.remove.addEventListener('click', () => void removeModel());
-        els.wait.addEventListener('change', () => {
-            agent.waitForModel = els.wait.checked;
+        els.download.addEventListener('click', downloadSelected);
+        els.cancel.addEventListener('click', cancelSelected);
+        els.remove.addEventListener('click', removeSelected);
+        els.models.addEventListener('change', renderModels);
+        // The planner's models changed (downloaded, deleted, downloading).
+        window.addEventListener('azahar-ai-models', render);
+        try {
+            const saved = localStorage.getItem(TIMING_KEY);
+            if (TIMING_HELP[saved]) els.timing.value = saved;
+        } catch (_) {}
+        const applyTiming = () => {
+            setLockstep(els.timing.value === 'lockstep');
+            els.timingHelp.textContent = TIMING_HELP[els.timing.value];
+        };
+        els.timing.addEventListener('change', () => {
+            try { localStorage.setItem(TIMING_KEY, els.timing.value); } catch (_) {}
+            applyTiming();
         });
+        applyTiming();
         els.menu.addEventListener('change', () => {
             agent.allowMenu = els.menu.checked;
         });
-        agent.waitForModel = els.wait.checked;
         agent.allowMenu = els.menu.checked;
         try {
             const saved = localStorage.getItem(EXPERT_KEY);
@@ -600,7 +772,7 @@
         // the keys an action would hold.
         captureInput,
         nextFrameInput: () => new Promise(resolve => frameWaiters.push(resolve)),
-        nextFrameScreens: () => new Promise(resolve => screenWaiters.push(resolve)),
+        nextFrameScreens: (moved = false) => new Promise(resolve => screenWaiters.push({resolve, moved})),
         // Only right after a frame (afterFrame): the canvas holds the frame until it is shown.
         captureScreens,
         act: (pixels, noise, noises, guide) => request('act', {pixels, noise, noises, guide: guide?.guide,
@@ -612,6 +784,9 @@
         }),
         keysFor: (actions, step) => window.AzaharInput.padCodes(padFor(actions, step)),
         setLockstep,
+        setExecute,
+        rollout,
+        renderModels,
         stats: () => ({playing: agent.playing, decisions: agent.decisions, unchanged: agent.unchanged, light: agent.light,
             lockstep: agent.lockstep, skipped: agent.skipped,
             lastMs: agent.lastMs,

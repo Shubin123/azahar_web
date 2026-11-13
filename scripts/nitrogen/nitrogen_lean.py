@@ -126,7 +126,9 @@ def distill(args):
     frozen denoiser predicts from the student's features, at the states of the teacher's own
     Euler steps from fresh noise, against the teacher's (in units of how much they change
     with another frame, as nitrogen_light_expert.py's PolicyLoss), plus the VL layers'
-    output against the teacher's, pooled the same way. EMA weights, as NVIDIA's training."""
+    output against the teacher's, pooled the same way. EMA weights, as NVIDIA's training.
+    --anchor (L2-SP, Li et al. 2018) pulls the weights toward NVIDIA's own, so that fitting
+    the training games does not wear away what NitroGen learned from a thousand others."""
     official = nv.Official(args.nitrogen_src, args.ckpt)
     device = official.device
     official.model.requires_grad_(False)
@@ -134,6 +136,7 @@ def distill(args):
     student = PooledStudent(official.model.vision_encoder, args.pool_from).to(device)
     student.requires_grad_(True)
     ema = copy.deepcopy(student).requires_grad_(False)
+    anchor = [p.detach().clone() for p in student.parameters()]
     images = le.frames_in(args.train)
     print(f'{len(images)} training frames; student: layers {args.pool_from}-23 on 64 tokens, '
           f'{sum(p.numel() for p in student.parameters()) / 1e6:.0f}M parameters', flush=True)
@@ -173,6 +176,9 @@ def distill(args):
                                 / velocity_scale[k] for k in range(len(states))) / len(states)
             vl_loss = (((vl_s - pool_tokens(vl_t)) / vl_scale) ** 2).mean()
             loss = velocity_loss + args.vl_weight * vl_loss
+        if args.anchor:
+            drift = sum((p.float() - a.float()).pow(2).sum() for p, a in zip(student.parameters(), anchor))
+            loss = loss + args.anchor * drift
         optimizer.zero_grad(set_to_none=True)
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
@@ -379,6 +385,7 @@ def main():
     p.add_argument('--steps', type=int, default=4)
     p.add_argument('--lr', type=float, default=2e-5)
     p.add_argument('--vl-weight', type=float, default=0.5)
+    p.add_argument('--anchor', type=float, default=0.0, help='L2-SP weight toward NVIDIA\'s weights')
     p.add_argument('--ema', type=float, default=0.999)
     p.add_argument('--out', required=True)
     p = sub.add_parser('distill-head', help='train a one-step action head with NitroGen as its teacher')

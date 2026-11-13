@@ -41,11 +41,9 @@ async function bootGame(page, rom, state) {
 async function run(page, state, mode, decisions) {
     await restoreState(page, state);
     await page.evaluate(mode => {
-        window.AzaharAIPlayer.setLockstep(mode === 'lockstep');
         window.AzaharUI.getModule()._azahar_set_fast_forward(mode === 'fast' ? 4 : 1);
-        const wait = document.querySelector('#ai-wait');
-        if (!wait.checked) wait.click();
     }, mode);
+    await page.select('#ai-timing', mode === 'lockstep' ? 'lockstep' : 'wait');
     const start = await page.evaluate(() => window.AzaharUI.getGuestTimeUs());
     const started = Date.now();
     await page.click('#btn-ai-play');
@@ -66,10 +64,8 @@ async function run(page, state, mode, decisions) {
     const seconds = (Date.now() - started) / 1000;
     const end = await page.evaluate(() => ({guest: window.AzaharUI.getGuestTimeUs(), stats: window.AzaharAIPlayer.stats()}));
     await page.click('#btn-ai-play');
-    await page.evaluate(() => {
-        window.AzaharAIPlayer.setLockstep(false);
-        window.AzaharUI.getModule()._azahar_set_fast_forward(1);
-    });
+    await page.select('#ai-timing', 'realtime');
+    await page.evaluate(() => window.AzaharUI.getModule()._azahar_set_fast_forward(1));
     const gameSeconds = (end.guest - start) / 1e6;
     return {mode, decisions: end.stats.decisions, wallSeconds: +seconds.toFixed(2), gameSeconds: +gameSeconds.toFixed(2),
         decisionsPerSecond: +(end.stats.decisions / seconds).toFixed(2), gamePace: +(gameSeconds / seconds).toFixed(2),

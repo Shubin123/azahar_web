@@ -2286,6 +2286,7 @@ void main() { frag_color = vec4(1.0); }`);
     // ── Public API for Shared Library & External Integration ─────
     window.AzaharUI = {
         loadRomBytes,
+        getRomName: () => romName,
         initializeEmulator,
         isInitialized: () => initialized,
         isRunning: () => running,

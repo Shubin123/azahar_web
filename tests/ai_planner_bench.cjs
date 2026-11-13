@@ -8,7 +8,8 @@
 // parsed.
 //
 //   node tests/ai_planner_bench.cjs [--models qwen3.5-0.8b,lfm2.5-vl-450m]
-//        [--frames tmp_test/ai_planner_frames] [--per-scene 4] [--notes "..."] [--scenes REGEX]
+//        [--frames tmp_test/ai_planner_frames] [--per-scene 4] [--notes "..."] [--scenes REGEX] [--read]
+//        [--question "..." --images DIR]   (only that question, on every PNG in DIR, timed)
 //
 // Scenes are the subfolders of --frames; Pokémon scenes are left out (the planner is not
 // judged on Pokémon) unless --scenes picks them.
@@ -22,6 +23,7 @@ const cfg = require('./config.cjs');
 const common = require('./ai_common.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
+const flag = name => process.argv.includes(name);
 const option = (name, fallback = null) => {
     const index = process.argv.indexOf(name);
     return index >= 0 ? process.argv[index + 1] : fallback;
@@ -65,8 +67,8 @@ async function main() {
             let id = 0;
             const pending = new Map();
             worker.onmessage = ({data}) => {
-                if (data.type === 'progress') {
-                    window.__plannerProgress = data;
+                if (data.type === 'progress' || data.type === 'status') {
+                    if (data.type === 'progress') window.__plannerProgress = data;
                     return;
                 }
                 const request = pending.get(data.id);
@@ -83,6 +85,23 @@ async function main() {
             console.log(`== ${name}`);
             const loaded = await page.evaluate(name => window.__planner('load', {name}), name);
             console.log(`  loaded ${loaded.repo}@${loaded.revision.slice(0, 7)} in ${loaded.loadSeconds.toFixed(1)} s`);
+            if (option('--question')) {
+                const dir = path.resolve(option('--images'));
+                for (const file of fs.readdirSync(dir).filter(f => f.endsWith('.png')).sort()) {
+                    const png = fs.readFileSync(path.join(dir, file)).toString('base64');
+                    const answer = await page.evaluate(async (png, question) => {
+                        const bytes = Uint8Array.from(atob(png), c => c.charCodeAt(0));
+                        const bitmap = await createImageBitmap(new Blob([bytes], {type: 'image/png'}));
+                        const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+                        canvas.getContext('2d').drawImage(bitmap, 0, 0);
+                        const image = canvas.getContext('2d').getImageData(0, 0, bitmap.width, bitmap.height);
+                        return window.__planner('ask', {screens: {data: image.data, width: image.width, height: image.height},
+                            question, maxTokens: 8});
+                    }, png, option('--question'));
+                    console.log(`  ${file}: ${JSON.stringify(answer.text)} (${Math.round(answer.ms)} ms)`);
+                }
+                continue;
+            }
             const results = [];
             let previous = null;
             for (const frame of frames) {
@@ -95,27 +114,32 @@ async function main() {
                     context.drawImage(bitmap, 0, 0);
                     const image = context.getImageData(0, 0, bitmap.width, bitmap.height);
                     const screens = {data: image.data, width: image.width, height: image.height};
+                    // The page's two kinds of look: with the goal (every few looks) and the short one.
                     return {
-                        read: await window.__planner('ask', {screens, question: read}),
-                        plan: await window.__planner('plan', {screens, notes, previous}),
+                        read: read ? await window.__planner('ask', {screens, question: read}) : null,
+                        plan: await window.__planner('plan', {screens, notes, previous, withGoal: true}),
+                        act: await window.__planner('plan', {screens, notes, previous, withGoal: false}),
                     };
-                }, png, READ, option('--notes', ''), previous);
-                previous = answer.plan.plan;
+                }, png, flag('--read') ? READ : null, option('--notes', ''), previous);
+                previous = answer.plan.plan || previous;
                 results.push({...frame, file: path.relative(ROOT, frame.file), ...answer});
-                console.log(`  ${frame.scene}/${frame.name}: read ${Math.round(answer.read.ms)} ms ` +
-                    `(${answer.read.newTokens} tokens), plan ${Math.round(answer.plan.ms)} ms ` +
-                    `${answer.plan.plan ? JSON.stringify(answer.plan.plan) : `UNPARSED ${JSON.stringify(answer.plan.text)}`}`);
+                const show = look => (look.plan ? JSON.stringify(look.plan) : `UNPARSED ${JSON.stringify(look.text)}`);
+                console.log(`  ${frame.scene}/${frame.name}: ` +
+                    (answer.read ? `read ${Math.round(answer.read.ms)} ms; ` : '') +
+                    `with goal ${Math.round(answer.plan.ms)} ms (${answer.plan.newTokens} tokens) ${show(answer.plan)}; ` +
+                    `short ${Math.round(answer.act.ms)} ms (${answer.act.newTokens} tokens) ${show(answer.act)}`);
             }
-            const plans = results.map(result => result.plan);
+            const plans = results.map(result => result.plan), acts = results.map(result => result.act);
             const summary = {
                 model: name, repo: loaded.repo, revision: loaded.revision, loadSeconds: loaded.loadSeconds,
                 frames: results.length, parsed: plans.filter(plan => plan.plan).length,
-                planMs: common.median(plans.map(plan => plan.ms)),
-                readMs: common.median(results.map(result => result.read.ms)),
-                tokensPerSecond: common.median(results.map(result => result.read.newTokens / (result.read.ms / 1000))),
+                actsParsed: acts.filter(act => act.plan).length,
+                planMs: common.median(plans.map(plan => plan.ms)), actMs: common.median(acts.map(act => act.ms)),
+                tokensPerSecond: common.median(plans.map(plan => plan.newTokens / (plan.ms / 1000))),
             };
-            console.log(`  ${name}: ${summary.parsed}/${summary.frames} plans parsed, plan median ${Math.round(summary.planMs)} ms, ` +
-                `read median ${Math.round(summary.readMs)} ms (~${summary.tokensPerSecond.toFixed(1)} tokens/s incl. the image)`);
+            console.log(`  ${name}: with goal ${Math.round(summary.planMs)} ms median (${summary.parsed}/${summary.frames} ` +
+                `parsed), short ${Math.round(summary.actMs)} ms median (${summary.actsParsed}/${summary.frames} parsed); ` +
+                `~${summary.tokensPerSecond.toFixed(1)} tokens/s incl. the image`);
             fs.writeFileSync(path.join(out, `${name}.json`), JSON.stringify({summary, results}, null, 1));
         }
     } finally {

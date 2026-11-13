@@ -28,6 +28,9 @@
 //     change the game, in real time (the game not held, a new decision at least every 18
 //     frames) and waiting for each decision (one per 18 frames of game time); taking back
 //     control releases them. A planner's touch reaches the bottom screen.
+//     Looking ahead (System 2's Look ahead, azahar_ai_lookahead.js), each step tries 4
+//     futures from a saved state and replays the best one exactly (the game then matches what
+//     that future showed), and taking back control lets the game run on.
 //  7. Delete model empties the browser's model storage.
 //
 //   node tests/ai_player.test.cjs --ckpt ng.pt [--frames tmp_test/ai_frames/valid]
@@ -207,9 +210,7 @@ async function run(page, state, ai, wait = false) {
     if (state) await restoreState(page, state);
     await waitGuest(page, (await frameNow(page)).guestUs, SETTLE_SECONDS);
     if (ai) {
-        await page.$eval('#ai-wait', (box, wait) => {
-            if (box.checked !== wait) box.click();
-        }, wait);
+        await page.select('#ai-timing', wait ? 'wait' : 'realtime');
     }
     const start = await frameNow(page);
     const started = Date.now();
@@ -271,6 +272,30 @@ async function tapEffect(page, state, point) {
     return changes;
 }
 
+// System 2's Look ahead from the state: two steps (each tries 4 futures from a saved state and
+// replays the best one), then taking back control.
+async function lookAhead(page, state) {
+    if (state) await restoreState(page, state);
+    const toggle = on => page.evaluate(on => {
+        const box = document.querySelector('#ai-lookahead');
+        box.checked = on;
+        box.dispatchEvent(new Event('change'));
+    }, on);
+    await toggle(true);
+    await page.click('#btn-ai-play');
+    await page.waitForFunction(() => window.AzaharAILookahead.stats().steps >= 2 || window.AzaharAILookahead.stats().error,
+        {timeout: 600000, polling: 500});
+    const stats = await page.evaluate(() => window.AzaharAILookahead.stats());
+    await page.click('#btn-ai-play');
+    await page.waitForFunction(() => !window.AzaharAILookahead.running(), {timeout: 120000});
+    await toggle(false);
+    const before = await page.evaluate(() => window.AzaharUI.getGuestTimeUs());
+    await sleep(1000);
+    const after = await page.evaluate(before => ({guestMoved: window.AzaharUI.getGuestTimeUs() > before,
+        playing: window.AzaharAIPlayer.isPlaying(), pressed: window.AzaharInput.getPressedCodes()}), before);
+    return {stats, after};
+}
+
 async function playthrough(page, state) {
     console.log(`  game running; runs of ${RUN_SECONDS} s of game time from the same state`);
     const out = path.join(ROOT, 'tmp_test', 'ai_player');
@@ -313,6 +338,14 @@ async function playthrough(page, state) {
         waiting.held.size > 0 && effect(waiting) > Math.max(2.0, 2 * noise), `${effect(waiting).toFixed(2)} vs ${noise.toFixed(2)}`);
     check('taking back control stops the AI and releases its keys',
         !after.playing && after.codes.length === 0, JSON.stringify(after));
+    const ahead = await lookAhead(page, state);
+    console.log(`  look ahead: ${ahead.stats.steps} steps, last ${ahead.stats.tried.map(f => `${f.plan} ` +
+        `${!f.alive ? 'dies' : !f.moving ? 'stuck' : 'ok'}`).join(', ')} -> ${ahead.stats.chosen}`);
+    check('looking ahead, each step tries 4 futures and replays the best one exactly',
+        !ahead.stats.error && ahead.stats.steps >= 2 && ahead.stats.tried.length >= 4 && ahead.stats.replayError < 10,
+        `${ahead.stats.error || ''} replay ${ahead.stats.replayError.toFixed(3)} apart`);
+    check('taking back control from the look-ahead lets the game run on with no keys held',
+        !ahead.after.playing && ahead.after.guestMoved && ahead.after.pressed.length === 0, JSON.stringify(ahead.after));
     if (!flag('--planner-checks') || !option('--tap')) return;
     const point = option('--tap').split(',').map(Number);
     const touched = await tapEffect(page, state, point);
@@ -379,7 +412,7 @@ async function main() {
         }));
         check('the planner is off until chosen, and the widget names its models, origin, license and runtime',
             planner.choice === 'off' && planner.options.length > 1 &&
-            ['Planner (System 2)', 'huggingface.co', 'Transformers.js', 'cdn.jsdelivr.net', 'Apache 2.0']
+            ['System 2', 'Planner', 'huggingface.co', 'Transformers.js', 'cdn.jsdelivr.net', 'Apache 2.0']
                 .every(text => planner.text.includes(text)), planner.options.join(', '));
 
         // 2. The real origin works from this page.
@@ -469,7 +502,7 @@ async function main() {
 
         // 6. Delete.
         if (!flag('--keep-model')) {
-            await page.click('#ai-model summary');
+            await page.select('#ai-models', 'nitrogen');
             await page.click('#btn-ai-delete');
             await page.waitForFunction(() => !document.querySelector('#btn-ai-download').hidden, {timeout: 30000});
             const gone = await page.evaluate(async () => ({

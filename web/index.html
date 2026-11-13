@@ -441,8 +441,13 @@
         #ai-progress { width: 100%; height: 7px; margin-top: 6px; accent-color: #e94560; }
         .ai-live { display: flex; gap: 8px; align-items: flex-start; margin-top: 6px; }
         #ai-view { width: 96px; height: 96px; flex: none; border: 1px solid #0f3460; border-radius: 4px; }
-        #ai-player-card details { margin-top: 8px; }
-        #ai-player-card summary { cursor: pointer; font-size: 0.8rem; margin-bottom: 6px; }
+        #ai-player-card .ai-section { margin-top: 12px; padding-top: 10px; border-top: 1px solid #0f3460; }
+        #ai-player-card .ai-section-title { display: block; font-size: 0.8rem; font-weight: 600; margin-bottom: 6px; }
+        #ai-player-card textarea { width: 100%; margin-top: 6px; box-sizing: border-box; }
+        #ai-player-card .ai-stored { margin-top: 6px; }
+        #ai-player-card .ai-model-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+        #ai-player-card [hidden] { display: none !important; }
+        #ai-planner-progress, #ai-model-progress { width: 100%; height: 7px; margin-top: 6px; accent-color: #e94560; }
         #ai-player-card a { color: #8ab4ff; }
 
         #status {
@@ -1312,7 +1317,7 @@
 
             <div class="card" id="ai-player-card" data-widget="ai-player">
                 <h2>🤖 AI Player</h2>
-                <div class="mode-help">NVIDIA's NitroGen plays for you: it watches the top screen and holds the keys a controller would. Your own keys and controller still work.</div>
+                <div class="mode-help">NVIDIA's NitroGen plays for you (System 1: it reacts to the top screen several times a second), and a planner can steer it (System 2: a vision-language model that reads both screens and your notes every few seconds). Your own keys and controller still work.</div>
                 <button type="button" class="btn btn-primary" id="btn-ai-play" disabled style="margin-top:8px;">🤖 Let the AI play</button>
                 <div id="ai-status" class="mode-help" aria-live="polite"></div>
                 <progress id="ai-progress" max="100" value="0" hidden></progress>
@@ -1320,65 +1325,73 @@
                     <canvas id="ai-view" width="256" height="256" hidden aria-label="What the AI sees"></canvas>
                     <div id="ai-keys" class="mode-help" hidden></div>
                 </div>
-                <label for="ai-expert" class="mode-help" style="display:block;margin-top:12px;margin-bottom:4px;">
-                    Image encoder
-                </label>
-                <select id="ai-expert" class="renderer-select" aria-label="Image encoder">
-                    <option value="heavy" selected>NitroGen only — as NVIDIA published it</option>
-                    <option value="gate">Mixture — faster in the games its light expert learned</option>
-                    <option value="light">Light expert only — fastest, only for those games</option>
-                </select>
-                <div id="ai-expert-help" class="mode-help"></div>
-                <label for="ai-planner-model" class="mode-help" style="display:block;margin-top:12px;margin-bottom:4px;">
-                    Planner (System 2)
-                </label>
-                <select id="ai-planner-model" class="renderer-select" aria-label="Planner model">
-                    <option value="off">Off — NitroGen plays on its own</option>
-                    <option value="qwen3.5-0.8b">Qwen3.5-0.8B — 850 MB download</option>
-                    <option value="lfm2.5-vl-450m">LFM2.5-VL-450M — 490 MB download</option>
-                </select>
-                <progress id="ai-planner-progress" max="100" value="0" hidden></progress>
-                <div id="ai-planner-status" class="mode-help"></div>
-                <textarea id="ai-planner-notes" class="library-input" rows="3" style="width:100%;margin-top:6px;box-sizing:border-box;"
-                          aria-label="Notes for the planner"
-                          placeholder="Notes for the planner: quest log, the task at hand, manual pages…"></textarea>
-                <div class="mode-help">
-                    A small vision-language model looks at both screens every few seconds, with these notes, and steers NitroGen:
-                    where to head and which buttons to favour or avoid. In menus, dialogues and on the bottom screen it presses and
-                    touches by itself. Models from huggingface.co (onnx-community, pinned revisions; Qwen3.5: Apache 2.0,
-                    LFM2.5-VL: LFM Open License v1.0), run with Transformers.js from cdn.jsdelivr.net; fetched only when you choose
-                    one, then kept in this browser.
-                    <button type="button" class="btn btn-secondary" id="btn-ai-planner-delete" hidden
-                            style="margin-top:6px;padding:4px 8px;font-size:0.7rem;">🗑 Delete planner models</button>
+
+                <div class="ai-section">
+                    <label for="ai-timing" class="ai-section-title">Timing</label>
+                    <select id="ai-timing" class="renderer-select" aria-label="Timing">
+                        <option value="realtime" selected>Real time — the game never waits for the AI</option>
+                        <option value="wait">Wait — the game pauses while the AI thinks</option>
+                        <option value="lockstep">Lockstep — as fast as the AI decides, every action on its frame</option>
+                    </select>
+                    <div id="ai-timing-help" class="mode-help"></div>
+                    <label class="mode-help audio-toggle">
+                        <input type="checkbox" id="ai-menu">
+                        Let it press Start and Select (never HOME)
+                    </label>
                 </div>
-                <label class="mode-help audio-toggle">
-                    <input type="checkbox" id="ai-wait">
-                    Pause the game while the AI thinks, as NVIDIA's own player does: for devices too slow for real time (off: the game runs on while the AI decides, and actions that come too late are skipped)
-                </label>
-                <label class="mode-help audio-toggle">
-                    <input type="checkbox" id="ai-menu">
-                    Let it press Start and Select (never HOME)
-                </label>
-                <details id="ai-model">
-                    <summary>Model</summary>
+
+                <div class="ai-section">
+                    <label for="ai-expert" class="ai-section-title">System 1 · NitroGen's image encoder</label>
+                    <select id="ai-expert" class="renderer-select" aria-label="Image encoder">
+                        <option value="heavy" selected>NitroGen only — as NVIDIA published it</option>
+                        <option value="gate">Mixture — faster in the games its light expert learned</option>
+                        <option value="light">Light expert only — fastest, only for those games</option>
+                    </select>
+                    <div id="ai-expert-help" class="mode-help"></div>
+                </div>
+
+                <div class="ai-section">
+                    <div class="ai-section-title">System 2 · Planner</div>
+                    <label class="mode-help audio-toggle">
+                        <input type="checkbox" id="ai-lookahead">
+                        Look ahead: pause the game to try a few futures with NitroGen (run on, jump, dash and jump, unsteered)
+                        and play the best one (about 20× slower than real time)
+                    </label>
+                    <div id="ai-lookahead-status" class="mode-help" aria-live="polite"></div>
+                    <select id="ai-planner-model" class="renderer-select" aria-label="Planner model">
+                        <option value="off">Off — NitroGen plays on its own</option>
+                    </select>
+                    <label class="mode-help audio-toggle">
+                        <input type="checkbox" id="ai-planner-pause" checked>
+                        Pause the game while the planner thinks (its looks take seconds; off: the game runs on meanwhile)
+                    </label>
+                    <textarea id="ai-planner-notes" class="library-input" rows="3"
+                              aria-label="Notes for the planner"
+                              placeholder="Notes for the planner: quest log, the task at hand, manual pages…"></textarea>
+                    <progress id="ai-planner-progress" max="100" value="0" hidden></progress>
+                    <div id="ai-planner-status" class="mode-help" aria-live="polite"></div>
                     <div class="mode-help">
-                        <b>NitroGen</b> by NVIDIA, from <a href="https://huggingface.co/nvidia/NitroGen" target="_blank" rel="noopener">huggingface.co/nvidia/NitroGen</a>
-                        (revision 584c8dd), under the <a href="https://huggingface.co/nvidia/NitroGen/blob/main/LICENSE" target="_blank" rel="noopener">NVIDIA License</a>:
-                        non-commercial research use only. Download fetches NVIDIA's <code>ng.pt</code> straight from huggingface.co (nothing passes through this site),
-                        checks it, and quantizes it to 8 bits on this device; only that result (603 MB) is kept, in this browser's storage, until you delete it.
-                        The AI runs on this device with ONNX Runtime Web, fetched from cdn.jsdelivr.net the first time it starts.
+                        It steers NitroGen: where to head and which buttons to favour or avoid; in menus, dialogues and on the
+                        bottom screen it presses and touches by itself. Planner models come from huggingface.co (onnx-community,
+                        pinned revisions; Qwen3.5: Apache 2.0, LFM2.5-VL: LFM Open License v1.0) and run with Transformers.js
+                        from cdn.jsdelivr.net. Download them below.
                     </div>
-                    <div class="mode-help" style="margin-top:6px;">
-                        <b>Light expert</b>: Google's <a href="https://huggingface.co/google/siglip-base-patch16-224" target="_blank" rel="noopener">SigLIP-base/16</a>
-                        (Apache 2.0) with a projector after <a href="https://huggingface.co/ZeraG07/laya-vision" target="_blank" rel="noopener">Laya-Vision</a>'s,
-                        trained here to stand in for NitroGen's image encoder (<code>scripts/nitrogen/nitrogen_light_expert.py</code>).
-                        As it learned from NitroGen, the NVIDIA License applies to it too. Its weights (122 MB, 8 bits) come from this site with the download and are kept and deleted with the rest.
+                </div>
+
+                <div class="ai-section" id="ai-model">
+                    <label for="ai-models" class="ai-section-title">Models on this device</label>
+                    <select id="ai-models" class="renderer-select" aria-label="Models">
+                        <option value="nitrogen">NitroGen · System 1</option>
+                    </select>
+                    <div id="ai-model-info" class="mode-help"></div>
+                    <div id="ai-stored" class="mode-help ai-stored"></div>
+                    <progress id="ai-model-progress" max="100" value="0" hidden></progress>
+                    <div class="ai-model-actions">
+                        <button type="button" class="btn btn-secondary" id="btn-ai-download">⬇ Download</button>
+                        <button type="button" class="btn btn-secondary" id="btn-ai-cancel" hidden>Cancel download</button>
+                        <button type="button" class="btn btn-secondary" id="btn-ai-delete" hidden>🗑 Delete</button>
                     </div>
-                    <div id="ai-stored" class="mode-help" style="margin-top:6px;"></div>
-                    <button type="button" class="btn btn-secondary" id="btn-ai-download" style="margin-top:8px;">⬇ Download model</button>
-                    <button type="button" class="btn btn-secondary" id="btn-ai-cancel" hidden style="margin-top:8px;">Cancel download</button>
-                    <button type="button" class="btn btn-secondary" id="btn-ai-delete" hidden style="margin-top:8px;">🗑 Delete model</button>
-                </details>
+                </div>
             </div>
 
             <div class="card" id="fullscreen-card" data-widget="fullscreen">
@@ -1643,6 +1656,7 @@
     <script src="azahar_input.js"></script>
     <script src="azahar_ai_player.js"></script>
     <script src="azahar_ai_planner.js"></script>
+    <script src="azahar_ai_lookahead.js"></script>
     <script src="azahar_fullscreen.js"></script>
     <script src="azahar_touch_controls.js"></script>
     <script src="azahar_library.js"></script>
