@@ -94,9 +94,19 @@ function argVal(key, fallback) {
 }
 function argFlag(key) { return process.argv.includes(key); }
 
+// --- Browser launch, for machines whose GPU headless Chrome cannot reach ---
+// AZAHAR_HEADLESS=0 opens a window (run under xvfb-run on a server without a display);
+// AZAHAR_CHROME_ARGS adds Chrome flags, e.g. on Linux with an NVIDIA card:
+//   AZAHAR_HEADLESS=0 AZAHAR_CHROME_ARGS="--ozone-platform=x11 --enable-unsafe-webgpu
+//   --enable-features=Vulkan --ignore-gpu-blocklist --use-angle=vulkan" xvfb-run -a node tests/...
+const headless = process.env.AZAHAR_HEADLESS === '0' ? false : 'new';
+const chromeArgs = (process.env.AZAHAR_CHROME_ARGS || '').split(/\s+/).filter(Boolean);
+
 module.exports = {
   ROOT,
   chromePath: chromePath ? chromePath.trim() : null,
+  headless,
+  chromeArgs,
   romPath,
   statePath,
   buildDir,

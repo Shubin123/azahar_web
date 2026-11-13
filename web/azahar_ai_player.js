@@ -71,6 +71,8 @@
         decisions: 0,
         unchanged: 0,
         light: 0,               // decisions the light expert's encoder made alone
+        lockstep: false,        // the game stops at each action's frame (setLockstep)
+        skipped: 0,             // actions that never had a frame of their own
         lastMs: 0,
         heldMs: 0,
         startedAt: 0,
@@ -289,12 +291,18 @@
         const chunk = agent.chunk;
         let step = -1;
         if (chunk) {
-            step = Math.floor((now - chunk.t0) / FRAME_US);
+            // (Lockstep stops the game exactly on a frame's boundary; rounding must not put
+            // it a hair before.)
+            step = Math.floor((now - chunk.t0) / FRAME_US + 1e-6);
             if (step >= HORIZON) {
                 agent.chunk = null;
                 step = -1;
             }
         }
+        // More than one frame of game time since the last action: the ones between were
+        // never held (the game ran several frames between two looks at it).
+        if (step > 0 && chunk === agent.lastChunk && step > agent.step + 1) agent.skipped += step - agent.step - 1;
+        agent.lastChunk = chunk;
         agent.step = step;
         hold(step >= 0 ? window.AzaharInput.padCodes(padFor(chunk.actions, step)) : []);
     }
@@ -366,9 +374,24 @@
             return;
         }
         applyStep(now);
+        // Lockstep: the game runs to the end of this action's frame and no further, however
+        // fast it can run; without actions to play, it waits where it is.
+        if (agent.lockstep) {
+            window.AzaharUI.setGuestStopUs(agent.chunk ? Math.max(agent.chunk.t0 + (agent.step + 1) * FRAME_US, now + 1) : now);
+        }
         // Waiting: decide once the last decision's actions are used up. Real time: keep
         // a decision under way, so new actions arrive as soon as the model can make them.
         if (!agent.thinking && (agent.waitForModel ? !agent.chunk : true)) decide(now);
+    }
+
+    // Lockstep (tests, and agents that should run the game only as fast as they decide): the
+    // game runs uncapped, waits for each decision, and stops at the end of each action's
+    // frame, so every action is held for exactly one frame of game time at any speed.
+    function setLockstep(on) {
+        agent.lockstep = Boolean(on);
+        agent.waitForModel = agent.lockstep || Boolean(els.wait?.checked);
+        window.AzaharUI?.setUncapped?.(agent.lockstep);
+        if (!agent.lockstep) window.AzaharUI?.setGuestStopUs?.(0);
     }
 
     function shouldHold() {
@@ -401,6 +424,8 @@
         agent.decisions = 0;
         agent.unchanged = 0;
         agent.light = 0;
+        agent.skipped = 0;
+        if (agent.lockstep) setLockstep(true);
         // A new game, or the same one again: the mixture checks itself from scratch.
         await request('reset').catch(() => {});
         agent.playing = true;
@@ -416,6 +441,9 @@
     function stop() {
         if (!agent.playing) return;
         agent.playing = false;
+        // The game goes on by itself again (lockstep stays chosen for the next start).
+        window.AzaharUI?.setGuestStopUs?.(0);
+        window.AzaharUI?.setUncapped?.(false);
         window.AzaharAIPlanner?.reset();
         agent.thinking = null;
         agent.chunk = null;
@@ -583,7 +611,9 @@
             return loaded;
         }),
         keysFor: (actions, step) => window.AzaharInput.padCodes(padFor(actions, step)),
+        setLockstep,
         stats: () => ({playing: agent.playing, decisions: agent.decisions, unchanged: agent.unchanged, light: agent.light,
+            lockstep: agent.lockstep, skipped: agent.skipped,
             lastMs: agent.lastMs,
             heldMs: agent.heldMs, step: agent.step, codes: [...agent.codes], loaded: agent.loaded,
             timing: agent.timing || null, cached: Boolean(meta), meta}),

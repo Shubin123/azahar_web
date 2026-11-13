@@ -30,6 +30,7 @@ import glob
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tarfile
@@ -155,6 +156,8 @@ def main():
     parser.add_argument('--chunks-per-video', type=int, default=3)
     parser.add_argument('--frames-per-chunk', type=int, default=4)
     parser.add_argument('--videos', type=int, help='at most this many videos (spread over the shards)')
+    parser.add_argument('--exclude-games', help='leave out chunks whose game name matches this (regex), e.g. to keep '
+                        'a game held out of training')
     parser.add_argument('--jobs', type=int, default=6)
     args = parser.parse_args()
     import imageio_ffmpeg
@@ -165,6 +168,10 @@ def main():
     videos = chunks_in(heads)
     print(f'{len(videos)} videos, {sum(len(c) for c in videos.values())} chunks with processed actions', flush=True)
 
+    if args.exclude_games:
+        pattern = re.compile(args.exclude_games, re.IGNORECASE)
+        videos = {video: chunks for video, chunks in videos.items()
+                  if not any(pattern.search(meta.get('game') or '') for _, meta, _ in chunks)}
     names = sorted(videos)
     if args.videos:
         names = [names[i] for i in np.linspace(0, len(names) - 1, min(len(names), args.videos)).astype(int)]

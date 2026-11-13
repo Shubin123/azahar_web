@@ -2306,6 +2306,10 @@ void main() { frag_color = vec4(1.0); }`);
         getTopScreenRect: topScreenRect,
         getBottomScreenRect: () => screenRect('bottom'),
         getGuestTimeUs: guestTimeUs,
+        // Lockstep (the AI player's): stop the game at a game time (0: no stop), and run it
+        // as fast as this machine can instead of at the selected speed.
+        setGuestStopUs: us => (wasmModule?._azahar_set_guest_stop_us ? wasmModule._azahar_set_guest_stop_us(us) : -1),
+        setUncapped: on => (wasmModule?._azahar_set_uncapped ? wasmModule._azahar_set_uncapped(on ? 1 : 0) : -1),
         // Whether frames run: a title is loaded and the run loop is going.
         isPlaying: () => romLoaded && running,
         // The title that runs (a Download Play child after joining a room), as 16 hex digits.

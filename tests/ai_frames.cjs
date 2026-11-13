@@ -72,8 +72,8 @@ async function main() {
     const random = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
     fs.mkdirSync(out, {recursive: true});
     const server = await listen(0, '127.0.0.1', {root: cfg.webDir});
-    const browser = await puppeteer.launch({executablePath: cfg.chromePath, headless: 'new',
-        args: ['--no-sandbox', '--disable-dev-shm-usage'], protocolTimeout: 180000,
+    const browser = await puppeteer.launch({executablePath: cfg.chromePath, headless: cfg.headless,
+        args: ['--no-sandbox', '--disable-dev-shm-usage', ...cfg.chromeArgs], protocolTimeout: 180000,
         defaultViewport: {width: 1280, height: 1100}});
     try {
         const page = await browser.newPage();

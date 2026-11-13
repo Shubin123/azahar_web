@@ -60,8 +60,8 @@ async function main() {
     const decisions = Number(option('--decisions', 60));
     const server = await common.startServer({'/__bench/ng.pt': ckpt, '/__bench/model/': modelDir,
         '/__bench/reference/': referenceDir});
-    const browser = await puppeteer.launch({executablePath: cfg.chromePath, headless: 'new',
-        args: ['--no-sandbox', '--disable-dev-shm-usage'], protocolTimeout: 1800000,
+    const browser = await puppeteer.launch({executablePath: cfg.chromePath, headless: cfg.headless,
+        args: ['--no-sandbox', '--disable-dev-shm-usage', ...cfg.chromeArgs], protocolTimeout: 1800000,
         defaultViewport: {width: 1280, height: 1100}});
     const summary = {model: path.relative(ROOT, modelDir), game: option('--rom') ? path.basename(option('--rom')) : null};
     let ok = true;

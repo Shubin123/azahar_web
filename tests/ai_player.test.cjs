@@ -20,9 +20,10 @@
 //     With a light expert in the manifest (scripts/nitrogen/nitrogen_light_expert.py), its
 //     weights come with the download, the page decides with the mixture (the light encoder,
 //     NitroGen's when its gate is unsure), and the widget's encoder choice takes effect.
-//  5. The planner (System 2, azahar_ai_planner.js) steers NitroGen: with a plan to head
-//     left, favour A and avoid B, the chunks played (the best of a batch of draws) head left
-//     and press A more often than NitroGen's own, and never press B.
+//  5. With --planner-checks (not on Pokémon: the planner is judged on other games), the
+//     planner (System 2, azahar_ai_planner.js) steers NitroGen: with a plan to head left,
+//     favour A and avoid B, the chunks played head left and press A more often than
+//     NitroGen's own, and never press B; and its touch reaches the bottom screen (--tap).
 //  6. With a game running (--rom, optionally --state), "Let the AI play" holds keys that
 //     change the game, in real time (the game not held, a new decision at least every 18
 //     frames) and waiting for each decision (one per 18 frames of game time); taking back
@@ -32,11 +33,10 @@
 //   node tests/ai_player.test.cjs --ckpt ng.pt [--frames tmp_test/ai_frames/valid]
 //        [--reference-model tmp_test/ai_reference/f32] [--rom ROM [--state STATE.cst]]
 //        [--live-frames 16] [--saved-frames 32] [--samples 12] [--min-per-second 5] [--offline]
-//        [--keep-model] [--backend wasm] [--software] [--tap X,Y]
+//        [--keep-model] [--backend wasm] [--software] [--planner-checks [--tap X,Y]]
 //
-// --tap: where the planner's touch check touches, in its 400x480 view of both screens (the
-// default is Pokemon X's "Friends" button on the overworld's bottom screen; none: no check,
-// for a game whose bottom screen has nothing to touch there).
+// --tap X,Y: with --planner-checks, where the planner's touch check touches, in its 400x480
+// view of both screens (a button on the game's bottom screen at --state).
 //
 // --backend wasm runs the model on WebAssembly instead of WebGPU; --software runs the
 // emulator's compatibility renderer.
@@ -313,9 +313,8 @@ async function playthrough(page, state) {
         waiting.held.size > 0 && effect(waiting) > Math.max(2.0, 2 * noise), `${effect(waiting).toFixed(2)} vs ${noise.toFixed(2)}`);
     check('taking back control stops the AI and releases its keys',
         !after.playing && after.codes.length === 0, JSON.stringify(after));
-    // Pokemon X's Player Search System on the bottom screen: "Friends" at (99, 280).
-    if (option('--tap') === 'none') return;
-    const point = (option('--tap') || '99,280').split(',').map(Number);
+    if (!flag('--planner-checks') || !option('--tap')) return;
+    const point = option('--tap').split(',').map(Number);
     const touched = await tapEffect(page, state, point);
     check(`a planner's touch at ${point.join(',')} reaches the bottom screen`,
         touched.touched > Math.max(2.0, 2 * touched.alone),
@@ -330,8 +329,8 @@ async function main() {
     const served = [];
     const server = await common.startServer({[MIRROR_PATH]: ckpt, [REFERENCE_PATH]: referenceDir}, served);
     const origin = `http://127.0.0.1:${server.address().port}`;
-    const browser = await puppeteer.launch({executablePath: cfg.chromePath, headless: 'new',
-        args: ['--no-sandbox', '--disable-dev-shm-usage'], protocolTimeout: 600000,
+    const browser = await puppeteer.launch({executablePath: cfg.chromePath, headless: cfg.headless,
+        args: ['--no-sandbox', '--disable-dev-shm-usage', ...cfg.chromeArgs], protocolTimeout: 600000,
         defaultViewport: {width: 1280, height: 1100}});
     const requests = [];
     const errors = [];
@@ -459,7 +458,7 @@ async function main() {
                 `(${[...new Set(frames.map(frame => frame.scene))].join(', ')})`);
             await validateOnFramebuffers(page, frames);
             await page.evaluate(() => window.__workers.reference.terminate());
-            await steeringChecks(page, frames);
+            if (flag('--planner-checks')) await steeringChecks(page, frames);
         }
 
         // 5. Play.

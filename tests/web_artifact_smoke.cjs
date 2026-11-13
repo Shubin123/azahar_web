@@ -81,7 +81,8 @@ requireFile(webDir, 'azahar_savestates.js');
 assert.match(html, /azahar_scheduler\.js/);
 requireFile(webDir, 'azahar_scheduler.js');
 assert.match(html, /id=["']renderer-mode["']/i);
-assert.match(ui, /script\.src\s*=\s*`\$\{artifactName\}\.js`/);
+// The deploy's stamp (?v=) may wrap the name (stamped(), see azahar_ui.js).
+assert.match(ui, /script\.src\s*=\s*(stamped\()?`\$\{artifactName\}\.js`/);
 if (artifactKind === 'webgl2') {
     assert.match(html, /renderer:\s*['"]webgl2['"]/);
     assert.match(ui, /#version 300 es/);

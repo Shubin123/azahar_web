@@ -8,7 +8,10 @@
 // parsed.
 //
 //   node tests/ai_planner_bench.cjs [--models qwen3.5-0.8b,lfm2.5-vl-450m]
-//        [--frames tmp_test/ai_planner_frames] [--per-scene 4] [--notes "..."]
+//        [--frames tmp_test/ai_planner_frames] [--per-scene 4] [--notes "..."] [--scenes REGEX]
+//
+// Scenes are the subfolders of --frames; Pokémon scenes are left out (the planner is not
+// judged on Pokémon) unless --scenes picks them.
 //
 // The models come from huggingface.co and Transformers.js from cdn.jsdelivr.net; the
 // browser profile (and so its model cache) is kept in tmp_test/ai_planner_bench/profile.
@@ -27,9 +30,10 @@ const option = (name, fallback = null) => {
 const READ = 'Read both screens. What does the top screen show, and what does the bottom screen show? ' +
     'Quote any text you can read and list any menu options or on-screen buttons.';
 
-function scenes(directory, perScene) {
+function scenes(directory, perScene, pattern) {
     const picked = [];
     for (const scene of fs.readdirSync(directory).sort()) {
+        if (pattern ? !pattern.test(scene) : /pokemon/i.test(scene)) continue;
         const folder = path.join(directory, scene);
         if (!fs.statSync(folder).isDirectory()) continue;
         const files = fs.readdirSync(folder).filter(name => /^screens_\d+\.png$/.test(name)).sort();
@@ -44,13 +48,13 @@ function scenes(directory, perScene) {
 async function main() {
     const models = option('--models', 'qwen3.5-0.8b,lfm2.5-vl-450m').split(',');
     const frames = scenes(path.resolve(option('--frames', path.join(ROOT, 'tmp_test', 'ai_planner_frames'))),
-        Number(option('--per-scene', 4)));
+        Number(option('--per-scene', 4)), option('--scenes') ? new RegExp(option('--scenes'), 'i') : null);
     if (!frames.length) throw new Error('No screens_*.png frames (tests/ai_frames.cjs --screens)');
     const out = path.join(ROOT, 'tmp_test', 'ai_planner_bench');
     fs.mkdirSync(out, {recursive: true});
     const server = await common.startServer({});
-    const browser = await puppeteer.launch({executablePath: cfg.chromePath, headless: 'new',
-        args: ['--no-sandbox', '--disable-dev-shm-usage'], protocolTimeout: 3600000,
+    const browser = await puppeteer.launch({executablePath: cfg.chromePath, headless: cfg.headless,
+        args: ['--no-sandbox', '--disable-dev-shm-usage', ...cfg.chromeArgs], protocolTimeout: 3600000,
         userDataDir: path.join(out, 'profile'), defaultViewport: {width: 1280, height: 1100}});
     try {
         const page = await browser.newPage();
