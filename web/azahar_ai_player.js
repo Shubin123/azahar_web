@@ -34,11 +34,12 @@
     // Which image encoder decides (the worker's routing), kept in this browser.
     const EXPERT_KEY = 'azahar-ai-expert';
     const EXPERT_HELP = {
-        gate: 'A light expert reads every frame; its gate hands the frames it is unsure of (about one in ten) ' +
-            'to NitroGen\'s own encoder. Nearly as fast as the light expert, and closest to NitroGen.',
-        light: 'The light expert alone: the fastest. It plays within NitroGen\'s own variation on our tests, ' +
-            'a little less like NitroGen than the mixture.',
-        heavy: 'NVIDIA\'s own SigLIP2-large encoder on every frame: NitroGen exactly as published, and the slowest.',
+        gate: 'A light expert, trained to copy NitroGen\'s encoder, reads every frame and checks itself against it: ' +
+            'about 1.6 times as fast in Pokémon X, Mario Kart 7 and Craftus, where it acts like NitroGen; in other ' +
+            'games it hands over to NitroGen\'s encoder. It never plays better than NitroGen, only faster.',
+        light: 'The light expert alone: the fastest, but only in games like the ones it learned from does it act ' +
+            'like NitroGen; elsewhere it plays worse.',
+        heavy: 'NVIDIA\'s own SigLIP2-large encoder on every frame: NitroGen exactly as published.',
     };
     // nitrogen/shared.py's button order.
     const BUTTONS = ['BACK', 'DPAD_DOWN', 'DPAD_LEFT', 'DPAD_RIGHT', 'DPAD_UP', 'EAST', 'GUIDE',
@@ -397,10 +398,12 @@
                 render();
             }
         }
-        agent.playing = true;
         agent.decisions = 0;
         agent.unchanged = 0;
         agent.light = 0;
+        // A new game, or the same one again: the mixture checks itself from scratch.
+        await request('reset').catch(() => {});
+        agent.playing = true;
         agent.heldMs = 0;
         agent.startedAt = performance.now();
         agent.chunk = null;
@@ -466,9 +469,16 @@
         const backend = agent.loaded?.backend === 'webgpu' ? 'WebGPU' : 'WebAssembly';
         const elapsed = performance.now() - agent.startedAt;
         const unchanged = agent.unchanged ? ` (${agent.unchanged} on an unchanged screen)` : '';
-        // The mixture: how many decisions the light expert's encoder made alone.
-        const light = agent.loaded?.light && agent.decisions
+        // The mixture: how many decisions the light expert's encoder made alone, and what its
+        // check against NitroGen's encoder found in this game.
+        const verify = agent.timing?.verify;
+        let light = agent.loaded?.light && agent.decisions
             ? ` · light expert alone on ${Math.round(100 * agent.light / agent.decisions)}%` : '';
+        if (agent.expert === 'gate' && verify?.checks) {
+            light += verify.heavy
+                ? ` (it acts unlike NitroGen in this game, ${verify.disagreement.toFixed(3)}: NitroGen's encoder decides)`
+                : ` (checked against NitroGen: acts alike, ${verify.disagreement.toFixed(3)})`;
+        }
         let mode = '';
         if (agent.waitForModel) {
             if (elapsed > 0) mode = ` · the game waited ${Math.round(100 * agent.heldMs / elapsed)}% of the time`;

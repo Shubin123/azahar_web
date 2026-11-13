@@ -1324,9 +1324,9 @@
                     Image encoder
                 </label>
                 <select id="ai-expert" class="renderer-select" aria-label="Image encoder">
-                    <option value="gate">Mixture — light expert, NitroGen's when unsure</option>
-                    <option value="light">Light expert only — fastest</option>
-                    <option value="heavy">NitroGen only — slowest</option>
+                    <option value="heavy" selected>NitroGen only — as NVIDIA published it</option>
+                    <option value="gate">Mixture — faster in the games its light expert learned</option>
+                    <option value="light">Light expert only — fastest, only for those games</option>
                 </select>
                 <div id="ai-expert-help" class="mode-help"></div>
                 <label for="ai-planner-model" class="mode-help" style="display:block;margin-top:12px;margin-bottom:4px;">

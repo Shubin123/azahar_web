@@ -98,11 +98,12 @@ async function main() {
                 const out = await window.__models.model('act', {pixels: Uint8Array.from(rgb), noise: window.__noise(seed),
                     profile: true});
                 return {encodeMs: out.encodeMs, denoiseMs: out.denoiseMs, totalMs: performance.now() - started,
-                    expert: out.expert, gate: out.gate};
+                    expert: out.expert, gate: out.gate, verify: out.verify};
             }, frame.rgb, i);
             if (i < 3) continue;   // warm-up
             if (timing.expert === 'light') light++;
             if (timing.gate !== null && timing.gate !== undefined) gates.push(timing.gate);
+            if (timing.verify) summary.verify = timing.verify;
             for (const key of Object.keys(times)) times[key].push(timing[key]);
         }
         for (const [key, list] of Object.entries(times)) {
@@ -116,7 +117,9 @@ async function main() {
             `${summary.decisionsPerSecond} decisions/s — median ${summary.totalMs.median} ms ` +
             `(encoder ${summary.encodeMs.median}, denoiser ${summary.denoiseMs.median}), p90 ${summary.totalMs.p90} ms` +
             (model.loaded.light ? `; ${summary.routing}: light expert alone on ${Math.round(100 * summary.lightShare)}% ` +
-                `of decisions` + (summary.gate ? ` (gate median ${summary.gate.median}, max ${summary.gate.max})` : '') : ''));
+                `of decisions` + (summary.gate ? ` (gate median ${summary.gate.median}, max ${summary.gate.max})` : '') +
+                (summary.verify?.checks ? `; its check against NitroGen: ${summary.verify.heavy ? 'acts unlike it, NitroGen decides'
+                    : 'acts alike'} (${summary.verify.disagreement.toFixed(4)} over ${summary.verify.checks} checks)` : '') : ''));
         const minimum = Number(option('--min-per-second', 0));
         if (minimum) {
             const fast = summary.decisionsPerSecond >= minimum;

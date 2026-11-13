@@ -35,7 +35,8 @@
 //        [--keep-model] [--backend wasm] [--software] [--tap X,Y]
 //
 // --tap: where the planner's touch check touches, in its 400x480 view of both screens (the
-// default is Pokemon X's "Friends" button on the overworld's bottom screen).
+// default is Pokemon X's "Friends" button on the overworld's bottom screen; none: no check,
+// for a game whose bottom screen has nothing to touch there).
 //
 // --backend wasm runs the model on WebAssembly instead of WebGPU; --software runs the
 // emulator's compatibility renderer.
@@ -114,16 +115,25 @@ async function steeringChecks(page, frames) {
 // action distribution on the frames (ai_common.cjs's distributionChecks).
 async function validateOnFramebuffers(page, frames) {
     const times = [];
+    let verify = null, light = 0;
     for (let i = 0; i < 24; i++) {
-        times.push(await page.evaluate(async (rgb, seed) => {
+        const out = await page.evaluate(async (rgb, seed) => {
             const out = await window.AzaharAIPlayer.act(Uint8Array.from(rgb), window.__noise(seed));
-            return out.encodeMs + out.denoiseMs;
-        }, frames[i % frames.length].rgb, i));
+            return {ms: out.encodeMs + out.denoiseMs, verify: out.verify, expert: out.expert};
+        }, frames[i % frames.length].rgb, i);
+        times.push(out.ms);
+        verify = out.verify || verify;
+        if (i >= 4 && out.expert === 'light') light++;
     }
     const perSecond = 1000 / common.median(times.slice(4));
     const minimum = Number(option('--min-per-second', 5));
     check(`the quantized model makes at least ${minimum} decisions per second`, perSecond >= minimum,
         `${perSecond.toFixed(2)} per second (${common.median(times.slice(4)).toFixed(0)} ms each)`);
+    if (verify?.checks) {
+        console.log(`  the mixture decided ${light} of 20 with the light expert alone; its check against NitroGen: ` +
+            `${verify.heavy ? 'acts unlike it here, NitroGen decides' : 'acts alike'} ` +
+            `(${verify.disagreement.toFixed(4)} over ${verify.checks} checks)`);
+    }
     const started = Date.now();
     const result = await common.distributionChecks(page, frames, 'player', Number(option('--samples', 12)));
     console.log(`  ${frames.length} framebuffers x ${option('--samples', 12)} draws per model, ` +
@@ -304,6 +314,7 @@ async function playthrough(page, state) {
     check('taking back control stops the AI and releases its keys',
         !after.playing && after.codes.length === 0, JSON.stringify(after));
     // Pokemon X's Player Search System on the bottom screen: "Friends" at (99, 280).
+    if (option('--tap') === 'none') return;
     const point = (option('--tap') || '99,280').split(',').map(Number);
     const touched = await tapEffect(page, state, point);
     check(`a planner's touch at ${point.join(',')} reaches the bottom screen`,
@@ -415,10 +426,10 @@ async function main() {
         console.log(`  model loaded on ${loaded.backend} in ${loaded.loadSeconds?.toFixed(1)} s (warm-up ${Math.round(loaded.warmupMs)} ms)`);
         check('ONNX Runtime Web is fetched only once the AI starts', requests.some(url => url.includes('jsdelivr')));
         if (manifest.light) {
-            check('the page decides with the mixture of the light and NitroGen\'s encoders', loaded.light && loaded.routing === 'gate',
-                JSON.stringify({light: loaded.light, routing: loaded.routing}));
+            check('the page decides with NitroGen\'s own encoder unless the player chooses the light expert',
+                loaded.light && loaded.routing === 'heavy', JSON.stringify({light: loaded.light, routing: loaded.routing}));
             const used = {};
-            for (const expert of ['heavy', 'light', 'gate']) {
+            for (const expert of ['light', 'gate', 'heavy']) {
                 await page.select('#ai-expert', expert);
                 used[expert] = await page.evaluate(async () => {
                     const pixels = new Uint8Array(256 * 256 * 3).map((_, i) => (i * 7) % 251);

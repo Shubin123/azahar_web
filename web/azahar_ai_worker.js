@@ -16,7 +16,10 @@
  *          encoder). With a light expert, a mixture of two encoders: the light one (SigLIP-
  *          base and an adapter into NitroGen's image features) runs on every image, and
  *          NitroGen's own (SigLIP2-large) only on those whose actions its gate predicts the
- *          light one gets wrong; most decisions never use the heavy encoder's weights.
+ *          light one gets wrong; most decisions never use the heavy encoder's weights. The
+ *          mixture also checks itself (VERIFY): now and then both encoders see the same
+ *          image and the actions they lead to from the same noise are compared; in a game
+ *          where the light expert does not act like NitroGen, NitroGen's encoder decides.
  * remove   deletes the cached model.
  *
  * With `store: false` (the tests' float32 reference and model variants, see
@@ -40,6 +43,9 @@ let backend = null;
 let memoryWeights = null;
 // Which encoder decides: 'gate' (the mixture), 'light' or 'heavy' (NitroGen's own) alone.
 let routing = 'gate';
+// The mixture's check of itself, in the game being played (reset when the AI starts):
+// images seen, the last checks' disagreements, and whether NitroGen's encoder decides.
+let verify = {images: 0, recent: [], heavy: false};
 // The last image the encoder saw and what it made of it: an identical next image (a still
 // menu, a dialogue box) skips the encoder.
 let lastImage = null;
@@ -65,6 +71,7 @@ self.onmessage = async ({data}) => {
         else if (type === 'load') result = await load(data);
         else if (type === 'act') result = await act(data);
         else if (type === 'route') result = route(data);
+        else if (type === 'reset') result = resetVerify();
         else if (type === 'remove') result = await remove();
         else throw new Error(`Unknown request ${type}`);
         const transfer = result?.actions ? [result.actions.buffer] : [];
@@ -386,6 +393,44 @@ function route({expert}) {
     return {routing: sessions?.light ? routing : 'heavy'};
 }
 
+// A new game (or the same one again): the mixture checks itself from scratch.
+function resetVerify() {
+    verify = {images: 0, recent: [], heavy: false};
+    forgetImage();
+    return {};
+}
+
+// Whether this image is one the mixture checks itself on (manifest.light.verify).
+function checking() {
+    if (!manifest.light.verify) return false;
+    const {first, every, everyLater, laterFrom} = manifest.light.verify;
+    const n = verify.images;
+    return n <= first || n % (n < laterFrom ? every : everyLater) === 0;
+}
+
+// Mean absolute difference between the actions two encodings lead to from the same noises.
+async function disagreement(light, heavy, count, actionHorizon, actionDim) {
+    const {draws} = manifest.light.verify;
+    const noise = new Float32Array(draws * count);
+    for (let i = 0; i < draws; i++) noise.set(gaussianNoise(count), i * count);
+    const actionsFor = async encoded => {
+        const feeds = {noise: new ort.Tensor('float32', noise, [draws, actionHorizon, actionDim])};
+        for (const name of sessions.kv) feeds[name] = encoded[name];
+        if (sessions.denoise.inputNames.includes('guide')) {
+            feeds.guide = new ort.Tensor('float32', new Float32Array(draws * count), [draws, actionHorizon, actionDim]);
+            feeds.guide_weight = new ort.Tensor('float32', new Float32Array(draws * actionDim), [draws, 1, actionDim]);
+        }
+        const result = await sessions.denoise.run(feeds);
+        const data = new Float32Array(result.actions.data);
+        result.actions.dispose?.();
+        return data;
+    };
+    const a = await actionsFor(light), b = await actionsFor(heavy);
+    let sum = 0;
+    for (let i = 0; i < a.length; i++) sum += Math.abs(a[i] - b[i]);
+    return sum / a.length;
+}
+
 // RGB / 127.5 - 1 in float32, as nitrogen_validate.py's pixel_values.
 const PIXEL_VALUES = Float32Array.from({length: 256}, (_, i) => Math.fround(Math.fround(i / 127.5) - 1));
 
@@ -426,13 +471,24 @@ async function act({pixels, noise, noises, draws = 1, guide, guideWeight, profil
     if (!reused) {
         forgetImage();
         const feeds = {pixel_values: new ort.Tensor('float32', input, [1, 3, imageSize, imageSize])};
-        let encoded = null, gate = null, used = 'heavy';
-        if (sessions.light && expert !== 'heavy') {
+        let encoded = null, gate = null, used = 'heavy', checked = null;
+        const mixture = expert === 'gate' && sessions.light;
+        if (mixture) verify.images++;
+        const check = mixture && checking();
+        if (sessions.light && expert !== 'heavy' && !(mixture && verify.heavy && !check)) {
             const out = await sessions.light.run(feeds, [...sessions.kv, 'gate']);
             // The gate's predicted error of the light expert's actions (log, in units of
             // a random other frame's): above the threshold, NitroGen's encoder decides.
             gate = out.gate.data[0];
-            if (expert === 'light' || gate <= manifest.light.gate.threshold) {
+            if (check) {
+                // Both encoders on this image: how differently they would act.
+                encoded = await sessions.encoder.run(feeds, sessions.kv);
+                checked = await disagreement(out, encoded, actionHorizon * actionDim, actionHorizon, actionDim);
+                const {window: size, threshold} = manifest.light.verify;
+                verify.recent = [...verify.recent, checked].slice(-size);
+                verify.heavy = verify.recent.reduce((a, b) => a + b, 0) / verify.recent.length > threshold;
+                for (const name of sessions.kv) out[name].dispose?.();
+            } else if (expert === 'light' || gate <= manifest.light.gate.threshold) {
                 encoded = out;
                 used = 'light';
             } else {
@@ -440,7 +496,7 @@ async function act({pixels, noise, noises, draws = 1, guide, guideWeight, profil
             }
         }
         if (!encoded) encoded = await sessions.encoder.run(feeds, sessions.kv);
-        lastImage = {pixels: new Uint8Array(pixels), encoded, requested: expert, expert: used, gate};
+        lastImage = {pixels: new Uint8Array(pixels), encoded, requested: expert, expert: used, gate, checked};
     }
     const {encoded} = lastImage;
     // The GPU may still be working on the encoder; profiling waits for it (a 1 MB download).
@@ -466,7 +522,9 @@ async function act({pixels, noise, noises, draws = 1, guide, guideWeight, profil
     const actions = new Float32Array(result.actions.data);
     result.actions.dispose?.();
     return {actions, encodeMs, denoiseMs: performance.now() - started - encodeMs, reused, backend,
-            expert: lastImage.expert, gate: lastImage.gate};
+            expert: lastImage.expert, gate: lastImage.gate, checked: lastImage.checked,
+            verify: sessions.light ? {heavy: verify.heavy, checks: verify.recent.length,
+                disagreement: verify.recent.length ? verify.recent.reduce((a, b) => a + b, 0) / verify.recent.length : null} : null};
 }
 
 function shrink(rgb, from, to) {

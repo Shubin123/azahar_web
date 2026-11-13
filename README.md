@@ -108,11 +108,21 @@ frame at a time and reacts; the optional planner below gives it a direction.
   not changed (a still menu) reuses what the model saw in it. Start and Select are off unless
   you allow them (NVIDIA's player also keeps the model off menus by default), HOME always.
 - **Image encoder** (most of a decision's time):
-  - *Mixture* (the default): a light expert reads every frame, and its gate hands the frames
-    it is unsure of (about one in ten) to NitroGen's own encoder, so most decisions never use
-    the heavy encoder's weights.
-  - *Light expert only*: the fastest.
-  - *NitroGen only*: NVIDIA's SigLIP2-large on every frame, NitroGen exactly as published.
+  - *NitroGen only* (the default): NVIDIA's SigLIP2-large on every frame, NitroGen exactly as
+    published: 8 decisions a second (124 ms).
+  - *Mixture*: a light expert, trained to copy NitroGen's encoder, reads every frame, and its gate hands the frames
+    it is unsure of to NitroGen's own encoder, so most decisions never use the heavy
+    encoder's weights. It also checks itself in each game: on its first images and then every
+    8th (16th later) both encoders see the same image and the actions they lead to from the
+    same noise are compared; in a game where the light expert does not act like NitroGen,
+    NitroGen's encoder decides, and the widget says so. On an Apple M4 in Chrome: 12.8
+    decisions a second (78 ms each) in Pokémon X, Mario Kart 7 and Craftus, where the light
+    expert acts like NitroGen; 8 (125 ms) in New Super Mario Bros. 2, where it does not.
+  - *Light expert only*: 13.2 decisions a second (76 ms), but only games like the ones it
+    learned from are played as NitroGen would (see below).
+
+  The light expert never plays better than NitroGen, only faster where it acts like it, so it
+  is off unless chosen.
 - **Planner (System 2)**, off until you choose a model: a small vision-language model
   (Qwen3.5-0.8B or LFM2.5-VL-450M from huggingface.co, pinned revisions, run with
   Transformers.js 4.3.2 from cdn.jsdelivr.net) looks at both screens every 5 seconds of game
@@ -143,16 +153,22 @@ The light expert (`scripts/nitrogen/nitrogen_light_expert.py`) fuses
 [Laya-Vision](https://huggingface.co/ZeraG07/laya-vision)'s front end into NitroGen as a second
 expert of a mixture: SigLIP-base/16 at 256 pixels to its layer -2 and an adapter (Laya-Vision's
 projector, then 2 transformer layers) into NitroGen's image feature space; NitroGen's VL layers
-and denoiser are shared. A graph of its size runs in 46 ms on WebGPU against NitroGen's
-encoder's 97. With the tower frozen and the adapter trained to copy NitroGen's features it
+and denoiser are shared. It runs in 46 ms on WebGPU against NitroGen's encoder's 94. With the
+tower frozen and the adapter trained to copy NitroGen's features it
 failed: features only cosine 0.82, and its actions further from NitroGen's than if it had been
 shown a random other frame. What made it pass: training the tower's layers 5-10 too, and a loss
 on what NitroGen does with the features (its frozen VL layers' output and the action velocities
 its denoiser predicts at the 4 Euler steps' states), on 1,890 frames recorded from Pokémon X,
 Mario Kart 7 and Craftus with augmentations. Its action error on held-out frames fell from 1.53
-to 0.39 (1 = a random frame's). The gate predicts each frame's action error from the tower's
-pooled tokens; its threshold sends 10% of fresh frames (`tmp_test/ai_frames/gatecal`) to
-NitroGen's encoder. `nitrogen_onnx.py light` writes its graph, which reads NitroGen's VL weights
+to 0.39 (1 = a random frame's). The page's light expert then trained further on those frames
+and 3,127 from 174 other games' videos (below): the same on held-out 3DS frames (0.39), better
+on a game neither saw, New Super Mario Bros. 2 (1.58 against 2.26), and still not good enough
+there: alone it moves the key frequencies 3.6 times as far from NitroGen's as NitroGen's own
+draws differ. Hence the mixture's check: the actions the two encoders lead to from the same
+noise differ by 0.004-0.009 on average in the games it learned from and 0.04 in New Super Mario
+Bros. 2, so it hands a game to NitroGen's encoder above 0.02. The gate predicts each frame's
+action error from the tower's pooled tokens; its threshold sends 10% of fresh frames
+(`tmp_test/ai_frames/gatecal`) to NitroGen's encoder. `nitrogen_onnx.py light` writes its graph, which reads NitroGen's VL weights
 from the encoder's own weights file, so nothing more is converted from ng.pt.
 `scripts/nitrogen/nitrogen_dataset_frames.py` cuts active-play frames (idle frames dropped, as
 the dataset card asks; overlays blacked out) from the videos of NVIDIA's
@@ -171,8 +187,10 @@ games.
   encoder at 8 bits, on 48 framebuffers: key frequencies 0.60 apart (float32 against itself
   0.72), sticks 0.038 (0.059), variety 0.89 and 0.88 times. The light expert alone at 8 bits:
   keys 0.54 (float32 against itself 0.55), sticks 0.032 (0.034), variety 0.85 and 0.81 times.
-  The page's mixture, on 32 saved framebuffers and 16 from Pokémon X running: keys 0.77
-  (0.77), sticks 0.056 (0.065), variety 0.86 and 0.83 times.
+  The page's mixture, on 48 held-out 3DS framebuffers: keys 0.50 (0.55), sticks 0.026 (0.034),
+  variety 0.83 and 0.82 times, the light expert deciding alone 85% of the time; on 48 of New
+  Super Mario Bros. 2, where its check hands the game to NitroGen's encoder: keys 0.41 (0.45),
+  sticks 0.0050 (0.0059), variety 0.86 and 0.97 times.
 - It also checks the planner's steering, with a plan to head left, favour A and avoid B:
   left held on 0.46 of the actions that play (NitroGen alone: 0.02), A on 0.53 (0.10), B
   never (18 of 384). Picking among NitroGen's own draws alone gave only 0.07 left: it cannot

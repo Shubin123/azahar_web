@@ -906,6 +906,13 @@ def add_light(model_dir, light_ckpt, tower_dir, gate_frames, heavy_share):
         'tower': {**LIGHT_TOWER, 'layers': LIGHT_LAYERS, 'trainedFrom': saved.get('tuned_from')},
         'trained': {'script': 'scripts/nitrogen/nitrogen_light_expert.py', 'sha256': trained_sha,
                     'license': 'trained from NitroGen\'s outputs: NVIDIA License, non-commercial'},
+        # The mixture's check of itself (azahar_ai_worker.js): both encoders on the first
+        # images of a game and then every 8th (16th after 64), the actions they lead to from
+        # the same noises compared; while the last checks differ by more than the threshold
+        # on average, NitroGen's encoder decides. (Mean absolute difference: 0.005-0.02 on
+        # games the light expert acts like NitroGen in, 0.02-0.07 on one it does not.)
+        'verify': {'first': 4, 'every': 8, 'everyLater': 16, 'laterFrom': 64, 'window': 6, 'draws': 2,
+                   'threshold': 0.02},
         # Frames whose predicted error is above the threshold also run NitroGen's encoder.
         'gate': {'heavyShare': heavy_share, 'threshold': float(np.quantile(predicted, 1 - heavy_share)),
                  'quantiles': quantiles, 'frames': len(predicted)},
