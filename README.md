@@ -228,9 +228,12 @@ frame at a time and reacts; the optional planner below gives it a direction.
   the goal sequence before telling it from a dead end, and cleared it after 41.7 s of game
   time, 36 times slower than real time; the next two, knowing those, failed only twice each
   (both at the flag) and cleared it after 37-38 s, 22 times slower. With all that known, most
-  of the level is played carefully (3 s on its own, 36 s looked ahead). NitroGen alone lost a
-  life at the first Goomba (5% of the way) in 3 of 3 tries, and the planner steering it
-  without looking ahead got 8% of the way on average.
+  of the level is played carefully (3 s on its own, 36 s looked ahead). Without looking
+  ahead, 3 tries each of up to 60 s of game time from the same start, none cleared it:
+  NitroGen alone got 59% of the way at best and 33% on average (one life lost, two still
+  going at 60 s; in an earlier set it lost a life at the first Goomba in 3 of 3), NitroGen
+  steered right with jump and dash 13% at best, 11% on average, and the fine-tuned planner
+  steering it 31% at best, 13% on average, each losing a life in all three.
 - **From level to level**: a stage judged cleared, the screen going dark ends the level. Between
   levels (the map, menus) NitroGen plays on with no saves and nothing taken for a failure,
   the planner working menus; when the screen next goes dark and comes back, the next level
