@@ -41,6 +41,7 @@
     const STALL_FRAMES = 45;         // frames without getting on that mean a failure
     const DARK_US = 1.5e6;           // a dark spell this long is a failure (shorter: a pipe, a door)
     const CAREFUL_STALL_US = 6e6;    // careful play getting no further this long is a dead end
+    const CELL = 16;                 // pixels a side of the cells of a level the player has been in
     const PROGRESS = 8;              // pixels further the heading's way that count as getting on
     const REWIND_US = 1e6;           // how long before a failure the save gone back to is
     const GATE_BEFORE = 200;         // pixels before a place it failed at where care begins
@@ -215,6 +216,7 @@
         // frame. Many in a row: the game itself went black.
         if (blank(screens)) {
             watch.blankRun++;
+            if (watch.blankRun >= BLACK_RUN) watch.wentDark = true;
             if (watch.between && watch.blankRun >= BLACK_RUN) betweenFrame(screens, true);
             else if (watch.free && watch.blankRun >= BLACK_RUN) freeDark(now);
             return;
@@ -231,6 +233,11 @@
                 return;
             }
             if (state.darkSince !== null) freeLit(now);
+        }
+        // (A future that went dark and came back lit: through a pipe or a door, elsewhere.)
+        if (watch.track) {
+            if (darkness(screens) < 12) watch.wentDark = true;
+            else if (watch.wentDark) watch.cut = true;
         }
         if (watch.midAt && !watch.mid && now >= watch.midAt) watch.mid = {screens, scroll: cameraAlong(watch), at: watch.lastAt};
         if (now - watch.t0 <= state.commit * FRAME_US + FRAME_US / 2) {
@@ -293,6 +300,7 @@
         if (watch.cells) {
             const things = movingThings(cells, watch.cells, shift);
             state.player = playerAmong(things, state.player);
+            visit();
             state.seen.push({us: now, things, player: state.player});
             if (state.seen.length > 120) state.seen.shift();
             if (!watch.danger) watch.danger = dangerNear(things);
@@ -309,7 +317,23 @@
         if (now - state.movedUs >= STALL_FRAMES * FRAME_US && !state.ending) {
             watch.failed = {kind: 'stalled', since: state.movedUs, pos: where()};
         }
+        // (Half a second after a cut: a scene of this level seen before means it began again,
+        // a life lost, rather than a pipe or door to elsewhere.)
+        // (Only against the scenes saved before the cut, and only soon after it.)
+        if (state.cutCheck && now >= state.cutCheck.at) {
+            if (now - state.cutCheck.at < 0.5e6 && seenBefore(screens, state.cutCheck.scenes)) {
+                watch.failed ||= {kind: 'began again', since: state.cutCheck.since, pos: where()};
+            }
+            state.cutCheck = null;
+        }
     }
+
+    // Whether a scene looks like one this level showed before (its start, a save's: the first
+    // `upTo` of them).
+    const seenBefore = (screens, upTo = state.scenes.length) => {
+        const sig = signature(screens);
+        return state.scenes.slice(0, upTo).some(seen => sigDistance(seen, sig) < SAME_LEVEL);
+    };
 
     // A dark frame in free play: a death, a stage's end, or a pipe or door to another part of
     // the level. Dark for DARK_US (at a stage's end, at once) is a failure; the stall clock
@@ -325,12 +349,31 @@
     // Lit again after a short dark spell: another part of the level. The player is found anew,
     // and nothing is measured across the cut.
     function freeLit(now) {
+        state.cutCheck = {at: now + 0.5e6, since: state.darkSince, scenes: state.scenes.length};
         state.darkSince = null;
         Object.assign(watch, {cells: null, previous: null, picture: null});
         state.player = null;
         state.moveMark = where();
         state.movedUs = now;
         gotOn(now);
+    }
+
+    // The cells of the level the player has been in (free play, and each careful step's
+    // commit point), and how new a place is: how many cells from the nearest of them (up to 8).
+    function visit() {
+        if (!state.player || !state.visited) return;
+        state.visited.add(`${Math.floor((state.pos + state.player.x) / CELL)},${Math.floor((state.posY + state.player.y) / CELL)}`);
+    }
+    function novelty({x, y}) {
+        const cx = Math.floor(x / CELL), cy = Math.floor(y / CELL);
+        for (let d = 0; d < 8; d++) {
+            for (let dx = -d; dx <= d; dx++) {
+                for (let dy = -d; dy <= d; dy++) {
+                    if (Math.max(Math.abs(dx), Math.abs(dy)) === d && state.visited.has(`${cx + dx},${cy + dy}`)) return d;
+                }
+            }
+        }
+        return 8;
     }
 
     // Getting on, for careful play's stall clock: where it last got further from, and when.
@@ -564,6 +607,10 @@
     function keep(checkpoint, us) {
         state.checkpoint = checkpoint;
         if (state.ring.at(-1)?.us === us) return;
+        if (state.here?.screens && !state.here.dark) {
+            state.scenes.push(signature(state.here.screens));
+            if (state.scenes.length > 200) state.scenes.splice(1, 1);
+        }
         state.ring.push({checkpoint, us, pos: state.pos, posY: state.posY, player: state.player});
         if (state.ring.length > RING) state.ring.shift();
     }
@@ -607,6 +654,7 @@
         state.moveMark = where();
         state.movedUs = ui().getGuestTimeUs();
         state.darkSince = null;
+        state.cutCheck = null;
         gotOn(state.movedUs);
         state.seen = [];
         state.carefulUntil = Math.max(state.carefulUntil, failedAt + CAREFUL_PAST);
@@ -653,7 +701,8 @@
             saveMemory();
         }
         Object.assign(state, {level, between: null, checkpoint: null, pos: 0, posY: 0, axis: 'x', down: false,
-            camera: {x: 0, y: 0}, player: null, seen: [], ring: [], deadEnds: {},
+            camera: {x: 0, y: 0}, player: null, seen: [], ring: [], deadEnds: {}, visited: new Set(),
+            scenes: sig ? [sig] : [], cutCheck: null,
             carefulLeft: 0, carefulUntil: -Infinity, ending: false, ownWay: {steps: 0, walked: 0, free: 0}, planned: null,
             moveMark: 0, movedUs: ui().getGuestTimeUs(), darkSince: null, levelsEntered: state.levelsEntered + 1});
         state.moveMark = where();
@@ -794,8 +843,11 @@
                 plans.push({move: heading, press: [DASH, jump], avoid, run: after, hold: 25, then: HORIZON});
             }
             plans.push({move: heading, press: [DASH], avoid, hold: HORIZON});
-            // (Down, or up, held a while: into a pipe, through a door, the way on elsewhere.)
-            plans.push({move: 'down', press: [], avoid, hold: 30, enter: true}, {move: 'up', press: [], avoid, hold: 30, enter: true});
+            // (Down, or up, held a while: into a pipe, through a door, the way on elsewhere; and
+            // the same after a hop the heading's way, onto the pipe first.)
+            const hop = {move: heading, press: [jump]};
+            plans.push({move: 'down', press: [], avoid, hold: 30, enter: true}, {move: 'up', press: [], avoid, hold: 30, enter: true},
+                {move: 'down', press: [], avoid, hold: 40, enter: true, hop}, {move: 'up', press: [], avoid, hold: 40, enter: true, hop});
         }
         return plans;
     }
@@ -821,6 +873,7 @@
         const running = {codes: heldCodes({move: plan.move, press: plan.press.filter(b => b === DASH)})};
         const parts = [];
         if (plan.run) parts.push({...running, frames: plan.run});
+        if (plan.hop) parts.push({codes: heldCodes(plan.hop), frames: 24});
         parts.push({codes: heldCodes(plan), frames: plan.hold});
         if (plan.then) parts.push({...running, frames: plan.then});
         return parts;
@@ -835,7 +888,7 @@
 
     const buttonName = b => (b === JUMP ? 'jump' : b === DASH ? 'dash' : b);
     const planName = plan => (plan ? `${plan.move}${plan.press?.length ? ` + ${plan.press.map(buttonName).join(' + ')}` : ''}` +
-        (plan.run !== undefined ? ` after ${plan.run}` : '') + (plan.hold ? ` held ${plan.hold}` : '') +
+        (plan.run !== undefined ? ` after ${plan.run}` : '') + (plan.hop ? ' after a hop' : '') + (plan.hold ? ` held ${plan.hold}` : '') +
         (plan.then ? ' running on' : '') : 'NitroGen alone');
     const futureName = f => (f.planned ? `as planned (${planName(f.plan)})` : planName(f.plan));
 
@@ -868,7 +921,8 @@
             const metered = state.reader === 'meter' && here.inLevel;
             // Leaving the level at its end is the best a future can do.
             const goal = metered && !last.inLevel && !last.dark && Math.max(mid.meter ?? 0, here.meter ?? 0) > 0.93;
-            const alive = goal || (metered ? last.inLevel : !last.dark);
+            // (Cut back to a scene of this level seen before: it began again, a life lost.)
+            const alive = goal || (metered ? last.inLevel : !last.dark && !(watch.cut && last.screens && seenBefore(last.screens)));
             // (Moving: the camera going on, or the player going on the heading's way while the
             // camera stands, as at a level's end.)
             const moving = goal || (metered ? mid.meter !== null && last.meter !== null && Math.abs(last.meter - mid.meter) > 0.001
@@ -876,9 +930,12 @@
             const progress = goal ? 2 : metered ? last.meter ?? -1 : cameraAlong(watch) * headingSign();
             // (How far the player went the heading's way in the level, against the scene.)
             const walked = watch.first === undefined ? 0 : (watch.lastAt - watch.first) * headingSign();
+            // (Where the player ends up in the level, and how far that is from anywhere it has been.)
+            const endsAt = watch.player && {x: state.pos + watch.total + watch.player.x, y: state.posY + (watch.totalY || 0) + watch.player.y};
             return {plan, planned: Boolean(planned), alive, moving, progress, goal, steps: [...played, ...recording.take()],
                 bands: watch.bands, atCommit: reading(watch.atCommit), commitScroll: watch.atCommitScroll,
-                commitScrollY: watch.atCommitScrollY, playerAtCommit: watch.atCommitPlayer, walked};
+                commitScrollY: watch.atCommitScrollY, playerAtCommit: watch.atCommitPlayer, walked,
+                cut: Boolean(watch.cut), novelty: endsAt ? novelty(endsAt) : 0};
         } finally {
             recording.stop();
             watch = null;
@@ -927,6 +984,11 @@
 
     const rank = f => (f.alive ? 2 : 0) + (f.moving ? 1 : 0);
     const better = (a, b) => rank(b) > rank(a) || (rank(b) === rank(a) && b.progress > a.progress);
+    // Stuck at a place, it explores: what lives on and gets elsewhere (a cut: a pipe, a door),
+    // else what lives on and ends up where the player has not been, the newer the better.
+    const exploreRank = f => (f.alive ? 4 : 0) + (f.alive && f.cut ? 2 : 0);
+    const explores = (a, b) => exploreRank(b) > exploreRank(a) || (exploreRank(b) === exploreRank(a) &&
+        (b.novelty > a.novelty || (b.novelty === a.novelty && b.progress > a.progress)));
 
     // The best future's first COMMIT frames from the saved state, exactly as it played them:
     // the same stops of game time with the same keys. How far the game is then from what that
@@ -1072,14 +1134,18 @@
         }
         // The best, if it still lives and moves DEEPER frames on; else the next best that
         // does; and when none does, the harder plans too.
+        const exploring = state.mode === 'dangers' && stuckHere();
+        const order = exploring ? explores : better;
         const pick = async futures => {
-            const ranked = [...futures].sort((a, b) => (better(a, b) ? 1 : better(b, a) ? -1 : 0));
+            const ranked = [...futures].sort((a, b) => (order(a, b) ? 1 : order(b, a) ? -1 : 0));
             for (const candidate of ranked) {
                 if (candidate.goal) return candidate;
-                if (!candidate.alive || !candidate.moving) break;
+                // (Exploring, a future that lives and gets somewhere new will do.)
+                const somewhere = exploring && candidate.alive && (candidate.cut || candidate.novelty > 0);
+                if (!candidate.alive || !(candidate.moving || somewhere)) break;
                 render(`checking ${planName(candidate.plan)} further…`);
                 candidate.deeper = await further(checkpoint, candidate);
-                if (candidate.deeper.alive && candidate.deeper.moving) return candidate;
+                if (candidate.deeper.alive && (candidate.deeper.moving || somewhere)) return candidate;
             }
             return null;
         };
@@ -1092,7 +1158,7 @@
             }
             tried.push(...harder);
             state.harder++;
-            best = await pick(harder) || tried.reduce((a, b) => (better(a, b) ? b : a));
+            best = await pick(harder) || tried.reduce((a, b) => (order(a, b) ? b : a));
         }
         planner()?.override(undefined);
         state.tried = tried;
@@ -1125,9 +1191,11 @@
             state.ownWay.walked = 0;
             if (++state.ownWay.free >= 3) state.ending = false;
         }
+        const somewhere = exploring && best.alive && (best.cut || best.novelty > 0);
+        if (somewhere) gotOn(checkpointUs);
         const stalled = !state.ending && checkpointUs - state.gotOn.us > CAREFUL_STALL_US;
         const deadEnd = ownWay ? state.ownWay.steps >= (asking ? 4 : 2) && !state.ending
-            : !best.goal && (!(best.alive && best.moving) || stalled);
+            : !best.goal && (!(best.alive && (best.moving || somewhere)) || stalled);
         if (state.mode === 'dangers' && deadEnd && !state.ending && backupsNear(where()) < BACKUPS) {
             await backUp(where(), ownWay ? 'the player stopped and the game plays itself'
                 : stalled ? 'no further for a while' : 'dead end', ownWay ? state.ownWay.steps + 1 : 0);
@@ -1148,6 +1216,7 @@
         state.posY += best.commitScrollY ?? 0;
         // (Where the player is then, as that future followed it.)
         if (best.playerAtCommit) state.player = best.playerAtCommit;
+        visit();
         if ((where() - state.gotOn.at) * headingSign() >= PROGRESS) gotOn(ui().getGuestTimeUs());
         noteCamera(best.commitScroll ?? 0, best.commitScrollY ?? 0, state.commit, ui().getGuestTimeUs());
         state.reading = here;

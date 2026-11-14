@@ -208,12 +208,16 @@ frame at a time and reacts; the optional planner below gives it a direction.
   a place (no future lives on and gets on, even the harder ones, or careful play gets no
   further for 6 s), it backtracks: back 1, 2, 4 then 8 saves, with fresh futures and, there,
   long jumps (running and dashing, jumping after 0-40 frames and running on through the air)
-  and down or up held a while (into a pipe, through a door), up to 5 times before taking the
-  best and playing on. A future counts as getting on when the camera does, or when the player
+  and down or up held a while, after a hop or not (onto a pipe and into it, through a door),
+  up to 5 times before taking the best and playing on. Stuck, it also explores: it prefers
+  what lives on and gets elsewhere (the screen going dark and coming back on a new scene),
+  else what ends up where the player has not been (it keeps the 16-pixel cells of the level
+  the player has been in), the newer the better. A future counts as getting on when the camera does, or when the player
   it follows does while the camera stands (as at a level's end). The camera is measured both
   ways: a level whose camera goes up or down three times as far as sideways (a climb, a
   shaft) is followed that way. A short dark spell is a cut to another part of the level (a
-  pipe, a door), not a failure. When every future shows the same game whatever it pressed, the game plays
+  pipe, a door), not a failure, unless it comes back on a scene the level showed before (its
+  start, a save's): the level began again, a life lost. When every future shows the same game whatever it pressed, the game plays
   itself: a stage's end, or a death. The planner, when one runs, is asked whether the stage
   was just cleared (the fine-tuned one said yes on a "COURSE CLEAR" screen and no on all three
   deaths it was shown; the original says yes to everything); without one, the player walking
@@ -236,9 +240,10 @@ frame at a time and reacts; the optional planner below gives it a direction.
   by itself and went in (the clear held: a new level followed), 24 s of game time in 362 s.
   World 1-2 begins with a tall pipe before a high cliff (the way on is likely down the pipe):
   in about 25 minutes it found no way past it, so it has not yet cleared a second level.
-  Holding down or up when stuck, the careful-play stall, and the cut handling came after
-  that, and are not yet shown to get it past; the levels after it (a tower that climbs, a
-  castle with a boss) have not been tried.
+  With down or up after a hop it chose those there, but a Koopa sits on the pipe and it did
+  not get in; exploring and telling a life lost from a pipe came last and have not had a full
+  run there. The levels after it (a tower that climbs, a castle with a boss) have not been
+  tried.
 - NitroGen is under the [NVIDIA License](web/vendor/nitrogen/LICENSE): non-commercial
   research use only. The light expert learned from NitroGen, so the same terms apply to it;
   its tower is Google's [SigLIP-base/16](https://huggingface.co/google/siglip-base-patch16-224)

@@ -286,7 +286,7 @@ async function campaign(page, state, {levels, seconds, hours}) {
     const wall = () => Math.round((Date.now() - startedAt) / 1000);
     let entered = 0, cleared = 0, learned = 0, between = null, nextShot = 0, ticks = -1, tickAt = Date.now(), stats = null;
     let best = 0, levelStart = {game: 0, wall: 0, failures: 0}, axis = 'x', lastLevel = null, held = 0;
-    const done = [];
+    const done = [], log = {};
     for (;;) {
         await sleep(500);
         stats = await page.evaluate(() => window.AzaharAILookahead.stats());
@@ -314,6 +314,11 @@ async function campaign(page, state, {levels, seconds, hours}) {
             console.log(`level ${entered} cleared (its own judgement; furthest on the bar ${(100 * best).toFixed(0)}%) after ` +
                 `${entry.gameSeconds} s of game time, ${entry.wallSeconds} s of wall time, ${entry.failures} failures gone back from`);
             await saveScreens(page, path.join(dir, `level${entered}_cleared.png`));
+        }
+        // (Going into a pipe or through a door: a choice of down or up.)
+        if (stats.chosen && /^(as planned \()?(down|up)\b/.test(stats.chosen) && stats.steps !== log.enterStep) {
+            log.enterStep = stats.steps;
+            console.log(`  chose ${stats.chosen} (${game} s, at ${stats.where} px)`);
         }
         if (stats.axis !== axis && !stats.between) {
             axis = stats.axis;
