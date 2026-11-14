@@ -481,9 +481,19 @@
             return;
         }
         applyStep(now);
-        // A look-ahead future may hold some keys itself for its first moments (a held jump).
+        // A look-ahead future may hold keys itself for its first moments (a held jump, a run
+        // and then a jump): each of its parts' keys for that part's frames.
         const forced = agent.recording?.force;
-        if (forced && now < forced.until) hold(forced.codes);
+        if (forced) {
+            let end = forced.t0;
+            for (const part of forced.parts) {
+                end += part.frames * FRAME_US;
+                if (now < end) {
+                    hold(part.codes);
+                    break;
+                }
+            }
+        }
         // Lockstep: the game runs to the end of this action's frame and no further, however
         // fast it can run; without actions to play, it waits where it is.
         if (agent.lockstep) {
@@ -577,10 +587,10 @@
     }
 
     // A look-ahead future: NitroGen plays on from here in lockstep, recording its stops and
-    // keys, until stopped; `force` ({codes, frames}): keys held instead for its first frames.
-    function rollout(force = null) {
-        agent.recording = {steps: [], force: force && {codes: force.codes,
-            until: window.AzaharUI.getGuestTimeUs() + force.frames * FRAME_US}};
+    // keys, until stopped; `parts` ([{codes, frames}]): keys held instead, part after part,
+    // for its first frames.
+    function rollout(parts = null) {
+        agent.recording = {steps: [], force: parts && {parts, t0: window.AzaharUI.getGuestTimeUs()}};
         agent.chunk = null;
         agent.thinking = null;
         agent.idle = false;

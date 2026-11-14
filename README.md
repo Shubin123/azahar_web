@@ -195,6 +195,50 @@ frame at a time and reacts; the optional planner below gives it a direction.
   (`--setups search-planner`) it cleared the level in 1 of 2 tries (the other lost a life at
   the stack): at one step every other future got stuck and only its own, run and press A,
   went on.
+- **Look ahead near dangers**, the widget's middle choice: NitroGen plays on its own, at
+  lockstep speed, and the game is saved every 1.5 s. When it fails (the screen stays black for
+  1.5 s, or it gets no further the heading's way for 0.75 s: stuck, or dying), it goes back to
+  a save from before and looks ahead there, and it remembers, per game in this browser, the
+  place (how far the scene had scrolled since the level began, plus where the player was on
+  screen) and the thing that moved beside the player then (its colour signature). Enemies are
+  known in every level; places belong to their level, which it tells apart by how its start
+  looks. From then on it looks ahead before
+  reaching a place it failed at (further before, the more often it failed there) and when a
+  moving thing like a remembered one comes up ahead, and plays on its own elsewhere. Stuck at
+  a place (no future lives on and gets on, even the harder ones, or careful play gets no
+  further for 6 s), it backtracks: back 1, 2, 4 then 8 saves, with fresh futures and, there,
+  long jumps (running and dashing, jumping after 0-40 frames and running on through the air)
+  and down or up held a while (into a pipe, through a door), up to 5 times before taking the
+  best and playing on. A future counts as getting on when the camera does, or when the player
+  it follows does while the camera stands (as at a level's end). The camera is measured both
+  ways: a level whose camera goes up or down three times as far as sideways (a climb, a
+  shaft) is followed that way. A short dark spell is a cut to another part of the level (a
+  pipe, a door), not a failure. When every future shows the same game whatever it pressed, the game plays
+  itself: a stage's end, or a death. The planner, when one runs, is asked whether the stage
+  was just cleared (the fine-tuned one said yes on a "COURSE CLEAR" screen and no on all three
+  deaths it was shown; the original says yes to everything); without one, the player walking
+  on by itself is a stage's end. On World 1-1 from its start with nothing remembered
+  (`--setups learn-planner`, the fine-tuned planner on), it cleared the level in 3 of 3 tries
+  in a row, memory kept from one try to the next. The first failed 5 times in the level (3 of
+  them at a moving thing beside the player: it learned 3 enemies and 7 places) and 6 times in
+  the goal sequence before telling it from a dead end, and cleared it after 41.7 s of game
+  time, 36 times slower than real time; the next two, knowing those, failed only twice each
+  (both at the flag) and cleared it after 37-38 s, 22 times slower. With all that known, most
+  of the level is played carefully (3 s on its own, 36 s looked ahead). NitroGen alone lost a
+  life at the first Goomba (5% of the way) in 3 of 3 tries, and the planner steering it
+  without looking ahead got 8% of the way on average.
+- **From level to level**: a stage judged cleared, the screen going dark ends the level. Between
+  levels (the map, menus) NitroGen plays on with no saves and nothing taken for a failure,
+  the planner working menus; when the screen next goes dark and comes back, the next level
+  begins. `tests/ai_mario_bench.cjs --setups campaign` plays on so through as many levels as
+  it can, and checks each clear: another level must follow (a life lost brings the same one
+  back). From 93% of World 1-1 it took the flag, left the level, walked the map to World 1-2
+  by itself and went in (the clear held: a new level followed), 24 s of game time in 362 s.
+  World 1-2 begins with a tall pipe before a high cliff (the way on is likely down the pipe):
+  in about 25 minutes it found no way past it, so it has not yet cleared a second level.
+  Holding down or up when stuck, the careful-play stall, and the cut handling came after
+  that, and are not yet shown to get it past; the levels after it (a tower that climbs, a
+  castle with a boss) have not been tried.
 - NitroGen is under the [NVIDIA License](web/vendor/nitrogen/LICENSE): non-commercial
   research use only. The light expert learned from NitroGen, so the same terms apply to it;
   its tower is Google's [SigLIP-base/16](https://huggingface.co/google/siglip-base-patch16-224)

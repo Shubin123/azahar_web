@@ -12,12 +12,20 @@
 //        [--attempts 5] [--seconds 60] [--planner qwen3.5-0.8b] [--setups nitrogen,steer,planner]
 //        [--save-frames]   (the top screen every half second of game time, to see what happened)
 //        [--execute 18]    (actions played from each decision before the next)
-// Setups: nitrogen; steer (right, favour B and Y); right (right only); planner; search-planner
+//        [--notes "..."]   (the planner's notes, in place of the level's)
+// Setups: nitrogen; steer (right, favour B and Y); right (right only); planner; learn (look ahead
+// near dangers: NitroGen plays on its own, goes back from failures to look ahead there, and
+// remembers them from one attempt to the next, starting from nothing); learn-planner (the same
+// with --planner steering, and judging whether a stage was cleared); search-planner
 // (search with --planner choosing the heading and a button of its own); search: the
 // widget's Look ahead (azahar_ai_lookahead.js), which every --commit frames saves the game, lets
 // NitroGen play --horizon frames from there under each of a few steering plans, scores those
 // futures by how far the screen scrolled (--reader meter: by the progress bar instead), and
 // replays the best one's keys from the saved state.
+//
+// campaign: Look ahead near dangers from the level's start on through the levels after it,
+// the AI playing the map between them itself (--levels, --hours; --planner judges stage ends
+// and works menus).
 //
 // The browser profile (and so the planner's model cache) is kept in tmp_test/ai_mario_bench.
 const fs = require('node:fs');
@@ -34,6 +42,9 @@ const option = (name, fallback = null) => {
     return index >= 0 ? process.argv[index + 1] : fallback;
 };
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+// The planner's notes (--notes replaces them).
+const NOTES = 'New Super Mario Bros. 2: reach the goal pole at the right end of the level. Run right; ' +
+    'jump (B or A) over gaps, pipes and enemies; hold Y to dash.';
 
 // Where Mario is on the level's progress bar, 0 (start) to 1 (goal), and whether a level is
 // on screen at all, from the planner's view of both screens (400x480, the bottom screen at
@@ -98,43 +109,74 @@ async function saveFrame(page, file) {
 // Setup 'search': the widget's Look ahead (azahar_ai_lookahead.js) plays from the state until
 // Mario leaves the level or `seconds` of game time pass; then the top screen once a second
 // for 8 s (tmp_test/ai_mario_bench/search_end_N) shows how it ended.
+// The screens the look-ahead last read, as a PNG.
+async function saveScreens(page, file) {
+    const shot = await page.evaluate(async () => {
+        const screens = window.AzaharAILookahead.screens();
+        if (!screens) return null;
+        const canvas = new OffscreenCanvas(screens.width, screens.height);
+        canvas.getContext('2d').putImageData(screens, 0, 0);
+        const bytes = new Uint8Array(await (await canvas.convertToBlob({type: 'image/png'})).arrayBuffer());
+        let text = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+        return btoa(text);
+    });
+    if (shot) {
+        fs.mkdirSync(path.dirname(file), {recursive: true});
+        fs.writeFileSync(file, Buffer.from(shot, 'base64'));
+    }
+}
+
 async function searchAttempt(page, state, seconds, options, endDir, saveAt = null) {
     const stepsDir = endDir.replace('search_end_', 'search_steps_');
     fs.rmSync(stepsDir, {recursive: true, force: true});
     await restoreState(page, state);
     await sleep(300);
-    await page.evaluate(options => window.AzaharAILookahead.configure({enabled: true, ...options}), options);
+    await page.evaluate(options => window.AzaharAILookahead.configure({mode: 'always', ...options}), options);
     await page.click('#btn-ai-play');
-    let best = 0, sawLevel = false, steps = -1, end = 'time', stats = null, stepAt = Date.now();
+    let best = 0, sawLevel = false, steps = -1, careful = -1, end = 'time', stats = null, stepAt = Date.now();
     const log = [];
     for (;;) {
         await sleep(250);
         stats = await page.evaluate(() => window.AzaharAILookahead.stats());
         if (stats.error) throw new Error(stats.error);
-        if (stats.steps === steps) {
+        if (stats.ticks === steps) {
             if (Date.now() - stepAt > 300000) throw new Error(`the look-ahead made no step for 5 minutes (${steps} steps)`);
             continue;
         }
-        steps = stats.steps;
+        steps = stats.ticks;
         stepAt = Date.now();
         if (!steps) continue;
-        log.push(`${stats.tried.map(f => `${f.plan} ${!f.alive ? 'dies' : !f.moving ? 'stuck' : 'ok'} ` +
-            `${f.progress.toFixed(0)}${f.further ? ` (further: ${f.further})` : ''}`).join(', ')} -> ${stats.chosen}, level ${stats.meter === null ? '-' : (100 * stats.meter).toFixed(1)}%`);
-        // The screens each step left, to see what happened (tmp_test/ai_mario_bench/search_steps_N).
-        const shot = await page.evaluate(async () => {
-            const screens = window.AzaharAILookahead.screens();
-            if (!screens) return null;
-            const canvas = new OffscreenCanvas(screens.width, screens.height);
-            canvas.getContext('2d').putImageData(screens, 0, 0);
-            const bytes = new Uint8Array(await (await canvas.convertToBlob({type: 'image/png'})).arrayBuffer());
-            let text = '';
-            for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-            return btoa(text);
-        });
-        if (shot) {
-            fs.mkdirSync(stepsDir, {recursive: true});
-            fs.writeFileSync(path.join(stepsDir, `${String(steps).padStart(3, '0')}.png`), Buffer.from(shot, 'base64'));
+        // (Near dangers: a line per careful step, and per failure gone back from.)
+        const freePlay = stats.mode === 'dangers' && stats.steps === careful;
+        careful = stats.steps;
+        if (freePlay && stats.learned.length === (log.learned || 0)) {
+            if (stats.inLevel && stats.meter !== null) best = Math.max(best, stats.meter);
+            if (stats.gameSeconds >= seconds) break;
+            // (A screen a second of free play, to see what it did: free_NNNN.png.)
+            if (stats.gameSeconds >= (log.nextShot || 0)) {
+                log.nextShot = Math.floor(stats.gameSeconds) + 1;
+                await saveScreens(page, path.join(stepsDir, `free_${String(Math.floor(stats.gameSeconds)).padStart(4, '0')}.png`));
+            }
+            if (!stats.inLevel && sawLevel) {
+                end = 'left the level';
+                break;
+            }
+            continue;
         }
+        if (stats.learned.length !== (log.learned || 0)) {
+            log.learned = stats.learned.length;
+            const last = stats.learned.at(-1);
+            console.log(`  failed (${last.kind}) at ${last.pos} px` +
+                `${last.enemy ? ', a moving thing beside the player' : ''}: ` +
+                `${last.back ? `backed up ${last.back} save${last.back === 1 ? '' : 's'}` : 'gone back'} to look ahead; ` +
+                `learned so far ${stats.memory.gates} places, ${stats.memory.enemies} enemies`);
+        }
+        log.push(`${stats.tried.map(f => `${f.plan} ${!f.alive ? 'dies' : !f.moving ? 'stuck' : 'ok'} ` +
+            `${f.progress.toFixed(0)}${f.further ? ` (further: ${f.further})` : ''}`).join(', ')} -> ${stats.chosen}, level ${stats.meter === null ? '-' : (100 * stats.meter).toFixed(1)}%` +
+            (stats.mode === 'dangers' ? ` [careful: ${stats.why}; at ${stats.pos} px]` : ''));
+        // The screens each step left, to see what happened (tmp_test/ai_mario_bench/search_steps_N).
+        await saveScreens(page, path.join(stepsDir, `${String(steps).padStart(3, '0')}.png`));
         console.log(`  step ${steps} (${stats.gameSeconds.toFixed(1)} s): ${log.at(-1)}; replays so far at most ` +
             `${stats.replayError.toFixed(2)} off (${stats.unaligned} unaligned)` +
             (stats.verifyLog.length ? `; last replay: ${JSON.stringify(stats.verifyLog.at(-1))}` : ''));
@@ -176,23 +218,30 @@ async function searchAttempt(page, state, seconds, options, endDir, saveAt = nul
         await saveFrame(page, path.join(endDir, `${i}s.png`));
     }
     // World 1-1 cleared: on the map the next level's node (top screen, about 291,149) has
-    // turned red (it stays dark after a life lost).
+    // turned red (it stays dark after a life lost); read on the end frames saved above.
     if (end === 'left the level') {
-        const red = await page.evaluate(async () => {
-            for (let i = 0; i < 30; i++) {
-                const s = await window.AzaharAIPlayer.nextFrameScreens(true);
-                if (!s || !s.data.some((value, j) => j % 4 !== 3 && value)) continue;
-                let red = 0;
+        let red = 0;
+        for (let i = 4; i <= 8; i++) {
+            const file = path.join(endDir, `${i}s.png`);
+            if (!fs.existsSync(file)) continue;
+            red = Math.max(red, await page.evaluate(async url => {
+                const image = new Image();
+                image.src = url;
+                await image.decode();
+                const canvas = new OffscreenCanvas(image.width, image.height);
+                const context = canvas.getContext('2d');
+                context.drawImage(image, 0, 0);
+                const data = context.getImageData(0, 0, image.width, image.height).data;
+                let count = 0;
                 for (let y = 140; y < 158; y++) {
                     for (let x = 278; x < 304; x++) {
-                        const k = (y * 400 + x) * 4;
-                        if (s.data[k] > 170 && s.data[k + 1] < 90 && s.data[k + 2] < 90) red++;
+                        const k = (y * image.width + x) * 4;
+                        if (data[k] > 170 && data[k + 1] < 90 && data[k + 2] < 90) count++;
                     }
                 }
-                return red;
-            }
-            return 0;
-        });
+                return count;
+            }, `data:image/png;base64,${fs.readFileSync(file).toString('base64')}`));
+        }
         end = red > 40 ? 'cleared' : 'lost a life';
     }
     await page.evaluate(() => window.AzaharAILookahead.configure({enabled: false}));
@@ -202,8 +251,126 @@ async function searchAttempt(page, state, seconds, options, endDir, saveAt = nul
         tally[chosen] = (tally[chosen] || 0) + 1;
     }
     return {setup: 'search', best: Math.min(1, best), end, gameSeconds: +stats.gameSeconds.toFixed(1), steps: stats.steps,
+        rewinds: stats.rewinds, freeSeconds: +stats.freeSeconds.toFixed(1), carefulSeconds: +stats.carefulSeconds.toFixed(1),
+        memory: stats.memory,
         wallSeconds: Math.round(stats.wallSeconds),
         chosen: tally, log, replayError: stats.replayError, unaligned: stats.unaligned, decisions: 0, skipped: 0};
+}
+
+// What the look-ahead waits on: its status line, the planner's, and whether game time moves.
+const stuckAt = page => page.evaluate(async () => {
+    const before = window.AzaharUI.getGuestTimeUs();
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    const planner = window.AzaharAIPlanner.state();
+    return {status: document.querySelector('#ai-lookahead-status')?.textContent,
+        guest: {us: window.AzaharUI.getGuestTimeUs(), moved: window.AzaharUI.getGuestTimeUs() - before},
+        planner: {loaded: planner.loaded, thinking: planner.thinking, error: planner.error, looks: planner.looks},
+        player: window.AzaharAIPlayer.stats()};
+});
+
+// Setup 'campaign': the widget's Look ahead near dangers from the state (a level's start)
+// on through the levels after it, from nothing learned: a stage cleared, it plays between
+// levels itself (NitroGen on the map, the planner working menus) into the next one,
+// remembering each level's places and every enemy. Until --levels levels are cleared, or
+// --seconds of game time or --hours of wall time pass. A line per level begun, cleared, and
+// per failure gone back from; the screens as each level begins and every 5 s of game time
+// in tmp_test/ai_mario_bench/campaign (to see which level, and what it did between).
+async function campaign(page, state, {levels, seconds, hours}) {
+    const dir = path.join(ROOT, 'tmp_test', 'ai_mario_bench', 'campaign');
+    fs.rmSync(dir, {recursive: true, force: true});
+    await restoreState(page, state);
+    await sleep(300);
+    await page.evaluate(() => window.AzaharAILookahead.configure({mode: 'dangers'}));
+    await page.click('#btn-ai-play');
+    const startedAt = Date.now();
+    const wall = () => Math.round((Date.now() - startedAt) / 1000);
+    let entered = 0, cleared = 0, learned = 0, between = null, nextShot = 0, ticks = -1, tickAt = Date.now(), stats = null;
+    let best = 0, levelStart = {game: 0, wall: 0, failures: 0}, axis = 'x', lastLevel = null, held = 0;
+    const done = [];
+    for (;;) {
+        await sleep(500);
+        stats = await page.evaluate(() => window.AzaharAILookahead.stats());
+        if (stats.error) throw new Error(stats.error);
+        if (stats.ticks !== ticks) {
+            ticks = stats.ticks;
+            tickAt = Date.now();
+        } else if (Date.now() - tickAt > 300000) {
+            throw new Error(`the look-ahead made no step for 5 minutes (${ticks} steps): ${JSON.stringify(await stuckAt(page))}`);
+        }
+        const game = stats.gameSeconds.toFixed(1);
+        if (stats.learned.length !== learned) {
+            for (const last of stats.learned.slice(learned)) {
+                console.log(`  failed (${last.kind}) at ${last.pos} px${last.enemy ? ', a moving thing beside the player' : ''}: ` +
+                    `${last.back ? `backed up ${last.back} save${last.back === 1 ? '' : 's'}` : 'gone back'}`);
+            }
+            learned = stats.learned.length;
+        }
+        if (stats.inLevel && stats.meter !== null && !stats.between) best = Math.max(best, stats.meter);
+        if (stats.levelsCleared !== cleared) {
+            cleared = stats.levelsCleared;
+            const entry = {level: entered, known: levelStart.known, bar: +best.toFixed(3), gameSeconds: +(stats.gameSeconds - levelStart.game).toFixed(1),
+                wallSeconds: wall() - levelStart.wall, failures: stats.rewinds - levelStart.failures};
+            done.push(entry);
+            console.log(`level ${entered} cleared (its own judgement; furthest on the bar ${(100 * best).toFixed(0)}%) after ` +
+                `${entry.gameSeconds} s of game time, ${entry.wallSeconds} s of wall time, ${entry.failures} failures gone back from`);
+            await saveScreens(page, path.join(dir, `level${entered}_cleared.png`));
+        }
+        if (stats.axis !== axis && !stats.between) {
+            axis = stats.axis;
+            console.log(`  the level goes ${axis === 'y' ? 'up or down' : 'sideways'} from here (${game} s, at ${stats.where} px)`);
+        }
+        if (stats.between !== between) {
+            between = stats.between;
+            if (between) console.log(`  between levels: ${between} (${game} s)`);
+        }
+        if (stats.levelsEntered !== entered) {
+            // (Whether the last clear holds: a level it has not played just before follows a
+            // clear; the same level again follows a life lost.)
+            if (done.length && entered === done.at(-1).level) {
+                done.at(-1).held = stats.level !== lastLevel;
+                held += done.at(-1).held ? 1 : 0;
+                console.log(`  ${done.at(-1).held ? 'the clear holds: another level follows' : 'that was no clear: the same level again'}`);
+            }
+            lastLevel = stats.level;
+            entered = stats.levelsEntered;
+            best = 0;
+            levelStart = {game: stats.gameSeconds, wall: wall(), failures: stats.rewinds, known: entered > 1 && stats.level < stats.memory.levels - 1};
+            console.log(`level ${entered} begins at ${game} s of game time, ${wall()} s of wall time: ` +
+                `level #${stats.level + 1} of the ${stats.memory.levels} it has seen; it knows ${stats.memory.enemies} enemies, ` +
+                `${stats.memory.gates} places`);
+            await saveScreens(page, path.join(dir, `level${entered}_begins.png`));
+            // (A state to start from here: the look-ahead's first save in the level.)
+            await page.waitForFunction(() => window.AzaharAILookahead.checkpointBytes() || window.AzaharAILookahead.stats().error,
+                {timeout: 600000, polling: 500}).catch(() => {});
+            const bytes = await page.evaluate(() => {
+                const data = window.AzaharAILookahead.checkpointBytes();
+                if (!data) return null;
+                let text = '';
+                for (let i = 0; i < data.length; i += 0x8000) text += String.fromCharCode(...data.subarray(i, i + 0x8000));
+                return btoa(text);
+            });
+            // (Named as the core looks states up: <programId>.<slot>.cst, as the state started from.)
+            if (bytes) {
+                const file = path.join(dir, `level${entered}`, path.basename(state));
+                fs.mkdirSync(path.dirname(file), {recursive: true});
+                fs.writeFileSync(file, Buffer.from(bytes, 'base64'));
+            }
+        }
+        if (stats.gameSeconds >= nextShot) {
+            nextShot = Math.floor(stats.gameSeconds / 5) * 5 + 5;
+            await saveScreens(page, path.join(dir, `t${String(Math.floor(stats.gameSeconds)).padStart(5, '0')}.png`));
+        }
+        if (cleared >= levels || stats.gameSeconds >= seconds || wall() >= hours * 3600) break;
+    }
+    await page.click('#btn-ai-play');
+    await page.waitForFunction(() => !window.AzaharAILookahead.running(), {timeout: 120000});
+    await page.evaluate(() => window.AzaharAILookahead.configure({enabled: false}));
+    console.log(`== campaign: ${cleared} levels cleared by its own judgement (${held} of them held: another level ` +
+        `followed), ${entered} begun, in ${stats.gameSeconds.toFixed(0)} s of game time and ` +
+        `${wall()} s of wall time (${(wall() / Math.max(1, stats.gameSeconds)).toFixed(0)}x slower); ${stats.rewinds} failures ` +
+        `gone back from; it knows ${stats.memory.levels} levels, ${stats.memory.gates} places, ${stats.memory.enemies} enemies`);
+    return {setup: 'campaign', cleared, held, entered, levels: done, gameSeconds: +stats.gameSeconds.toFixed(1), wallSeconds: wall(),
+        rewinds: stats.rewinds, memory: stats.memory};
 }
 
 // One attempt from the state with `setup`: furthest progress, how it ended, game seconds.
@@ -294,7 +461,7 @@ async function main() {
         await page.select('#ai-timing', 'lockstep');
         await page.evaluate(n => window.AzaharAIPlayer.setExecute(n), Number(option('--execute', 18)));
         await page.evaluate(() => window.AzaharAIPlayer.load());
-        if (setups.includes('planner')) {
+        if (setups.includes('planner') || setups.includes('campaign') && option('--planner')) {
             const name = option('--planner');
             await page.evaluate(async name => {
                 const planner = window.AzaharAIPlanner;
@@ -303,29 +470,43 @@ async function main() {
                 document.querySelector('#ai-planner-pause').checked = true;
                 document.querySelector('#ai-planner-pause').dispatchEvent(new Event('change'));
             }, name);
-            await page.evaluate(() => {
+            await page.evaluate(text => {
                 const notes = document.querySelector('#ai-planner-notes');
-                notes.value = 'New Super Mario Bros. 2: reach the goal pole at the right end of the level. Run right; ' +
-                    'jump (B or A) over gaps, pipes and enemies; hold Y to dash.';
+                notes.value = text;
                 notes.dispatchEvent(new Event('input'));
-            });
+            }, option('--notes', NOTES));
         }
         await (await page.$('#rom-file')).uploadFile(path.resolve(rom));
         await page.waitForFunction(() => !document.querySelector('#btn-load').disabled, {timeout: 60000});
         await page.click('#btn-load');
         await page.waitForFunction(() => window.AzaharUI?.isPlaying?.(), {timeout: 180000});
-        for (const setup of setups) {
-            const withPlanner = setup === 'planner' || setup === 'search-planner';
+        if (setups.includes('campaign')) {
+            await page.evaluate(() => window.AzaharAILookahead.forget());
+            if (option('--planner')) await page.evaluate(name => window.AzaharAIPlanner.choose(name), option('--planner'));
+            results.push(await campaign(page, state, {levels: Number(option('--levels', 99)), seconds,
+                hours: Number(option('--hours', 6))}));
+        }
+        for (const setup of setups.filter(name => name !== 'campaign')) {
+            const withPlanner = setup === 'planner' || setup === 'search-planner' || setup === 'learn-planner';
+            const learning = setup === 'learn' || setup === 'learn-planner';
+            // Learning near dangers: from nothing at the first attempt, and on from there.
+            if (learning) await page.evaluate(() => window.AzaharAILookahead.forget());
             if (withPlanner) await page.evaluate(name => window.AzaharAIPlanner.choose(name), option('--planner'));
             for (let i = 0; i < attempts; i++) {
                 const framesDir = process.argv.includes('--save-frames') ? path.join(out, 'frames', `${setup}_${i + 1}`) : null;
                 if (framesDir) fs.mkdirSync(framesDir, {recursive: true});
-                const result = setup.startsWith('search')
-                    ? {...await searchAttempt(page, state, seconds, {horizon: Number(option('--horizon', 90)),
+                const result = setup.startsWith('search') || learning
+                    ? {...await searchAttempt(page, state, seconds, {mode: learning ? 'dangers' : 'always',
+                        horizon: Number(option('--horizon', 90)),
                         commit: Number(option('--commit', 45)), reader: option('--reader', 'scroll'),
                         verify: process.argv.includes('--verify')},
                     path.join(out, `search_end_${i + 1}`), option('--save-state-at') && Number(option('--save-state-at'))), setup}
                     : await attempt(page, state, setup, seconds, framesDir);
+                if (result.memory && learning) {
+                    console.log(`  free play ${result.freeSeconds} s, careful ${result.carefulSeconds} s of game time; ` +
+                        `${result.rewinds} failures gone back from; it knows ${result.memory.gates} places and ` +
+                        `${result.memory.enemies} enemies`);
+                }
                 if (result.chosen) {
                     console.log(`  search steps ${result.steps} in ${result.wallSeconds} s of wall time ` +
                         `(${(result.wallSeconds / Math.max(0.1, result.gameSeconds)).toFixed(0)}x slower than real time), ` +

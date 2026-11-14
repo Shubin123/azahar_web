@@ -307,6 +307,20 @@
         });
     }
 
+    // A yes-or-no question about both screens (ImageData, 400x480): true, false, or null when
+    // no planner runs or the answer is neither.
+    async function askYesNo(screens, question) {
+        if (!state.loaded) return null;
+        const data = screens.data.slice();
+        try {
+            const result = await request('ask', {screens: {data, width: screens.width, height: screens.height}, question,
+                maxTokens: 4}, [data.buffer]);
+            return /\byes\b/i.test(result.text) ? true : /\bno\b/i.test(result.text) ? false : null;
+        } catch (_) {
+            return null;
+        }
+    }
+
     // Menu mode: NitroGen waits until the next look; the planner presses or touches once.
     function operate(plan, now) {
         state.drivingUntil = now + MENU_EVERY_US;
@@ -515,7 +529,7 @@
     }
 
     window.AzaharAIPlanner = {
-        afterFrame, look, operate, draws, guidance, pick, avoids, driving, reset, choose, tap, steer, override, holds,
+        afterFrame, look, askYesNo, operate, draws, guidance, pick, avoids, driving, reset, choose, tap, steer, override, holds,
         models, info, download, cancelDownload, remove, refreshStored,
         state: () => ({...state, plan: state.plan && {...state.plan}}),
         STEER_DRAWS,

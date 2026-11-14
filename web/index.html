@@ -1352,12 +1352,20 @@
 
                 <div class="ai-section">
                     <div class="ai-section-title">System 2 · Planner</div>
-                    <label class="mode-help audio-toggle">
-                        <input type="checkbox" id="ai-lookahead">
-                        Look ahead: pause the game to try a few futures with NitroGen (run on, jump, dash and jump, unsteered)
-                        and play the best one (about 20× slower than real time)
-                    </label>
+                    <select id="ai-lookahead" class="renderer-select" aria-label="Look ahead">
+                        <option value="off">Look ahead: off — NitroGen plays straight on</option>
+                        <option value="dangers">Look ahead near dangers — learns from its failures</option>
+                        <option value="always">Look ahead always — about 20× slower than real time</option>
+                    </select>
+                    <div class="mode-help">
+                        Looking ahead pauses the game to try a few futures with NitroGen (run on, jump, dash and jump,
+                        unsteered) and plays the best one. Near dangers, NitroGen plays on its own, saving the game now and
+                        then; when it fails it goes back to a save from before and looks ahead there, and it remembers the
+                        place and the moving thing beside it, so it takes care there, and near things that look like it, the
+                        next time.
+                    </div>
                     <div id="ai-lookahead-status" class="mode-help" aria-live="polite"></div>
+                    <button type="button" class="btn btn-secondary" id="btn-ai-forget" hidden>Forget what it learned in this game</button>
                     <select id="ai-planner-model" class="renderer-select" aria-label="Planner model">
                         <option value="off">Off — NitroGen plays on its own</option>
                     </select>

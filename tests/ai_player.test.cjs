@@ -276,11 +276,7 @@ async function tapEffect(page, state, point) {
 // replays the best one), then taking back control.
 async function lookAhead(page, state) {
     if (state) await restoreState(page, state);
-    const toggle = on => page.evaluate(on => {
-        const box = document.querySelector('#ai-lookahead');
-        box.checked = on;
-        box.dispatchEvent(new Event('change'));
-    }, on);
+    const toggle = on => page.select('#ai-lookahead', on ? 'always' : 'off');
     await toggle(true);
     await page.click('#btn-ai-play');
     await page.waitForFunction(() => window.AzaharAILookahead.stats().steps >= 2 || window.AzaharAILookahead.stats().error,
@@ -293,7 +289,20 @@ async function lookAhead(page, state) {
     await sleep(1000);
     const after = await page.evaluate(before => ({guestMoved: window.AzaharUI.getGuestTimeUs() > before,
         playing: window.AzaharAIPlayer.isPlaying(), pressed: window.AzaharInput.getPressedCodes()}), before);
-    return {stats, after};
+    // Near dangers: NitroGen plays on its own (from saves), for 4 s of game time.
+    if (state) await restoreState(page, state);
+    await page.evaluate(() => window.AzaharAILookahead.forget());
+    await page.select('#ai-lookahead', 'dangers');
+    await page.click('#btn-ai-play');
+    await page.waitForFunction(() => window.AzaharAILookahead.stats().gameSeconds >= 4 || window.AzaharAILookahead.stats().error,
+        {timeout: 600000, polling: 500});
+    const dangers = await page.evaluate(() => window.AzaharAILookahead.stats());
+    await page.click('#btn-ai-play');
+    await page.waitForFunction(() => !window.AzaharAILookahead.running(), {timeout: 120000});
+    await page.select('#ai-lookahead', 'off');
+    const afterDangers = await page.evaluate(() => ({playing: window.AzaharAIPlayer.isPlaying(),
+        pressed: window.AzaharInput.getPressedCodes()}));
+    return {stats, after, dangers, afterDangers};
 }
 
 async function playthrough(page, state) {
@@ -346,6 +355,11 @@ async function playthrough(page, state) {
         `${ahead.stats.error || ''} replay ${ahead.stats.replayError.toFixed(3)} apart`);
     check('taking back control from the look-ahead lets the game run on with no keys held',
         !ahead.after.playing && ahead.after.guestMoved && ahead.after.pressed.length === 0, JSON.stringify(ahead.after));
+    console.log(`  near dangers: ${ahead.dangers.freeSeconds.toFixed(1)} s of free play, ${ahead.dangers.carefulSeconds.toFixed(1)} s ` +
+        `careful, ${ahead.dangers.rewinds} failures gone back from`);
+    check('looking ahead near dangers, NitroGen plays on its own between them, and stopping releases its keys',
+        !ahead.dangers.error && ahead.dangers.freeSeconds > 0 && !ahead.afterDangers.playing &&
+        ahead.afterDangers.pressed.length === 0, JSON.stringify({error: ahead.dangers.error, ...ahead.afterDangers}));
     if (!flag('--planner-checks') || !option('--tap')) return;
     const point = option('--tap').split(',').map(Number);
     const touched = await tapEffect(page, state, point);
